@@ -71,6 +71,30 @@ export class BgosApi {
     return r.data;
   }
 
+  /**
+   * Fetch the served capability canon for this channel (capability bootstrap).
+   * The backend owns the machine-readable canon and serves a per-channel
+   * payload; the daemon injects the returned `text` into the Codex agent's
+   * AGENTS.md at connect, falling back to the bundled copy when this is
+   * unreachable. GET is pairing-token authed like every other method here.
+   *
+   * `text` is header + shared core + the codex channel delta, ready to inject.
+   * Any non-2xx (including a 404 from an older backend that predates the
+   * endpoint) throws, and the caller keeps the bundled fallback.
+   */
+  async getCapabilities(channel = "codex"): Promise<{
+    channel: string;
+    version: string;
+    text: string;
+    core: string;
+    channelSyntax: string;
+  }> {
+    const r = await this.http.get("integrations/capabilities", {
+      params: { channel },
+    });
+    return r.data;
+  }
+
   /** Pair exchange (Public; does NOT need X-BGOS-Pairing). */
   static async pairExchange(
     baseUrl: string,

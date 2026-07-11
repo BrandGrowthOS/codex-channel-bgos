@@ -21,6 +21,15 @@ export type { InboundFileForCodex } from "./inbound-input.js";
 export { RunAccumulator, toolCardFromItem } from "./event-mapper.js";
 export type { ToolCard } from "./event-mapper.js";
 export { BGOS_AGENT_HINTS } from "./agent-hints.js";
+export {
+  BUNDLED_CAPABILITIES,
+  hasCanonMarkers,
+  pickCapabilitiesText,
+} from "./capabilities.js";
+export type {
+  ServedCapabilities,
+  PickedCapabilities,
+} from "./capabilities.js";
 export { pairBgos } from "./pair-cli.js";
 export { loadConfig } from "./load-config.js";
 export { getPackageVersion } from "./version.js";

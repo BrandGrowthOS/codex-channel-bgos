@@ -38,6 +38,7 @@ import {
   type ReplyHandle,
 } from "./inbound-handler.js";
 import { pendingUnknownStats } from "./pending-unknown-store.js";
+import { pickCapabilitiesText } from "./capabilities.js";
 import { CodexHost } from "./codex-host.js";
 import { buildCodexInput, type InboundFileForCodex } from "./inbound-input.js";
 import { parseReply } from "./reply-markers.js";
@@ -92,6 +93,7 @@ export class CodexAdapter {
   private readonly onFatal?: (info: FatalInfo) => void;
 
   private identityReady = false;
+  private capabilitiesLoaded = false;
   private identityRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private pollStarted = false;
   private lastScopeRefreshAt = 0;
@@ -227,6 +229,10 @@ export class CodexAdapter {
     await this.ws.connect();
     this.heartbeat.start();
 
+    // Fetch the served capability canon once at connect and inject it into the
+    // agent's AGENTS.md (best-effort; falls back to the bundled copy).
+    void this.loadServedCapabilities();
+
     const ok = await this.refreshIdentity();
     if (ok) {
       this.identityReady = true;
@@ -262,6 +268,44 @@ export class CodexAdapter {
       await this.commandsSync.flushAll();
     } catch {
       /* best-effort on shutdown */
+    }
+  }
+
+  // -------------------------------------------------------------------
+  // Capability bootstrap (fetch-on-connect)
+  // -------------------------------------------------------------------
+
+  /**
+   * Fetch the served capability canon once and inject it into the Codex agent's
+   * AGENTS.md, replacing the bundled fallback the host wrote at construction.
+   * Never throws: any failure (network, 401, 404 on an old backend, malformed
+   * body) leaves the bundled copy in place so the daemon is never blocked on
+   * this. Runs once per process (start() is guarded), i.e. once at connect.
+   */
+  private async loadServedCapabilities(): Promise<void> {
+    if (this.capabilitiesLoaded) return;
+    this.capabilitiesLoaded = true;
+    try {
+      const served = await this.api.getCapabilities("codex");
+      const picked = pickCapabilitiesText(served);
+      if (picked.source === "backend") {
+        this.host.applyAgentHints(picked.text);
+        // eslint-disable-next-line no-console
+        console.log(
+          `${LOG} capability canon applied version=${served.version} chars=${picked.text.length} source=backend`,
+        );
+      } else {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `${LOG} served capability canon malformed; keeping bundled fallback`,
+        );
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `${LOG} capability canon fetch failed; keeping bundled fallback:`,
+        err instanceof Error ? err.message : String(err),
+      );
     }
   }
 

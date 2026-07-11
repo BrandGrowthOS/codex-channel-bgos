@@ -110,6 +110,21 @@ export class CodexHost {
     return opts;
   }
 
+  /**
+   * Overwrite AGENTS.md with a resolved capability guide (the served canon
+   * fetched at connect). The constructor already wrote the bundled
+   * BGOS_AGENT_HINTS as the offline fallback, so a failed fetch simply leaves
+   * that in place; the adapter calls this only after a valid fetch. Non-fatal:
+   * a write error leaves the previous AGENTS.md untouched.
+   */
+  applyAgentHints(text: string): void {
+    try {
+      writeFileSync(join(this.workdir, "AGENTS.md"), text);
+    } catch {
+      /* non-fatal: hints are a nicety, chat still works without them */
+    }
+  }
+
   /** Drop a chat's thread binding so the next message starts fresh (/new). */
   resetChat(chatId: string | number): void {
     resetChat(this.threadsFile, this.map, chatId);
