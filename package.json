@@ -1,6 +1,6 @@
 {
   "name": "codex-channel-bgos",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "BGOS channel adapter for OpenAI Codex: pair, WS + REST client, Codex SDK host, outbound modalities, one-paste connect",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
