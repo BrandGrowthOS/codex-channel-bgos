@@ -41,6 +41,72 @@ export class AttachmentSizeError extends Error {
 }
 
 /**
+ * Parse a single IPv4 numeral component per the same rules a numeric-address
+ * evasion relies on: a 0x/0X prefix is hexadecimal, a bare leading zero (with
+ * more digits after it) is octal, anything else is decimal. Returns null when
+ * the token is not a valid numeral in its implied radix. Pure.
+ */
+function parseIpv4Component(part: string): number | null {
+  if (part === "") return null;
+  let radix = 10;
+  let digits = part;
+  if (digits.length > 1 && digits[0] === "0" && (digits[1] === "x" || digits[1] === "X")) {
+    radix = 16;
+    digits = digits.slice(2);
+  } else if (digits.length > 1 && digits[0] === "0") {
+    radix = 8;
+    digits = digits.slice(1);
+  }
+  if (digits === "") return 0;
+  const pattern = radix === 16 ? /^[0-9a-fA-F]+$/ : radix === 8 ? /^[0-7]+$/ : /^[0-9]+$/;
+  if (!pattern.test(digits)) return null;
+  const value = parseInt(digits, radix);
+  return Number.isSafeInteger(value) ? value : null;
+}
+
+/**
+ * Canonicalize a numeral-encoded IPv4 host (a bare decimal/hex/octal integer,
+ * or a dotted form with 1 to 4 parts, e.g. "2130706433", "0x7f000001",
+ * "0177.0.0.1", "127.1") into dotted-quad notation, per the same numeral
+ * rules a raw socket connect (or a permissive DNS/HTTP client) would apply.
+ * Returns:
+ *   - the canonical "a.b.c.d" string when the host is a valid numeral form;
+ *   - null when the host is not numeral shaped at all (an ordinary name);
+ *   - "ambiguous" when the host LOOKS numeral shaped but fails to parse
+ *     cleanly. Callers must fail closed (treat "ambiguous" as unsafe).
+ * Pure.
+ */
+export function canonicalizeNumericIPv4(host: string): string | null | "ambiguous" {
+  // Only characters a numeral IPv4 form can use; anything else (a real DNS
+  // label with letters outside a-f) is an ordinary hostname, not a candidate.
+  if (!/^[0-9a-fA-FxX.]+$/.test(host)) return null;
+  if (!/\d/.test(host)) return null; // no digit at all -> not numeral shaped
+  const parts = host.split(".");
+  if (parts.length === 0 || parts.length > 4) return null;
+  if (parts.some((p) => p === "")) return "ambiguous";
+  const numbers: number[] = [];
+  for (const part of parts) {
+    const n = parseIpv4Component(part);
+    if (n === null) return "ambiguous";
+    numbers.push(n);
+  }
+  // All but the last component must fit a single octet; the last absorbs
+  // the remaining bits (so "127.1" folds to 127.0.0.1).
+  for (let i = 0; i < numbers.length - 1; i++) {
+    if (numbers[i] > 255) return "ambiguous";
+  }
+  const last = numbers[numbers.length - 1];
+  const maxLast = 256 ** (5 - numbers.length) - 1;
+  if (last > maxLast || last < 0) return "ambiguous";
+  let value = last;
+  for (let i = 0; i < numbers.length - 1; i++) {
+    value += numbers[i] * 256 ** (3 - i);
+  }
+  const bytes = [(value >>> 24) & 0xff, (value >>> 16) & 0xff, (value >>> 8) & 0xff, value & 0xff];
+  return bytes.join(".");
+}
+
+/**
  * True when an IPv4/IPv6 literal is loopback, link-local, private (RFC1918),
  * carrier-grade NAT, unique-local, unspecified, or a known cloud-metadata
  * address. Malformed input is treated as unsafe (fail closed). Pure.
@@ -50,7 +116,15 @@ export function isPrivateOrReservedIp(ip: string): boolean {
   if (!addr) return true;
   // IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1) collapses to its v4 tail.
   const v4 = addr.startsWith("::ffff:") ? addr.slice("::ffff:".length) : addr;
-  const m = v4.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  // A numeral-encoded IPv4 host (decimal integer, 0x-hex, octal, or a short
+  // dotted form like "127.1") must be canonicalized before classification;
+  // otherwise "2130706433" (127.0.0.1) or "0x7f000001" slips past the plain
+  // dotted-quad regex below untouched. A host that looks numeral shaped but
+  // fails to parse cleanly is unsafe (fail closed).
+  const canon = canonicalizeNumericIPv4(v4);
+  if (canon === "ambiguous") return true;
+  const dotted = canon ?? v4;
+  const m = dotted.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (m) {
     const o = m.slice(1, 5).map(Number);
     if (o.some((x) => x > 255)) return true; // malformed octet -> unsafe
@@ -87,8 +161,13 @@ export function isBlockedHostname(host: string): boolean {
   if (h === "localhost" || h.endsWith(".localhost")) return true;
   if (h === "ip6-localhost" || h === "ip6-loopback") return true;
   if (h.endsWith(".local")) return true; // mDNS
-  // IP literal? (dotted-quad or contains a colon = IPv6)
-  if (/^[0-9.]+$/.test(h) || h.includes(":")) return isPrivateOrReservedIp(h);
+  // IP literal? Dotted-quad, IPv6 (contains a colon), or a numeral-encoded
+  // form (decimal integer, 0x-hex, octal, short dotted like "127.1") that
+  // canonicalizes to an IPv4 address, or an ambiguous numeral that fails to
+  // canonicalize cleanly (fail closed rather than falling through as a name).
+  if (/^[0-9.]+$/.test(h) || h.includes(":") || canonicalizeNumericIPv4(h) !== null) {
+    return isPrivateOrReservedIp(h);
+  }
   return false;
 }
 
@@ -129,7 +208,8 @@ export async function assertSafeDownloadUrl(
     );
   }
   const bare = host.replace(/^\[|\]$/g, "");
-  const isIpLiteral = /^[0-9.]+$/.test(bare) || bare.includes(":");
+  const isIpLiteral =
+    /^[0-9.]+$/.test(bare) || bare.includes(":") || canonicalizeNumericIPv4(bare) !== null;
   if (!isIpLiteral) {
     let addrs: Array<{ address: string }>;
     try {

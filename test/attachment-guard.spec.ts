@@ -49,6 +49,24 @@ describe("isPrivateOrReservedIp", () => {
     expect(isPrivateOrReservedIp("999.1.1.1")).toBe(true);
     expect(isPrivateOrReservedIp("")).toBe(true);
   });
+
+  it("canonicalizes numeral-encoded loopback before classifying (the confirmed bypass)", () => {
+    for (const numeral of [
+      "2130706433", // decimal for 127.0.0.1
+      "0x7f000001", // hex for 127.0.0.1
+      "0X7F000001", // hex, uppercase prefix and digits
+      "0177.0.0.1", // octal first octet for 127.0.0.1
+      "017700000001", // full-octal single integer for 127.0.0.1
+      "127.1", // short dotted form for 127.0.0.1
+      "127.0.1", // short dotted form for 127.0.0.1
+    ]) {
+      expect(isPrivateOrReservedIp(numeral), numeral).toBe(true);
+    }
+  });
+
+  it("still allows a numeral-encoded public address (does not over-block)", () => {
+    expect(isPrivateOrReservedIp("134744072")).toBe(false); // decimal for 8.8.8.8
+  });
 });
 
 describe("isBlockedHostname", () => {
@@ -60,6 +78,17 @@ describe("isBlockedHostname", () => {
   it("allows public hostnames and public IP literals", () => {
     for (const h of ["s3.amazonaws.com", "api.brandgrowthos.ai", "8.8.8.8"]) {
       expect(isBlockedHostname(h), h).toBe(false);
+    }
+  });
+
+  it("blocks numeral-encoded loopback hosts (decimal, hex, octal, short form)", () => {
+    for (const h of [
+      "2130706433",
+      "0x7f000001",
+      "0177.0.0.1",
+      "127.1",
+    ]) {
+      expect(isBlockedHostname(h), h).toBe(true);
     }
   });
 });
@@ -103,6 +132,25 @@ describe("assertSafeDownloadUrl", () => {
       throw new Error("resolver must not be called for an IP literal");
     });
     expect(u.hostname).toBe("8.8.8.8");
+  });
+
+  it("rejects numeral-encoded loopback hosts (decimal, hex, octal, short form bypass)", async () => {
+    for (const url of [
+      "http://2130706433/", // decimal for 127.0.0.1
+      "http://0x7f000001/", // hex for 127.0.0.1
+      "http://0177.0.0.1/", // octal for 127.0.0.1
+      "http://127.1/", // short dotted form for 127.0.0.1
+    ]) {
+      await expect(assertSafeDownloadUrl(url, publicResolver), url).rejects.toBeInstanceOf(
+        AttachmentUrlError,
+      );
+    }
+  });
+
+  it("still allows a legitimate public https URL alongside the numeral-host hardening", async () => {
+    const u = await assertSafeDownloadUrl("https://my-other-bucket.s3.amazonaws.com/key", publicResolver);
+    expect(u.protocol).toBe("https:");
+    expect(u.hostname).toBe("my-other-bucket.s3.amazonaws.com");
   });
 });
 
