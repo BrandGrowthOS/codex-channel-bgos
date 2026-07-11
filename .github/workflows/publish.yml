@@ -1,0 +1,61 @@
+name: Publish to npm
+
+on:
+  push:
+    branches: [main]
+    paths: ["package.json"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: "https://registry.npmjs.org"
+          cache: "npm"
+
+      - name: Detect version change
+        id: ver
+        run: |
+          CURRENT=$(node -p "require('./package.json').version")
+          PREV=$(git show HEAD~1:package.json 2>/dev/null | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version" 2>/dev/null || echo "none")
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          if [ "$CURRENT" != "$PREV" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install
+        if: steps.ver.outputs.publish == 'true'
+        run: npm ci
+
+      - name: Build
+        if: steps.ver.outputs.publish == 'true'
+        run: npm run build
+
+      - name: Test
+        if: steps.ver.outputs.publish == 'true'
+        run: npm test
+
+      - name: Publish
+        if: steps.ver.outputs.publish == 'true'
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Tag release
+        if: steps.ver.outputs.publish == 'true' && github.event_name == 'push'
+        run: |
+          VERSION="${{ steps.ver.outputs.current }}"
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
