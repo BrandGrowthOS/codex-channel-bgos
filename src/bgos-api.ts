@@ -89,8 +89,15 @@ export class BgosApi {
     core: string;
     channelSyntax: string;
   }> {
+    // SECURITY: cap the response size at the transport layer. The canon is a
+    // few KB and is written to AGENTS.md for a shell-capable agent, so a
+    // compromised or MITM'd backend must not be able to stream a giant body
+    // (disk/memory DoS). axios rejects past maxContentLength and the caller
+    // keeps the bundled fallback.
     const r = await this.http.get("integrations/capabilities", {
       params: { channel },
+      maxContentLength: 1024 * 1024,
+      maxBodyLength: 1024 * 1024,
     });
     return r.data;
   }

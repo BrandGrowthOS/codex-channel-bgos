@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { BgosApi } from "../src/bgos-api.js";
 import {
   BUNDLED_CAPABILITIES,
+  MAX_CANON_BYTES,
   hasCanonMarkers,
   pickCapabilitiesText,
   type ServedCapabilities,
@@ -58,6 +59,14 @@ describe("pickCapabilitiesText", () => {
     expect(pickCapabilitiesText(served("garbage without markers")).source).toBe(
       "bundled",
     );
+  });
+
+  it("falls back to bundled when the served canon exceeds the size cap (DoS/injection guard)", () => {
+    const marker = "# BGOS Channel Agent Capabilities\n";
+    const oversized = marker + "x".repeat(MAX_CANON_BYTES + 1);
+    expect(pickCapabilitiesText(served(oversized)).source).toBe("bundled");
+    const atCap = marker + "y".repeat(MAX_CANON_BYTES - marker.length);
+    expect(pickCapabilitiesText(served(atCap)).source).toBe("backend");
   });
 
   it("never throws and always returns a non-empty text", () => {
