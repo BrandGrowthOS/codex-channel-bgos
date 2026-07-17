@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 
 import type { BgosApi } from "./bgos-api.js";
 import { loadLastId, saveLastId } from "./last-id-store.js";
+import { normalizeSkillsRpc, type SkillsRpcFrame } from "./skills-handler.js";
 import { normalizeVoiceRpc, type VoiceRpcFrame } from "./voice-rpc.js";
 import {
   PairingRevokedError,
@@ -27,6 +28,7 @@ type EventMap = {
   pairing_revoked: [PairingRevokedPayload];
   callback_result: [CallbackResultPayload];
   voice_rpc: [VoiceRpcFrame];
+  skills_rpc: [SkillsRpcFrame];
   error: [Error];
   /** Socket (re)connected / disconnected, drives heartbeat wsConnected. */
   connect: [];
@@ -178,6 +180,10 @@ export class BgosWs {
     socket.on("voice_rpc", (p: unknown) => {
       const frame = normalizeVoiceRpc(p);
       if (frame) this.emitter.emit("voice_rpc", frame);
+    });
+    socket.on("skills_rpc", (p: unknown) => {
+      const frame = normalizeSkillsRpc(p);
+      if (frame) this.emitter.emit("skills_rpc", frame);
     });
 
     socket.on("connect_error", (err: Error) => {

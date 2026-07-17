@@ -376,4 +376,41 @@ export class BgosApi {
     );
     return r.data;
   }
+
+  /** ACK a skills_rpc frame. */
+  async skillsRpcAck(rpcId: string): Promise<unknown> {
+    const r = await this.http.post(
+      `integrations/skills-rpc/${encodeURIComponent(rpcId)}/ack`,
+      {},
+    );
+    return r.data;
+  }
+
+  /** Report progress for a skills_rpc install operation. */
+  async skillsRpcProgress(
+    rpcId: string,
+    body: { stage: string; detail?: string },
+  ): Promise<unknown> {
+    const r = await this.http.post(
+      `integrations/skills-rpc/${encodeURIComponent(rpcId)}/progress`,
+      body,
+    );
+    return r.data;
+  }
+
+  /** Settle a skills_rpc operation. */
+  async skillsRpcResult(
+    rpcId: string,
+    body: {
+      ok: boolean;
+      payload?: Record<string, unknown>;
+      error?: { code: string; message: string };
+    },
+  ): Promise<unknown> {
+    const r = await this.http.post(
+      `integrations/skills-rpc/${encodeURIComponent(rpcId)}/result`,
+      body,
+    );
+    return r.data;
+  }
 }

@@ -42,6 +42,7 @@ import { pickCapabilitiesText } from "./capabilities.js";
 import { CodexHost } from "./codex-host.js";
 import { buildCodexInput, type InboundFileForCodex } from "./inbound-input.js";
 import { parseReply } from "./reply-markers.js";
+import { createSkillsHandler } from "./skills-handler.js";
 import type { AuthResolutionOk } from "./auth-mode.js";
 import type { Input } from "@openai/codex-sdk";
 import {
@@ -78,6 +79,7 @@ export class CodexAdapter {
 
   private readonly cfg: PluginConfig;
   private readonly ws: BgosWs;
+  private readonly skillsHandler: ReturnType<typeof createSkillsHandler>;
   private readonly heartbeat: HeartbeatController;
   private readonly host: CodexHost;
   private readonly assistantToRoute = new Map<number, string>();
@@ -115,6 +117,7 @@ export class CodexAdapter {
     this.cfg = cfg;
     this.currentToken = cfg.pairingToken;
     this.api = new BgosApi(cfg);
+    this.skillsHandler = createSkillsHandler({ api: this.api });
     this.ws = new BgosWs(cfg, this.api);
     this.outbound = new BgosOutbound(this.api);
     this.commandsSync = new CommandsSync(this.api);
@@ -176,6 +179,9 @@ export class CodexAdapter {
 
     this.ws.on("inbound_message", (msg) => {
       void inboundHandler(msg);
+    });
+    this.ws.on("skills_rpc", (frame) => {
+      void this.skillsHandler(frame);
     });
     this.ws.on("inbound_click", (click) => this.handleInboundClick(click));
     this.ws.on("assistant_bound", (p: AssistantBoundPayload) => {
