@@ -14,6 +14,8 @@ import {
 import type { VoiceRpcResultBody } from "./voice-rpc.js";
 import type { HeartbeatDto } from "./heartbeat.js";
 
+const SKILLS_RPC_POST_TIMEOUT_MS = 3_000;
+
 /**
  * Thin typed wrapper around the BGOS integration endpoints. All methods
  * attach the X-BGOS-Pairing header from cfg.pairingToken.
@@ -382,6 +384,7 @@ export class BgosApi {
     const r = await this.http.post(
       `integrations/skills-rpc/${encodeURIComponent(rpcId)}/ack`,
       {},
+      { timeout: SKILLS_RPC_POST_TIMEOUT_MS },
     );
     return r.data;
   }
@@ -394,6 +397,7 @@ export class BgosApi {
     const r = await this.http.post(
       `integrations/skills-rpc/${encodeURIComponent(rpcId)}/progress`,
       body,
+      { timeout: SKILLS_RPC_POST_TIMEOUT_MS },
     );
     return r.data;
   }
@@ -410,6 +414,7 @@ export class BgosApi {
     const r = await this.http.post(
       `integrations/skills-rpc/${encodeURIComponent(rpcId)}/result`,
       body,
+      { timeout: SKILLS_RPC_POST_TIMEOUT_MS },
     );
     return r.data;
   }

@@ -3,8 +3,10 @@ import {
   type ExecFileException,
 } from "node:child_process";
 import { statSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type { BgosApi } from "./bgos-api.js";
 
@@ -14,6 +16,15 @@ const INSTALL_TIMEOUT_MS = 120_000;
 const PAGE_SIZE = 30;
 const SEEN_RPC_LIMIT = 256;
 const INSTALL_NOTE = "Installed for every Codex session on this computer";
+const RESULT_RETRY_OFFSETS_MS = [0, 2_000, 5_000, 10_000] as const;
+const RESULT_REQUEST_TIMEOUT_MS = 3_000;
+const RESULT_DEADLINE_MS_BY_OP: Record<string, number> = {
+  list_installed: 20_000,
+  catalog: 20_000,
+  remove: 30_000,
+  install: 300_000,
+};
+const DEFAULT_RESULT_DEADLINE_MS = 20_000;
 
 const TARGET_BY_RUNTIME: Record<string, string> = {
   "android:arm64": "aarch64-unknown-linux-musl",
@@ -34,8 +45,6 @@ const PACKAGE_BY_TARGET: Record<string, string> = {
   "x86_64-pc-windows-msvc": "@openai/codex-win32-x64",
   "x86_64-unknown-linux-musl": "@openai/codex-linux-x64",
 };
-
-const moduleRequire = createRequire(import.meta.url);
 
 export interface SkillsRpcFrame {
   rpcId: string;
@@ -63,7 +72,12 @@ interface SkillsHandlerDeps {
   execFileImpl?: typeof execFile;
   codexBin?: string;
   log?: (message: string) => void;
+  nowImpl?: () => number;
+  readFileImpl?: ReadFileImpl;
+  sleepImpl?: (delayMs: number) => Promise<void>;
 }
+
+type ReadFileImpl = (path: string, encoding: "utf8") => Promise<string>;
 
 interface CommandOutput {
   stdout: string;
@@ -77,7 +91,16 @@ interface PluginEntry extends Record<string, unknown> {
   version?: unknown;
   installed?: unknown;
   interface?: unknown;
+  source?: unknown;
 }
+
+interface PluginManifestMetadata {
+  description?: string;
+  publisher?: string;
+  category?: string;
+}
+
+type ManifestCache = Map<string, Promise<PluginManifestMetadata>>;
 
 class CommandFailure extends Error {
   readonly stdout: string;
@@ -99,6 +122,31 @@ function isFile(path: string): boolean {
   }
 }
 
+function resolveSdkAnchor(): string | undefined {
+  if (typeof import.meta.resolve === "function") {
+    try {
+      return import.meta.resolve("@openai/codex-sdk");
+    } catch {
+      // Fall through to the module-path walk.
+    }
+  }
+
+  let directory = dirname(fileURLToPath(import.meta.url));
+  while (true) {
+    const packageJson = join(
+      directory,
+      "node_modules",
+      "@openai",
+      "codex-sdk",
+      "package.json",
+    );
+    if (isFile(packageJson)) return packageJson;
+    const parent = dirname(directory);
+    if (parent === directory) return undefined;
+    directory = parent;
+  }
+}
+
 /** Resolve the native CLI bundled by @openai/codex-sdk. */
 export function resolveCodexBin(): string {
   const override = process.env.CODEX_BGOS_CODEX_BIN?.trim();
@@ -109,8 +157,9 @@ export function resolveCodexBin(): string {
   if (!target || !platformPackage) return "codex";
 
   try {
-    const sdkEntry = moduleRequire.resolve("@openai/codex-sdk");
-    const sdkRequire = createRequire(sdkEntry);
+    const sdkAnchor = resolveSdkAnchor();
+    if (!sdkAnchor) return "codex";
+    const sdkRequire = createRequire(sdkAnchor);
     const codexPackageJson = sdkRequire.resolve("@openai/codex/package.json");
     const codexRequire = createRequire(codexPackageJson);
     const platformPackageJson = codexRequire.resolve(
@@ -177,6 +226,63 @@ function pluginDescription(entry: PluginEntry): string {
       interfaceMetadata?.short_description,
     ) ?? ""
   );
+}
+
+function manifestPath(entry: PluginEntry): string | undefined {
+  const source = asRecord(entry.source);
+  if (source?.source !== "local") return undefined;
+  const path = asString(source.path);
+  return path ? join(path, ".codex-plugin", "plugin.json") : undefined;
+}
+
+async function readManifestMetadata(
+  path: string,
+  readFileImpl: ReadFileImpl,
+): Promise<PluginManifestMetadata> {
+  try {
+    const manifest = asRecord(JSON.parse(await readFileImpl(path, "utf8")));
+    if (!manifest) return {};
+    const interfaceMetadata = asRecord(manifest.interface);
+    const author = asRecord(manifest.author);
+    const description = asString(
+      manifest.description,
+      interfaceMetadata?.description,
+      interfaceMetadata?.shortDescription,
+    );
+    const publisher = asString(
+      manifest.publisher,
+      interfaceMetadata?.publisher,
+      interfaceMetadata?.developerName,
+      manifest.author,
+      author?.name,
+    );
+    const category = asString(
+      manifest.category,
+      interfaceMetadata?.category,
+    );
+    return {
+      description: description ? truncate(description) : undefined,
+      publisher,
+      category,
+    };
+  } catch {
+    return {};
+  }
+}
+
+function manifestMetadata(
+  entry: PluginEntry,
+  cache: ManifestCache,
+  readFileImpl: ReadFileImpl,
+): Promise<PluginManifestMetadata> {
+  const path = manifestPath(entry);
+  if (!path) return Promise.resolve({});
+  let metadata = cache.get(path);
+  if (!metadata) {
+    metadata = readManifestMetadata(path, readFileImpl);
+    cache.set(path, metadata);
+  }
+  return metadata;
 }
 
 function parseJsonObject(stdout: string): Record<string, unknown> {
@@ -315,6 +421,14 @@ function rememberRpc(seen: Set<string>, rpcId: string): boolean {
 export function createSkillsHandler(deps: SkillsHandlerDeps) {
   const execFileImpl = deps.execFileImpl ?? execFile;
   const bin = deps.codexBin ?? resolveCodexBin();
+  const nowImpl = deps.nowImpl ?? Date.now;
+  const readFileImpl: ReadFileImpl =
+    deps.readFileImpl ??
+    ((path: string, encoding: "utf8") => readFile(path, encoding));
+  const sleepImpl =
+    deps.sleepImpl ??
+    ((delayMs: number) =>
+      new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
   const seen = new Set<string>();
 
   const report = (message: string): void => {
@@ -348,21 +462,47 @@ export function createSkillsHandler(deps: SkillsHandlerDeps) {
 
   const handleListInstalled = async (): Promise<SkillsRpcResultBody> => {
     const entries = await listInstalled();
-    const skills = entries.map((entry) => {
-      const skill: Record<string, unknown> = {
-        name: truncate(pluginName(entry)),
-        description: truncate(pluginDescription(entry)),
-        provenance: "plugin",
-        removable: true,
-      };
-      const id = pluginId(entry);
-      const publisher = asString(entry.marketplaceName);
-      const version = asString(entry.version);
-      if (id) skill.source = truncate(id);
-      if (publisher) skill.publisher = truncate(publisher);
-      if (version) skill.version = truncate(version);
-      return skill;
-    });
+    const manifestCache: ManifestCache = new Map();
+    const skills = await Promise.all(
+      entries.map(async (entry) => {
+        const manifest = await manifestMetadata(
+          entry,
+          manifestCache,
+          readFileImpl,
+        );
+        const interfaceMetadata = asRecord(entry.interface);
+        const skill: Record<string, unknown> = {
+          name: truncate(pluginName(entry)),
+          description: truncate(
+            asString(pluginDescription(entry), manifest.description) ?? "",
+          ),
+          provenance: "plugin",
+          removable: true,
+        };
+        const id = pluginId(entry);
+        const publisher = asString(
+          entry.publisher,
+          interfaceMetadata?.publisher,
+          interfaceMetadata?.developerName,
+          manifest.publisher,
+          entry.marketplaceName,
+        );
+        const category = asString(
+          entry.category,
+          interfaceMetadata?.category,
+          manifest.category,
+        );
+        const version = asString(entry.version);
+        if (id) {
+          skill.identifier = truncate(id);
+          skill.source = truncate(id);
+        }
+        if (publisher) skill.publisher = truncate(publisher);
+        if (category) skill.category = truncate(category);
+        if (version) skill.version = truncate(version);
+        return skill;
+      }),
+    );
     return { ok: true, payload: { skills } };
   };
 
@@ -376,25 +516,47 @@ export function createSkillsHandler(deps: SkillsHandlerDeps) {
       LIST_TIMEOUT_MS,
     );
     const catalog = catalogEntries(parseJsonObject(output.stdout));
-    const mapped = catalog.entries.flatMap((entry) => {
-      const identifier = pluginId(entry);
-      if (!identifier || !IDENTIFIER_PATTERN.test(identifier)) return [];
-      const item: Record<string, unknown> = {
-        identifier,
-        name: truncate(pluginName(entry)),
-        description: truncate(pluginDescription(entry)),
-        source: truncate(asString(entry.marketplaceName) ?? ""),
-        installed: entry.installed === true || catalog.installed.has(identifier),
-      };
-      const metadata = asRecord(entry.interface);
-      const publisher = asString(entry.publisher, metadata?.publisher);
-      const category = asString(entry.category, metadata?.category);
-      const trust = asString(entry.trust, metadata?.trust);
-      if (publisher) item.publisher = truncate(publisher);
-      if (category) item.category = truncate(category);
-      if (trust) item.trust = truncate(trust);
-      return [item];
-    });
+    const manifestCache: ManifestCache = new Map();
+    const mapped = (
+      await Promise.all(
+        catalog.entries.map(async (entry) => {
+          const identifier = pluginId(entry);
+          if (!identifier || !IDENTIFIER_PATTERN.test(identifier)) return [];
+          const manifest = await manifestMetadata(
+            entry,
+            manifestCache,
+            readFileImpl,
+          );
+          const item: Record<string, unknown> = {
+            identifier,
+            name: truncate(pluginName(entry)),
+            description: truncate(
+              asString(pluginDescription(entry), manifest.description) ?? "",
+            ),
+            source: truncate(asString(entry.marketplaceName) ?? ""),
+            installed:
+              entry.installed === true || catalog.installed.has(identifier),
+          };
+          const metadata = asRecord(entry.interface);
+          const publisher = asString(
+            entry.publisher,
+            metadata?.publisher,
+            metadata?.developerName,
+            manifest.publisher,
+          );
+          const category = asString(
+            entry.category,
+            metadata?.category,
+            manifest.category,
+          );
+          const trust = asString(entry.trust, metadata?.trust);
+          if (publisher) item.publisher = truncate(publisher);
+          if (category) item.category = truncate(category);
+          if (trust) item.trust = truncate(trust);
+          return [item];
+        }),
+      )
+    ).flat();
     const query = payload.query?.trim().toLowerCase() ?? "";
     const filtered = query
       ? mapped.filter((item) =>
@@ -474,9 +636,38 @@ export function createSkillsHandler(deps: SkillsHandlerDeps) {
   const handleRemove = async (
     payload: SkillsRpcFrame["payload"],
   ): Promise<SkillsRpcResultBody> => {
-    const target = asString(payload.name, payload.identifier);
-    if (!target || !IDENTIFIER_PATTERN.test(target)) {
-      return failure("install_failed", "invalid identifier");
+    let target: string;
+    if (payload.identifier !== undefined) {
+      if (
+        typeof payload.identifier !== "string" ||
+        !IDENTIFIER_PATTERN.test(payload.identifier)
+      ) {
+        return failure("install_failed", "invalid identifier");
+      }
+      target = payload.identifier;
+    } else {
+      const name = payload.name;
+      if (typeof name !== "string" || name.length === 0) {
+        return failure("install_failed", "installed plugin name is required");
+      }
+      const installed = await listInstalled();
+      const matching = installed.filter(
+        (entry) => truncate(pluginName(entry)) === name,
+      );
+      if (matching.length === 0) {
+        return failure("install_failed", "installed plugin name was not found");
+      }
+      const identifiers = matching.map((entry) => pluginId(entry));
+      if (
+        identifiers.some((id) => !id || !IDENTIFIER_PATTERN.test(id)) ||
+        new Set(identifiers).size !== 1
+      ) {
+        return failure(
+          "install_failed",
+          "installed plugin name did not resolve to one identifier",
+        );
+      }
+      target = identifiers[0] as string;
     }
     await runCommand(
       execFileImpl,
@@ -508,7 +699,41 @@ export function createSkillsHandler(deps: SkillsHandlerDeps) {
     }
   };
 
+  const postResult = async (
+    rpcId: string,
+    result: SkillsRpcResultBody,
+    deadlineAt: number,
+  ): Promise<void> => {
+    const startedAt = nowImpl();
+    let lastError: unknown;
+    for (const [attempt, offsetMs] of RESULT_RETRY_OFFSETS_MS.entries()) {
+      const targetAt = startedAt + offsetMs;
+      if (
+        attempt > 0 &&
+        Math.max(targetAt, nowImpl()) + RESULT_REQUEST_TIMEOUT_MS >= deadlineAt
+      ) {
+        break;
+      }
+      const delayMs = Math.max(0, targetAt - nowImpl());
+      if (delayMs > 0) await sleepImpl(delayMs);
+      if (
+        attempt > 0 &&
+        nowImpl() + RESULT_REQUEST_TIMEOUT_MS >= deadlineAt
+      ) {
+        break;
+      }
+      try {
+        await deps.api.skillsRpcResult(rpcId, result);
+        return;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    report(`skills_rpc result failed: ${errorDetail(lastError)}`);
+  };
+
   return async (frame: SkillsRpcFrame): Promise<void> => {
+    const receivedAt = nowImpl();
     try {
       if (!rememberRpc(seen, frame.rpcId)) return;
       try {
@@ -524,15 +749,10 @@ export function createSkillsHandler(deps: SkillsHandlerDeps) {
         result = failure("install_failed", errorDetail(error));
       }
 
-      try {
-        await deps.api.skillsRpcResult(frame.rpcId, result);
-      } catch {
-        try {
-          await deps.api.skillsRpcResult(frame.rpcId, result);
-        } catch (error) {
-          report(`skills_rpc result failed: ${errorDetail(error)}`);
-        }
-      }
+      const deadlineAt =
+        receivedAt +
+        (RESULT_DEADLINE_MS_BY_OP[frame.op] ?? DEFAULT_RESULT_DEADLINE_MS);
+      await postResult(frame.rpcId, result, deadlineAt);
     } catch (error) {
       report(`skills_rpc handler failed: ${errorDetail(error)}`);
     }

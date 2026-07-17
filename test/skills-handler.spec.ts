@@ -2,6 +2,16 @@ import {
   execFile,
   type ExecFileException,
 } from "node:child_process";
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -93,12 +103,37 @@ function setup(steps: ExecStep[] = []) {
   const events: string[] = [];
   const api = createApiMock(events);
   const execFileMock = createExecMock(steps, events);
+  const log = vi.fn();
+  let nowMs = 0;
+  const readFileImpl = vi.fn((path: string, encoding: "utf8") =>
+    readFile(path, encoding),
+  );
+  const sleepImpl = vi.fn(async (delayMs: number) => {
+    nowMs += delayMs;
+  });
+  const advanceTime = (delayMs: number): void => {
+    nowMs += delayMs;
+  };
   const handler = createSkillsHandler({
     api,
     execFileImpl: execFileMock as unknown as typeof execFile,
     codexBin: "/test/codex",
+    log,
+    nowImpl: () => nowMs,
+    readFileImpl,
+    sleepImpl,
   });
-  return { api, events, execFileMock, handler, steps };
+  return {
+    api,
+    advanceTime,
+    events,
+    execFileMock,
+    handler,
+    log,
+    readFileImpl,
+    sleepImpl,
+    steps,
+  };
 }
 
 function installedJson(
@@ -159,7 +194,7 @@ describe("createSkillsHandler", () => {
     },
     {
       op: "remove",
-      payload: { name: "writer@market" },
+      payload: { identifier: "writer@market" },
       steps: [
         {
           args: ["plugin", "remove", "writer@market"],
@@ -208,6 +243,7 @@ describe("createSkillsHandler", () => {
       payload: {
         skills: [
           {
+            identifier: "writer@official",
             name: "Writer",
             description: "Writes polished copy",
             provenance: "plugin",
@@ -244,6 +280,7 @@ describe("createSkillsHandler", () => {
     const result = ctx.api.skillsRpcResult.mock.calls[0]?.[1];
     const skills = result?.payload?.skills as Array<Record<string, unknown>>;
     expect(skills[0]).toMatchObject({
+      identifier: "writer@official",
       name: "n".repeat(300),
       description: "d".repeat(300),
       source: "writer@official",
@@ -302,6 +339,140 @@ describe("createSkillsHandler", () => {
     expect(firstPageItems[0]?.installed).toBe(true);
   });
 
+  it("enriches catalog and installed items from a cached local manifest", async () => {
+    const fixtureRoot = mkdtempSync(join(tmpdir(), "skills-manifest-"));
+    const pluginDir = join(fixtureRoot, "writer");
+    mkdirSync(join(pluginDir, ".codex-plugin"), { recursive: true });
+    writeFileSync(
+      join(pluginDir, ".codex-plugin", "plugin.json"),
+      JSON.stringify({
+        description: "d".repeat(350),
+        author: { name: "Fixture Author" },
+        interface: {
+          developerName: "Fixture Publisher",
+          category: "Writing",
+        },
+      }),
+    );
+    const source = { source: "local", path: pluginDir };
+    const ctx = setup([
+      {
+        args: ["plugin", "list", "--available", "--json"],
+        timeout: 60_000,
+        stdout: JSON.stringify({
+          installed: [],
+          available: [
+            {
+              pluginId: "writer@market",
+              name: "Writer",
+              marketplaceName: "market",
+              source,
+            },
+            {
+              pluginId: "editor@market",
+              name: "Editor",
+              marketplaceName: "market",
+              source,
+            },
+          ],
+        }),
+      },
+      {
+        args: ["plugin", "list", "--json"],
+        timeout: 60_000,
+        stdout: installedJson([
+          {
+            pluginId: "writer@market",
+            name: "Writer",
+            marketplaceName: "market",
+            source,
+          },
+        ]),
+      },
+    ]);
+
+    try {
+      await ctx.handler(frame("catalog"));
+
+      const catalogResult = ctx.api.skillsRpcResult.mock.calls[0]?.[1];
+      const items = catalogResult?.payload?.items as Array<
+        Record<string, unknown>
+      >;
+      expect(items).toHaveLength(2);
+      for (const item of items) {
+        expect(item).toMatchObject({
+          description: "d".repeat(300),
+          publisher: "Fixture Publisher",
+          category: "Writing",
+        });
+      }
+      expect(ctx.readFileImpl).toHaveBeenCalledTimes(1);
+
+      await ctx.handler(
+        frame("list_installed", {}, "rpc-installed-manifest"),
+      );
+
+      const installedResult = ctx.api.skillsRpcResult.mock.calls[1]?.[1];
+      const skills = installedResult?.payload?.skills as Array<
+        Record<string, unknown>
+      >;
+      expect(skills[0]).toMatchObject({
+        identifier: "writer@market",
+        description: "d".repeat(300),
+        publisher: "Fixture Publisher",
+        category: "Writing",
+      });
+      expect(ctx.readFileImpl).toHaveBeenCalledTimes(2);
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores an invalid local plugin manifest", async () => {
+    const fixtureRoot = mkdtempSync(join(tmpdir(), "skills-manifest-"));
+    const pluginDir = join(fixtureRoot, "broken");
+    mkdirSync(join(pluginDir, ".codex-plugin"), { recursive: true });
+    writeFileSync(
+      join(pluginDir, ".codex-plugin", "plugin.json"),
+      "not json",
+    );
+    const ctx = setup([
+      {
+        args: ["plugin", "list", "--available", "--json"],
+        timeout: 60_000,
+        stdout: JSON.stringify({
+          installed: [],
+          available: [
+            {
+              pluginId: "broken@market",
+              name: "Broken",
+              marketplaceName: "market",
+              source: { source: "local", path: pluginDir },
+            },
+          ],
+        }),
+      },
+    ]);
+
+    try {
+      await ctx.handler(frame("catalog"));
+
+      const result = ctx.api.skillsRpcResult.mock.calls[0]?.[1];
+      expect(result?.payload?.items).toEqual([
+        {
+          identifier: "broken@market",
+          name: "Broken",
+          description: "",
+          source: "market",
+          installed: false,
+        },
+      ]);
+      expect(ctx.readFileImpl).toHaveBeenCalledOnce();
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
   it("installs with ordered progress, verification, and a host-global note", async () => {
     const ctx = setup([
       {
@@ -348,6 +519,46 @@ describe("createSkillsHandler", () => {
         note: "Installed for every Codex session on this computer",
       },
     });
+  });
+
+  it("continues an install when progress posts fail", async () => {
+    const ctx = setup([
+      {
+        args: ["plugin", "list", "--json"],
+        timeout: 60_000,
+        stdout: installedJson([]),
+      },
+      {
+        args: ["plugin", "add", "writer@market", "--json"],
+        timeout: 120_000,
+        stdout: JSON.stringify({
+          pluginId: "writer@market",
+          name: "Writer",
+        }),
+      },
+      {
+        args: ["plugin", "list", "--json"],
+        timeout: 60_000,
+        stdout: installedJson([
+          { pluginId: "writer@market", name: "Writer" },
+        ]),
+      },
+    ]);
+    ctx.api.skillsRpcProgress.mockRejectedValue(
+      new Error("progress unavailable"),
+    );
+
+    await ctx.handler(frame("install", { identifier: "writer@market" }));
+
+    expect(ctx.execFileMock).toHaveBeenCalledTimes(3);
+    expect(ctx.api.skillsRpcResult).toHaveBeenCalledWith("rpc-install", {
+      ok: true,
+      payload: {
+        name: "Writer",
+        note: "Installed for every Codex session on this computer",
+      },
+    });
+    expect(ctx.log).toHaveBeenCalledTimes(3);
   });
 
   it("rejects an unsafe install identifier without spawning a process", async () => {
@@ -505,7 +716,7 @@ describe("createSkillsHandler", () => {
     expect(ctx.execFileMock).toHaveBeenCalledTimes(1);
   });
 
-  it("removes with an exact args array and verifies absence", async () => {
+  it("prefers a canonical remove identifier and verifies absence", async () => {
     const ctx = setup([
       {
         args: ["plugin", "remove", "name@marketplace"],
@@ -519,7 +730,12 @@ describe("createSkillsHandler", () => {
       },
     ]);
 
-    await ctx.handler(frame("remove", { name: "name@marketplace" }));
+    await ctx.handler(
+      frame("remove", {
+        identifier: "name@marketplace",
+        name: "Display Name",
+      }),
+    );
 
     expect(ctx.execFileMock.mock.calls[0]?.[1]).toEqual([
       "plugin",
@@ -532,10 +748,97 @@ describe("createSkillsHandler", () => {
     });
   });
 
-  it("rejects an unsafe remove target without spawning a process", async () => {
+  it("resolves a display name to its installed plugin identifier", async () => {
+    const ctx = setup([
+      {
+        args: ["plugin", "list", "--json"],
+        timeout: 60_000,
+        stdout: installedJson([
+          { pluginId: "writer@official", name: "Writer" },
+        ]),
+      },
+      {
+        args: ["plugin", "remove", "writer@official"],
+        timeout: 60_000,
+        stdout: "Removed plugin writer@official",
+      },
+      {
+        args: ["plugin", "list", "--json"],
+        timeout: 60_000,
+        stdout: installedJson([]),
+      },
+    ]);
+
+    await ctx.handler(frame("remove", { name: "Writer" }));
+
+    expect(ctx.execFileMock.mock.calls.map((call) => call[1])).toEqual([
+      ["plugin", "list", "--json"],
+      ["plugin", "remove", "writer@official"],
+      ["plugin", "list", "--json"],
+    ]);
+    expect(ctx.api.skillsRpcResult).toHaveBeenCalledWith("rpc-remove", {
+      ok: true,
+      payload: {},
+    });
+  });
+
+  it("resolves the same fallback name published for a nameless plugin", async () => {
+    const ctx = setup([
+      {
+        args: ["plugin", "list", "--json"],
+        timeout: 60_000,
+        stdout: installedJson([{ pluginId: "writer@official" }]),
+      },
+      {
+        args: ["plugin", "remove", "writer@official"],
+        timeout: 60_000,
+        stdout: "Removed plugin writer@official",
+      },
+      {
+        args: ["plugin", "list", "--json"],
+        timeout: 60_000,
+        stdout: installedJson([]),
+      },
+    ]);
+
+    await ctx.handler(frame("remove", { name: "writer@official" }));
+
+    expect(ctx.api.skillsRpcResult).toHaveBeenCalledWith("rpc-remove", {
+      ok: true,
+      payload: {},
+    });
+  });
+
+  it("rejects an ambiguous display name without removing a plugin", async () => {
+    const ctx = setup([
+      {
+        args: ["plugin", "list", "--json"],
+        timeout: 60_000,
+        stdout: installedJson([
+          { pluginId: "writer@official", name: "Writer" },
+          { pluginId: "writer@community", name: "Writer" },
+        ]),
+      },
+    ]);
+
+    await ctx.handler(frame("remove", { name: "Writer" }));
+
+    expect(ctx.execFileMock).toHaveBeenCalledTimes(1);
+    expect(ctx.api.skillsRpcResult).toHaveBeenCalledWith("rpc-remove", {
+      ok: false,
+      error: {
+        code: "install_failed",
+        message: "installed plugin name did not resolve to one identifier",
+      },
+    });
+  });
+
+  it("rejects an unsafe remove identifier without spawning a process", async () => {
     const ctx = setup();
 
-    await ctx.handler(frame("remove", { name: "bad name; rm -rf" }));
+    await ctx.handler(
+      frame("remove", { identifier: "bad name; rm -rf" }),
+    );
 
     expect(ctx.execFileMock).not.toHaveBeenCalled();
     expect(ctx.api.skillsRpcResult).toHaveBeenCalledWith("rpc-remove", {
@@ -558,7 +861,9 @@ describe("createSkillsHandler", () => {
       },
     ]);
 
-    await ctx.handler(frame("remove", { name: "name@marketplace" }));
+    await ctx.handler(
+      frame("remove", { identifier: "name@marketplace" }),
+    );
 
     expect(ctx.api.skillsRpcResult).toHaveBeenCalledWith("rpc-remove", {
       ok: false,
@@ -579,17 +884,73 @@ describe("createSkillsHandler", () => {
     await expect(ctx.handler(frame("future_op"))).resolves.toBeUndefined();
   });
 
-  it("retries a failed result post once with identical arguments", async () => {
+  it("retries a transient result failure and delivers once", async () => {
     const ctx = setup();
+    let deliveries = 0;
     ctx.api.skillsRpcResult
       .mockRejectedValueOnce(new Error("result unavailable"))
-      .mockResolvedValueOnce({});
+      .mockImplementationOnce(async () => {
+        deliveries += 1;
+        return {};
+      });
 
     await ctx.handler(frame("future_op"));
 
     expect(ctx.api.skillsRpcResult).toHaveBeenCalledTimes(2);
     expect(ctx.api.skillsRpcResult.mock.calls[1]).toEqual(
       ctx.api.skillsRpcResult.mock.calls[0],
+    );
+    expect(ctx.api.skillsRpcResult.mock.calls[1]?.[1]).toBe(
+      ctx.api.skillsRpcResult.mock.calls[0]?.[1],
+    );
+    expect(ctx.sleepImpl).toHaveBeenCalledWith(2_000);
+    expect(deliveries).toBe(1);
+  });
+
+  it("stops bounded result retries after four failed attempts", async () => {
+    const ctx = setup();
+    ctx.api.skillsRpcResult.mockRejectedValue(
+      new Error("result unavailable"),
+    );
+
+    await ctx.handler(frame("future_op"));
+
+    expect(ctx.api.skillsRpcResult).toHaveBeenCalledTimes(4);
+    const bodies = ctx.api.skillsRpcResult.mock.calls.map((call) => call[1]);
+    expect(bodies.every((body) => body === bodies[0])).toBe(true);
+    expect(ctx.sleepImpl.mock.calls).toEqual([
+      [2_000],
+      [3_000],
+      [5_000],
+    ]);
+    expect(ctx.log).toHaveBeenCalledOnce();
+    expect(ctx.log).toHaveBeenCalledWith(
+      "skills_rpc result failed: result unavailable",
+    );
+  });
+
+  it("skips retries that cannot finish before the broker deadline", async () => {
+    const ctx = setup([
+      {
+        args: ["plugin", "list", "--available", "--json"],
+        timeout: 60_000,
+        stdout: JSON.stringify({ installed: [], available: [] }),
+      },
+    ]);
+    ctx.api.skillsRpcAck.mockImplementationOnce(async () => {
+      ctx.advanceTime(18_000);
+      return {};
+    });
+    ctx.api.skillsRpcResult.mockRejectedValue(
+      new Error("result unavailable"),
+    );
+
+    await ctx.handler(frame("catalog"));
+
+    expect(ctx.api.skillsRpcResult).toHaveBeenCalledOnce();
+    expect(ctx.sleepImpl).not.toHaveBeenCalled();
+    expect(ctx.log).toHaveBeenCalledWith(
+      "skills_rpc result failed: result unavailable",
     );
   });
 });
@@ -637,5 +998,17 @@ describe("resolveCodexBin", () => {
   it("honors CODEX_BGOS_CODEX_BIN", () => {
     process.env.CODEX_BGOS_CODEX_BIN = " /custom/codex ";
     expect(resolveCodexBin()).toBe("/custom/codex");
+  });
+
+  it("resolves the native Codex CLI from the installed SDK dependency tree", () => {
+    delete process.env.CODEX_BGOS_CODEX_BIN;
+
+    const bin = resolveCodexBin();
+
+    expect(bin).not.toBe("codex");
+    expect(statSync(bin).isFile()).toBe(true);
+    expect(basename(bin)).toBe(
+      process.platform === "win32" ? "codex.exe" : "codex",
+    );
   });
 });
