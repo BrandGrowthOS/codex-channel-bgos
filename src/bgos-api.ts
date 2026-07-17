@@ -14,6 +14,8 @@ import {
 import type { VoiceRpcResultBody } from "./voice-rpc.js";
 import type { HeartbeatDto } from "./heartbeat.js";
 
+const SKILLS_RPC_POST_TIMEOUT_MS = 3_000;
+
 /**
  * Thin typed wrapper around the BGOS integration endpoints. All methods
  * attach the X-BGOS-Pairing header from cfg.pairingToken.
@@ -373,6 +375,46 @@ export class BgosApi {
     const r = await this.http.post(
       `integrations/voice-tasks/${encodeURIComponent(taskId)}/result`,
       body,
+    );
+    return r.data;
+  }
+
+  /** ACK a skills_rpc frame. */
+  async skillsRpcAck(rpcId: string): Promise<unknown> {
+    const r = await this.http.post(
+      `integrations/skills-rpc/${encodeURIComponent(rpcId)}/ack`,
+      {},
+      { timeout: SKILLS_RPC_POST_TIMEOUT_MS },
+    );
+    return r.data;
+  }
+
+  /** Report progress for a skills_rpc install operation. */
+  async skillsRpcProgress(
+    rpcId: string,
+    body: { stage: string; detail?: string },
+  ): Promise<unknown> {
+    const r = await this.http.post(
+      `integrations/skills-rpc/${encodeURIComponent(rpcId)}/progress`,
+      body,
+      { timeout: SKILLS_RPC_POST_TIMEOUT_MS },
+    );
+    return r.data;
+  }
+
+  /** Settle a skills_rpc operation. */
+  async skillsRpcResult(
+    rpcId: string,
+    body: {
+      ok: boolean;
+      payload?: Record<string, unknown>;
+      error?: { code: string; message: string };
+    },
+  ): Promise<unknown> {
+    const r = await this.http.post(
+      `integrations/skills-rpc/${encodeURIComponent(rpcId)}/result`,
+      body,
+      { timeout: SKILLS_RPC_POST_TIMEOUT_MS },
     );
     return r.data;
   }
