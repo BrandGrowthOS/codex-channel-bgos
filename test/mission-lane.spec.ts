@@ -33,6 +33,40 @@ function mission(
   };
 }
 
+function startTurn(
+  lane: MissionLane,
+  params: Parameters<MissionLane["beginTurn"]>[0],
+) {
+  const turnToken = lane.beginTurn(params);
+  return {
+    turnToken,
+    handleTodoList(
+      event: Omit<
+        Parameters<MissionLane["handleTodoList"]>[0],
+        "turnToken"
+      >,
+    ) {
+      return lane.handleTodoList({ ...event, turnToken });
+    },
+    finalizeTurn(
+      result: Omit<
+        Parameters<MissionLane["finalizeTurn"]>[0],
+        "turnToken"
+      >,
+    ) {
+      return lane.finalizeTurn({ ...result, turnToken });
+    },
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 describe("MissionLane (Codex todo_list)", () => {
   let server: MockBgosServer;
   let baseUrl: string;
@@ -44,9 +78,13 @@ describe("MissionLane (Codex todo_list)", () => {
   });
 
   afterEach(async () => {
-    for (const lane of lanes) lane.dispose();
-    lanes.length = 0;
-    await server.stop();
+    vi.restoreAllMocks();
+    const current = lanes.splice(0);
+    try {
+      await Promise.all(current.map((lane) => lane.dispose()));
+    } finally {
+      await server.stop();
+    }
   });
 
   function makeLane(debounceMs = 600): MissionLane {
@@ -70,13 +108,13 @@ describe("MissionLane (Codex todo_list)", () => {
     );
     const lane = makeLane();
     const promptTitle = "Audit " + "x".repeat(210);
-    lane.beginTurn({
+    const turn = startTurn(lane, {
       assistantId: 7,
       chatId: 42,
       prompt: `  ${promptTitle}  \nThis line is not the title`,
     });
 
-    await lane.handleTodoList({
+    await turn.handleTodoList({
       chatId: 42,
       eventType: "item.started",
       item: todo([
@@ -103,9 +141,13 @@ describe("MissionLane (Codex todo_list)", () => {
 
   it("does not create a mission for a two-step plan", async () => {
     const lane = makeLane();
-    lane.beginTurn({ assistantId: 7, chatId: 43, prompt: "Small task" });
+    const turn = startTurn(lane, {
+      assistantId: 7,
+      chatId: 43,
+      prompt: "Small task",
+    });
 
-    await lane.handleTodoList({
+    await turn.handleTodoList({
       chatId: 43,
       eventType: "item.started",
       item: todo([
@@ -113,7 +155,7 @@ describe("MissionLane (Codex todo_list)", () => {
         { text: "Two", completed: false },
       ]),
     });
-    await lane.handleTodoList({
+    await turn.handleTodoList({
       chatId: 43,
       eventType: "item.updated",
       item: todo([
@@ -126,6 +168,199 @@ describe("MissionLane (Codex todo_list)", () => {
     expect(server.requests).toEqual([]);
   });
 
+  it("ignores todo updates and finalization from an older overlapping turn", async () => {
+    server.stage(
+      "GET",
+      "/api/v1/integrations/assistants/7/missions/active",
+      200,
+      { mission: null },
+    );
+    server.stage(
+      "POST",
+      "/api/v1/integrations/assistants/7/missions",
+      201,
+      { ok: true, mission: mission(201, { current: 0, total: 3 }) },
+    );
+    const lane = makeLane(10_000);
+    const items = [
+      { text: "First", completed: false },
+      { text: "Second", completed: false },
+      { text: "Third", completed: false },
+    ];
+    const olderTurn = startTurn(lane, {
+      assistantId: 7,
+      chatId: 53,
+      prompt: "Older turn",
+    });
+    await olderTurn.handleTodoList({
+      chatId: 53,
+      eventType: "item.started",
+      item: todo(items),
+    });
+
+    server.stage(
+      "GET",
+      "/api/v1/integrations/assistants/7/missions/active",
+      200,
+      { mission: mission(201, { current: 0, total: 3 }) },
+    );
+    const newerTurn = startTurn(lane, {
+      assistantId: 7,
+      chatId: 53,
+      prompt: "Newer turn",
+    });
+    await newerTurn.handleTodoList({
+      chatId: 53,
+      eventType: "item.started",
+      item: todo(items, "todo-2"),
+    });
+
+    await olderTurn.handleTodoList({
+      chatId: 53,
+      eventType: "item.updated",
+      item: todo([
+        { text: "First", completed: true },
+        { text: "Second", completed: true },
+        { text: "Third", completed: false },
+      ]),
+    });
+    await olderTurn.finalizeTurn({
+      chatId: 53,
+      finalText: "Older summary",
+    });
+    expect(server.requests.filter((request) => request.method === "PATCH"))
+      .toHaveLength(0);
+
+    server.stage(
+      "PATCH",
+      "/api/v1/integrations/assistants/7/missions/201/progress",
+      200,
+      { ok: true, mission: mission(201, { current: 1, total: 3 }) },
+    );
+    server.stage(
+      "PATCH",
+      "/api/v1/integrations/assistants/7/missions/201/complete",
+      200,
+      { ok: true, mission: mission(201, { current: 1, total: 3 }) },
+    );
+    await newerTurn.handleTodoList({
+      chatId: 53,
+      eventType: "item.updated",
+      item: todo([
+        { text: "First", completed: true },
+        { text: "Second", completed: false },
+        { text: "Third", completed: false },
+      ]),
+    });
+    await newerTurn.finalizeTurn({
+      chatId: 53,
+      finalText: "Newer summary",
+    });
+
+    const patches = server.requests.filter(
+      (request) => request.method === "PATCH",
+    );
+    expect(patches.map((request) => request.body)).toEqual([
+      {
+        progress: { current: 1, total: 3 },
+        feedEntry: { kind: "worked", text: "First" },
+      },
+      { summary: "Newer summary" },
+    ]);
+  });
+
+  it("waits for an older in-flight finalizer across rapid replacement turns", async () => {
+    const olderTerminal = deferred<ReturnType<typeof mission>>();
+    const getActiveMission = vi
+      .fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(mission(401, { current: 0, total: 3 }));
+    const createMission = vi
+      .fn()
+      .mockResolvedValueOnce(mission(401, { current: 0, total: 3 }))
+      .mockResolvedValueOnce(mission(402, { current: 0, total: 3 }));
+    const patchMissionProgress = vi
+      .fn()
+      .mockResolvedValue(mission(402, { current: 1, total: 3 }));
+    const completeMission = vi
+      .fn()
+      .mockReturnValueOnce(olderTerminal.promise)
+      .mockResolvedValueOnce(mission(402, { current: 1, total: 3 }));
+    const api = {
+      getActiveMission,
+      createMission,
+      patchMissionProgress,
+      completeMission,
+      failMission: vi.fn(),
+    } as unknown as BgosApi;
+    const lane = new MissionLane(api, { debounceMs: 0 });
+    lanes.push(lane);
+    const items = [
+      { text: "First", completed: false },
+      { text: "Second", completed: false },
+      { text: "Third", completed: false },
+    ];
+    const olderTurn = startTurn(lane, {
+      assistantId: 7,
+      chatId: 57,
+      prompt: "Older plan",
+    });
+    await olderTurn.handleTodoList({
+      chatId: 57,
+      eventType: "item.started",
+      item: todo(items),
+    });
+
+    const olderFinalizing = olderTurn.finalizeTurn({
+      chatId: 57,
+      finalText: "Older summary",
+    });
+    await vi.waitFor(() => {
+      expect(completeMission).toHaveBeenCalledTimes(1);
+    });
+    startTurn(lane, {
+      assistantId: 7,
+      chatId: 57,
+      prompt: "Intermediate turn",
+    });
+    const newerTurn = startTurn(lane, {
+      assistantId: 7,
+      chatId: 57,
+      prompt: "Newer plan",
+    });
+    const newerAttaching = newerTurn.handleTodoList({
+      chatId: 57,
+      eventType: "item.started",
+      item: todo(items, "todo-2"),
+    });
+    expect(getActiveMission).toHaveBeenCalledTimes(1);
+    expect(createMission).toHaveBeenCalledTimes(1);
+
+    olderTerminal.resolve(mission(401, { current: 0, total: 3 }));
+    await Promise.all([olderFinalizing, newerAttaching]);
+    expect(getActiveMission).toHaveBeenCalledTimes(2);
+    expect(createMission).toHaveBeenCalledTimes(2);
+
+    await newerTurn.handleTodoList({
+      chatId: 57,
+      eventType: "item.updated",
+      item: todo([
+        { text: "First", completed: true },
+        { text: "Second", completed: false },
+        { text: "Third", completed: false },
+      ]),
+    });
+    await newerTurn.finalizeTurn({
+      chatId: 57,
+      finalText: "Newer summary",
+    });
+
+    expect(
+      completeMission.mock.calls.map((call) => call[1]),
+    ).toEqual([401, 402]);
+    expect(patchMissionProgress.mock.calls[0]?.[1]).toBe(402);
+  });
+
   it("swallows an active lookup failure without replacing an unknown mission", async () => {
     server.stage(
       "GET",
@@ -134,10 +369,14 @@ describe("MissionLane (Codex todo_list)", () => {
       { message: "temporarily unavailable" },
     );
     const lane = makeLane();
-    lane.beginTurn({ assistantId: 7, chatId: 52, prompt: "Long task" });
+    const turn = startTurn(lane, {
+      assistantId: 7,
+      chatId: 52,
+      prompt: "Long task",
+    });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    await lane.handleTodoList({
+    await turn.handleTodoList({
       chatId: 52,
       eventType: "item.started",
       item: todo([
@@ -172,8 +411,12 @@ describe("MissionLane (Codex todo_list)", () => {
       { ok: true, mission: mission(102, { current: 2, total: 3 }) },
     );
     const lane = makeLane(100);
-    lane.beginTurn({ assistantId: 7, chatId: 44, prompt: "Long task" });
-    await lane.handleTodoList({
+    const turn = startTurn(lane, {
+      assistantId: 7,
+      chatId: 44,
+      prompt: "Long task",
+    });
+    await turn.handleTodoList({
       chatId: 44,
       eventType: "item.started",
       item: todo([
@@ -183,7 +426,7 @@ describe("MissionLane (Codex todo_list)", () => {
       ]),
     });
 
-    await lane.handleTodoList({
+    await turn.handleTodoList({
       chatId: 44,
       eventType: "item.updated",
       item: todo([
@@ -192,7 +435,7 @@ describe("MissionLane (Codex todo_list)", () => {
         { text: "Third step", completed: false },
       ]),
     });
-    await lane.handleTodoList({
+    await turn.handleTodoList({
       chatId: 44,
       eventType: "item.updated",
       item: todo([
@@ -201,26 +444,122 @@ describe("MissionLane (Codex todo_list)", () => {
         { text: "Third step", completed: false },
       ]),
     });
+    const progressPatches = () => server.requests.filter(
+      (r) => r.method === "PATCH" && r.url.endsWith("/missions/102/progress"),
+    );
+    await expect
+      .poll(() => progressPatches().length, {
+        timeout: 2_000,
+        interval: 20,
+      })
+      .toBe(1);
+    const stableSince = Date.now();
     await expect
       .poll(
         () =>
-          server.requests.filter(
-            (r) =>
-              r.method === "PATCH" &&
-              r.url.endsWith("/missions/102/progress"),
-          ).length,
-        { timeout: 5_000, interval: 20 },
+          progressPatches().length === 1 &&
+          Date.now() - stableSince >= 250,
+        { timeout: 750, interval: 20 },
       )
-      .toBe(1);
+      .toBe(true);
 
-    const patches = server.requests.filter(
-      (r) => r.method === "PATCH" && r.url.endsWith("/missions/102/progress"),
-    );
+    const patches = progressPatches();
     expect(patches).toHaveLength(1);
     expect(patches[0]!.body).toEqual({
       progress: { current: 2, total: 3 },
       feedEntry: { kind: "worked", text: "Second step" },
     });
+  }, 10_000);
+
+  it("drains updates received during a progress PATCH before completion", async () => {
+    const firstPatch = deferred<ReturnType<typeof mission>>();
+    const secondPatch = deferred<ReturnType<typeof mission>>();
+    const patchMissionProgress = vi
+      .fn()
+      .mockReturnValueOnce(firstPatch.promise)
+      .mockReturnValueOnce(secondPatch.promise);
+    const completeMission = vi
+      .fn()
+      .mockResolvedValue(mission(202, { current: 2, total: 3 }));
+    const api = {
+      getActiveMission: vi.fn().mockResolvedValue(null),
+      createMission: vi
+        .fn()
+        .mockResolvedValue(mission(202, { current: 0, total: 3 })),
+      patchMissionProgress,
+      completeMission,
+      failMission: vi.fn(),
+    } as unknown as BgosApi;
+    const lane = new MissionLane(api, { debounceMs: 0 });
+    lanes.push(lane);
+    const turn = startTurn(lane, {
+      assistantId: 7,
+      chatId: 54,
+      prompt: "Concurrent progress",
+    });
+    await turn.handleTodoList({
+      chatId: 54,
+      eventType: "item.started",
+      item: todo([
+        { text: "First", completed: false },
+        { text: "Second", completed: false },
+        { text: "Third", completed: false },
+      ]),
+    });
+
+    const firstUpdate = turn.handleTodoList({
+      chatId: 54,
+      eventType: "item.updated",
+      item: todo([
+        { text: "First", completed: true },
+        { text: "Second", completed: false },
+        { text: "Third", completed: false },
+      ]),
+    });
+    await vi.waitFor(() => {
+      expect(patchMissionProgress).toHaveBeenCalledTimes(1);
+    });
+
+    const secondUpdate = turn.handleTodoList({
+      chatId: 54,
+      eventType: "item.updated",
+      item: todo([
+        { text: "First", completed: true },
+        { text: "Second", completed: true },
+        { text: "Third", completed: false },
+      ]),
+    });
+    const finalizing = turn.finalizeTurn({
+      chatId: 54,
+      finalText: "All done",
+    });
+    expect(completeMission).not.toHaveBeenCalled();
+
+    firstPatch.resolve(mission(202, { current: 1, total: 3 }));
+    await vi.waitFor(() => {
+      expect(patchMissionProgress).toHaveBeenCalledTimes(2);
+    });
+    expect(completeMission).not.toHaveBeenCalled();
+
+    secondPatch.resolve(mission(202, { current: 2, total: 3 }));
+    await Promise.all([firstUpdate, secondUpdate, finalizing]);
+
+    expect(
+      patchMissionProgress.mock.calls.map((call) => call[2]),
+    ).toEqual([
+      {
+        progress: { current: 1, total: 3 },
+        feedEntry: { kind: "worked", text: "First" },
+      },
+      {
+        progress: { current: 2, total: 3 },
+        feedEntry: { kind: "worked", text: "Second" },
+      },
+    ]);
+    expect(completeMission).toHaveBeenCalledTimes(1);
+    expect(patchMissionProgress.mock.invocationCallOrder[1]).toBeLessThan(
+      completeMission.mock.invocationCallOrder[0]!,
+    );
   });
 
   it("flushes pending progress before completing with a word-boundary summary", async () => {
@@ -249,8 +588,12 @@ describe("MissionLane (Codex todo_list)", () => {
       { ok: true, mission: { ...mission(103, { current: 1, total: 3 }), status: "completed" } },
     );
     const lane = makeLane(10_000);
-    lane.beginTurn({ assistantId: 7, chatId: 45, prompt: "Finish task" });
-    await lane.handleTodoList({
+    const turn = startTurn(lane, {
+      assistantId: 7,
+      chatId: 45,
+      prompt: "Finish task",
+    });
+    await turn.handleTodoList({
       chatId: 45,
       eventType: "item.started",
       item: todo([
@@ -259,7 +602,7 @@ describe("MissionLane (Codex todo_list)", () => {
         { text: "Third", completed: false },
       ]),
     });
-    await lane.handleTodoList({
+    await turn.handleTodoList({
       chatId: 45,
       eventType: "item.updated",
       item: todo([
@@ -270,7 +613,7 @@ describe("MissionLane (Codex todo_list)", () => {
     });
 
     const finalText = "word ".repeat(125) + "tail";
-    await lane.finalizeTurn({ chatId: 45, finalText });
+    await turn.finalizeTurn({ chatId: 45, finalText });
 
     const patches = server.requests.filter((r) => r.method === "PATCH");
     expect(patches.map((r) => r.url)).toEqual([
@@ -284,10 +627,144 @@ describe("MissionLane (Codex todo_list)", () => {
     expect(expectedSummary.length).toBeLessThanOrEqual(500);
   });
 
+  it("skips progress PATCHes for an empty plan snapshot", async () => {
+    server.stage(
+      "GET",
+      "/api/v1/integrations/assistants/7/missions/active",
+      200,
+      { mission: null },
+    );
+    server.stage(
+      "POST",
+      "/api/v1/integrations/assistants/7/missions",
+      201,
+      { ok: true, mission: mission(203, { current: 0, total: 3 }) },
+    );
+    server.stage(
+      "PATCH",
+      "/api/v1/integrations/assistants/7/missions/203/complete",
+      200,
+      { ok: true, mission: mission(203, { current: 0, total: 3 }) },
+    );
+    const lane = makeLane(0);
+    const turn = startTurn(lane, {
+      assistantId: 7,
+      chatId: 55,
+      prompt: "Plan may disappear",
+    });
+    await turn.handleTodoList({
+      chatId: 55,
+      eventType: "item.started",
+      item: todo([
+        { text: "First", completed: false },
+        { text: "Second", completed: false },
+        { text: "Third", completed: false },
+      ]),
+    });
+    await turn.handleTodoList({
+      chatId: 55,
+      eventType: "item.updated",
+      item: todo([]),
+    });
+    await turn.finalizeTurn({ chatId: 55, finalText: "Done" });
+
+    expect(
+      server.requests.filter((request) =>
+        request.url.endsWith("/missions/203/progress"),
+      ),
+    ).toHaveLength(0);
+    expect(
+      server.requests.filter((request) =>
+        request.url.endsWith("/missions/203/complete"),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("detects newly completed work by item text across plan reshaping", async () => {
+    server.stage(
+      "GET",
+      "/api/v1/integrations/assistants/7/missions/active",
+      200,
+      { mission: null },
+    );
+    server.stage(
+      "POST",
+      "/api/v1/integrations/assistants/7/missions",
+      201,
+      { ok: true, mission: mission(204, { current: 2, total: 3 }) },
+    );
+    server.stage(
+      "PATCH",
+      "/api/v1/integrations/assistants/7/missions/204/progress",
+      200,
+      { ok: true, mission: mission(204, { current: 2, total: 2 }) },
+    );
+    server.stage(
+      "PATCH",
+      "/api/v1/integrations/assistants/7/missions/204/progress",
+      200,
+      { ok: true, mission: mission(204, { current: 3, total: 3 }) },
+    );
+    server.stage(
+      "PATCH",
+      "/api/v1/integrations/assistants/7/missions/204/complete",
+      200,
+      { ok: true, mission: mission(204, { current: 3, total: 3 }) },
+    );
+    const lane = makeLane(0);
+    const turn = startTurn(lane, {
+      assistantId: 7,
+      chatId: 56,
+      prompt: "Reshape plan",
+    });
+    await turn.handleTodoList({
+      chatId: 56,
+      eventType: "item.started",
+      item: todo([
+        { text: "One", completed: false },
+        { text: "Two", completed: true },
+        { text: "Three", completed: true },
+      ]),
+    });
+    await turn.handleTodoList({
+      chatId: 56,
+      eventType: "item.updated",
+      item: todo([
+        { text: "Three", completed: true },
+        { text: "Two", completed: true },
+      ]),
+    });
+    await turn.handleTodoList({
+      chatId: 56,
+      eventType: "item.updated",
+      item: todo([
+        { text: "Two", completed: true },
+        { text: "Three", completed: true },
+        { text: "One", completed: true },
+      ]),
+    });
+    await turn.finalizeTurn({ chatId: 56, finalText: "Done" });
+
+    const progress = server.requests.filter((request) =>
+      request.url.endsWith("/missions/204/progress"),
+    );
+    expect(progress.map((request) => request.body)).toEqual([
+      { progress: { current: 2, total: 2 } },
+      {
+        progress: { current: 3, total: 3 },
+        feedEntry: { kind: "worked", text: "One" },
+      },
+    ]);
+  });
+
   it("does not complete when the turn did not create a mission", async () => {
     const lane = makeLane();
-    lane.beginTurn({ assistantId: 7, chatId: 46, prompt: "Small task" });
-    await lane.handleTodoList({
+    const turn = startTurn(lane, {
+      assistantId: 7,
+      chatId: 46,
+      prompt: "Small task",
+    });
+    await turn.handleTodoList({
       chatId: 46,
       eventType: "item.started",
       item: todo([
@@ -296,7 +773,7 @@ describe("MissionLane (Codex todo_list)", () => {
       ]),
     });
 
-    await lane.finalizeTurn({ chatId: 46, finalText: "Done." });
+    await turn.finalizeTurn({ chatId: 46, finalText: "Done." });
 
     expect(server.requests).toEqual([]);
   });
@@ -317,12 +794,22 @@ describe("MissionLane (Codex todo_list)", () => {
     server.stage(
       "PATCH",
       "/api/v1/integrations/assistants/7/missions/104/fail",
+      500,
+      { message: "temporarily unavailable" },
+    );
+    server.stage(
+      "PATCH",
+      "/api/v1/integrations/assistants/7/missions/104/fail",
       200,
       { ok: true, mission: { ...mission(104, { current: 0, total: 3 }), status: "failed" } },
     );
     const lane = makeLane();
-    lane.beginTurn({ assistantId: 7, chatId: 47, prompt: "Risky task" });
-    await lane.handleTodoList({
+    const turn = startTurn(lane, {
+      assistantId: 7,
+      chatId: 47,
+      prompt: "Risky task",
+    });
+    await turn.handleTodoList({
       chatId: 47,
       eventType: "item.started",
       item: todo([
@@ -332,16 +819,120 @@ describe("MissionLane (Codex todo_list)", () => {
       ]),
     });
 
-    await lane.finalizeTurn({
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await turn.finalizeTurn({
       chatId: 47,
       error: "  network\n exploded  ",
     });
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
 
-    const failed = server.requests.find((r) => r.url.endsWith("/missions/104/fail"));
-    expect(failed?.body).toEqual({ summary: "network exploded" });
+    const failed = server.requests.filter((r) =>
+      r.url.endsWith("/missions/104/fail"),
+    );
+    expect(failed).toHaveLength(2);
+    expect(failed.map((request) => request.body)).toEqual([
+      { summary: "network exploded" },
+      { summary: "network exploded" },
+    ]);
   });
 
-  it("adopts a process-owned active mission and replaces a foreign one", async () => {
+  it("fails every managed mission when disposed", async () => {
+    server.stage(
+      "GET",
+      "/api/v1/integrations/assistants/7/missions/active",
+      200,
+      { mission: null },
+    );
+    server.stage(
+      "POST",
+      "/api/v1/integrations/assistants/7/missions",
+      201,
+      { ok: true, mission: mission(301, { current: 0, total: 3 }) },
+    );
+    server.stage(
+      "GET",
+      "/api/v1/integrations/assistants/8/missions/active",
+      200,
+      { mission: null },
+    );
+    server.stage(
+      "POST",
+      "/api/v1/integrations/assistants/8/missions",
+      201,
+      { ok: true, mission: mission(302, { current: 0, total: 3 }) },
+    );
+    const lane = makeLane();
+    const items = [
+      { text: "One", completed: false },
+      { text: "Two", completed: false },
+      { text: "Three", completed: false },
+    ];
+    const firstTurn = startTurn(lane, {
+      assistantId: 7,
+      chatId: 70,
+      prompt: "First managed plan",
+    });
+    const secondTurn = startTurn(lane, {
+      assistantId: 8,
+      chatId: 71,
+      prompt: "Second managed plan",
+    });
+    await firstTurn.handleTodoList({
+      chatId: 70,
+      eventType: "item.started",
+      item: todo(items),
+    });
+    await secondTurn.handleTodoList({
+      chatId: 71,
+      eventType: "item.started",
+      item: todo(items, "todo-2"),
+    });
+    startTurn(lane, {
+      assistantId: 7,
+      chatId: 70,
+      prompt: "Replacement turn without a plan",
+    });
+    server.stage(
+      "PATCH",
+      "/api/v1/integrations/assistants/7/missions/301/fail",
+      500,
+      { message: "shutdown failure" },
+    );
+    server.stage(
+      "PATCH",
+      "/api/v1/integrations/assistants/8/missions/302/fail",
+      200,
+      { ok: true, mission: mission(302, { current: 0, total: 3 }) },
+    );
+
+    const failMission = vi.spyOn(BgosApi.prototype, "failMission");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await lane.dispose();
+    const failOptions = failMission.mock.calls.map((call) => call[3]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+    failMission.mockRestore();
+
+    const failed = server.requests.filter(
+      (request) =>
+        request.method === "PATCH" && request.url.endsWith("/fail"),
+    );
+    expect(failed.map((request) => request.url).sort()).toEqual([
+      "/api/v1/integrations/assistants/7/missions/301/fail",
+      "/api/v1/integrations/assistants/8/missions/302/fail",
+    ]);
+    expect(failed.map((request) => request.body)).toEqual([
+      { summary: "Daemon stopped before the plan finished" },
+      { summary: "Daemon stopped before the plan finished" },
+    ]);
+    expect(failOptions).toEqual([
+      { timeout: 3_000 },
+      { timeout: 3_000 },
+    ]);
+  });
+
+  it("adopts only a process-owned mission stored for the same chat", async () => {
     server.stage(
       "GET",
       "/api/v1/integrations/assistants/7/missions/active",
@@ -360,8 +951,12 @@ describe("MissionLane (Codex todo_list)", () => {
       { text: "Two", completed: false },
       { text: "Three", completed: false },
     ];
-    lane.beginTurn({ assistantId: 7, chatId: 49, prompt: "Original plan" });
-    await lane.handleTodoList({
+    const originalTurn = startTurn(lane, {
+      assistantId: 7,
+      chatId: 49,
+      prompt: "Original plan",
+    });
+    await originalTurn.handleTodoList({
       chatId: 49,
       eventType: "item.started",
       item: todo(items),
@@ -372,9 +967,24 @@ describe("MissionLane (Codex todo_list)", () => {
       500,
       { message: "temporarily unavailable" },
     );
+    server.stage(
+      "PATCH",
+      "/api/v1/integrations/assistants/7/missions/107/complete",
+      500,
+      { message: "still unavailable" },
+    );
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    await lane.finalizeTurn({ chatId: 49, finalText: "Done." });
+    await originalTurn.finalizeTurn({ chatId: 49, finalText: "Done." });
+    expect(warn).toHaveBeenCalledTimes(1);
     warn.mockRestore();
+    const completeAttempts = server.requests.filter((request) =>
+      request.url.endsWith("/missions/107/complete"),
+    );
+    expect(completeAttempts).toHaveLength(2);
+    expect(completeAttempts.map((request) => request.body)).toEqual([
+      { summary: "Done." },
+      { summary: "Done." },
+    ]);
 
     server.stage(
       "GET",
@@ -382,9 +992,13 @@ describe("MissionLane (Codex todo_list)", () => {
       200,
       { mission: mission(107, { current: 0, total: 3, label: "steps" }) },
     );
-    lane.beginTurn({ assistantId: 7, chatId: 50, prompt: "Continue plan" });
-    await lane.handleTodoList({
-      chatId: 50,
+    const continuedTurn = startTurn(lane, {
+      assistantId: 7,
+      chatId: 49,
+      prompt: "Continue plan",
+    });
+    await continuedTurn.handleTodoList({
+      chatId: 49,
       eventType: "item.started",
       item: todo(items, "todo-2"),
     });
@@ -398,7 +1012,7 @@ describe("MissionLane (Codex todo_list)", () => {
       "GET",
       "/api/v1/integrations/assistants/7/missions/active",
       200,
-      { mission: mission(999, { current: 0, total: 3, label: "steps" }) },
+      { mission: mission(107, { current: 0, total: 3, label: "steps" }) },
     );
     server.stage(
       "POST",
@@ -406,9 +1020,13 @@ describe("MissionLane (Codex todo_list)", () => {
       201,
       { ok: true, mission: mission(108, { current: 0, total: 3, label: "steps" }) },
     );
-    lane.beginTurn({ assistantId: 7, chatId: 51, prompt: "Replacement plan" });
-    await lane.handleTodoList({
-      chatId: 51,
+    const otherChatTurn = startTurn(lane, {
+      assistantId: 7,
+      chatId: 50,
+      prompt: "Other chat plan",
+    });
+    await otherChatTurn.handleTodoList({
+      chatId: 50,
       eventType: "item.started",
       item: todo(items, "todo-3"),
     });
@@ -417,7 +1035,7 @@ describe("MissionLane (Codex todo_list)", () => {
       (r) => r.method === "POST" && r.url.endsWith("/missions"),
     );
     expect(creates).toHaveLength(2);
-    expect(creates[1]!.body).toMatchObject({ title: "Replacement plan" });
+    expect(creates[1]!.body).toMatchObject({ title: "Other chat plan" });
   });
 
   it("clears a stale mission after a progress 404 so the next plan creates again", async () => {
@@ -440,23 +1058,27 @@ describe("MissionLane (Codex todo_list)", () => {
       { message: "mission not found" },
     );
     const lane = makeLane(0);
-    lane.beginTurn({ assistantId: 7, chatId: 48, prompt: "First plan" });
+    const firstTurn = startTurn(lane, {
+      assistantId: 7,
+      chatId: 48,
+      prompt: "First plan",
+    });
     const initial = [
       { text: "One", completed: false },
       { text: "Two", completed: false },
       { text: "Three", completed: false },
     ];
-    await lane.handleTodoList({
+    await firstTurn.handleTodoList({
       chatId: 48,
       eventType: "item.started",
       item: todo(initial),
     });
-    await lane.handleTodoList({
+    await firstTurn.handleTodoList({
       chatId: 48,
       eventType: "item.updated",
       item: todo([{ text: "One", completed: true }, ...initial.slice(1)]),
     });
-    await lane.finalizeTurn({ chatId: 48, finalText: "Done." });
+    await firstTurn.finalizeTurn({ chatId: 48, finalText: "Done." });
 
     server.stage(
       "GET",
@@ -470,8 +1092,12 @@ describe("MissionLane (Codex todo_list)", () => {
       201,
       { ok: true, mission: mission(106, { current: 0, total: 3, label: "steps" }) },
     );
-    lane.beginTurn({ assistantId: 7, chatId: 48, prompt: "Second plan" });
-    await lane.handleTodoList({
+    const secondTurn = startTurn(lane, {
+      assistantId: 7,
+      chatId: 48,
+      prompt: "Second plan",
+    });
+    await secondTurn.handleTodoList({
       chatId: 48,
       eventType: "item.started",
       item: todo(initial, "todo-2"),

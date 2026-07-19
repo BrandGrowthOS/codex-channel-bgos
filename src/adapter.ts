@@ -278,7 +278,7 @@ export class CodexAdapter {
     this.heartbeat.stop();
     this.ws.disconnect();
     this.toolProgress.dispose();
-    this.missionLane.dispose();
+    await this.missionLane.dispose();
     try {
       await this.commandsSync.flushAll();
     } catch {
@@ -387,7 +387,7 @@ export class CodexAdapter {
     await replyHandle.sendTyping().catch(() => {});
     const startedAt = Date.now();
     let toolCount = 0;
-    this.missionLane.beginTurn({
+    const missionTurn = this.missionLane.beginTurn({
       assistantId,
       chatId,
       prompt: promptTextFromInput(input),
@@ -404,11 +404,16 @@ export class CodexAdapter {
           void replyHandle.sendTyping().catch(() => {});
         },
         onTodoList: (signal) =>
-          this.missionLane.handleTodoList({ chatId, ...signal }),
+          this.missionLane.handleTodoList({
+            chatId,
+            turnToken: missionTurn,
+            ...signal,
+          }),
       });
     } catch (err) {
       await this.missionLane.finalizeTurn({
         chatId,
+        turnToken: missionTurn,
         error: err instanceof Error ? err.message : String(err),
       });
       throw err;
@@ -420,6 +425,7 @@ export class CodexAdapter {
         : "Codex turn stream ended without a terminal event");
     await this.missionLane.finalizeTurn({
       chatId,
+      turnToken: missionTurn,
       finalText: result.finalAgentMessageText,
       error: missionError,
     });

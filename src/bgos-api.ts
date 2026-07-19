@@ -367,10 +367,12 @@ export class BgosApi {
     assistantId: number,
     missionId: number,
     body: { summary?: string } = {},
+    options?: { timeout?: number },
   ): Promise<MissionSnapshot> {
     const r = await this.http.patch(
       `integrations/assistants/${assistantId}/missions/${missionId}/fail`,
       body,
+      options,
     );
     return r.data.mission;
   }

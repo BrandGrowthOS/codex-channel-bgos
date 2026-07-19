@@ -6,6 +6,15 @@ import type {
 } from "./bgos-api.js";
 
 const LOG = "[codex-channel-bgos]";
+const DISPOSE_TIMEOUT_MS = 3_000;
+const DISPOSE_SUMMARY = "Daemon stopped before the plan finished";
+
+declare const missionTurnTokenBrand: unique symbol;
+
+/** Opaque identity for one Codex turn in a chat. */
+export interface MissionTurnToken {
+  readonly [missionTurnTokenBrand]: true;
+}
 
 type TodoEventType = "item.started" | "item.updated" | "item.completed";
 type TodoStep = TodoListItem["items"][number];
@@ -17,6 +26,9 @@ interface StoredMission {
 }
 
 interface TurnState {
+  token: MissionTurnToken;
+  predecessor: Promise<void>;
+  operations: Set<Promise<void>>;
   assistantId: number;
   prompt: string;
   firstTodoSeen: boolean;
@@ -42,12 +54,14 @@ export interface BeginMissionTurnParams {
 
 export interface HandleTodoListParams {
   chatId: number;
+  turnToken: MissionTurnToken;
   eventType: TodoEventType;
   item: TodoListItem;
 }
 
 export interface FinalizeMissionTurnParams {
   chatId: number;
+  turnToken: MissionTurnToken;
   finalText?: string;
   error?: string | null;
 }
@@ -66,10 +80,17 @@ export class MissionLane {
   }
 
   /** Start one Codex turn and remember the prompt used for its mission title. */
-  beginTurn(params: BeginMissionTurnParams): void {
+  beginTurn(params: BeginMissionTurnParams): MissionTurnToken {
     const existing = this.turnByChat.get(params.chatId);
+    const predecessor = existing
+      ? waitForStateOperations(existing)
+      : Promise.resolve();
     if (existing) this.detachState(existing);
-    this.turnByChat.set(params.chatId, {
+    const token = {} as MissionTurnToken;
+    const state: TurnState = {
+      token,
+      predecessor,
+      operations: new Set(),
       assistantId: params.assistantId,
       prompt: params.prompt,
       firstTodoSeen: false,
@@ -81,13 +102,35 @@ export class MissionLane {
       lastPatchAt: 0,
       pendingFlush: null,
       flushInFlight: null,
-    });
+    };
+    this.turnByChat.set(params.chatId, state);
+    return token;
   }
 
   /** Consume one todo_list event from the current turn. */
   async handleTodoList(params: HandleTodoListParams): Promise<void> {
     const state = this.turnByChat.get(params.chatId);
-    if (!state) return;
+    if (!state || state.token !== params.turnToken) return;
+    const operation = this.handleTodoListForState(params, state);
+    state.operations.add(operation);
+    try {
+      await operation;
+    } finally {
+      state.operations.delete(operation);
+    }
+  }
+
+  private async handleTodoListForState(
+    params: HandleTodoListParams,
+    state: TurnState,
+  ): Promise<void> {
+    await state.predecessor;
+    if (
+      this.turnByChat.get(params.chatId) !== state ||
+      state.token !== params.turnToken
+    ) {
+      return;
+    }
 
     if (!state.firstTodoSeen) {
       state.firstTodoSeen = true;
@@ -100,19 +143,44 @@ export class MissionLane {
     if (params.eventType !== "item.updated") return;
 
     this.recordUpdate(state, params.item.items);
-    await this.maybePatchSoon(params.chatId);
+    await this.maybePatchSoon(params.chatId, state);
   }
 
   /** Flush progress, then complete or fail the mission managed by this turn. */
   async finalizeTurn(params: FinalizeMissionTurnParams): Promise<void> {
     const state = this.turnByChat.get(params.chatId);
-    if (!state) return;
+    if (!state || state.token !== params.turnToken) return;
+    const operation = this.finalizeTurnForState(params, state);
+    state.operations.add(operation);
+    try {
+      await operation;
+    } finally {
+      state.operations.delete(operation);
+    }
+  }
+
+  private async finalizeTurnForState(
+    params: FinalizeMissionTurnParams,
+    state: TurnState,
+  ): Promise<void> {
+    await state.predecessor;
+    if (
+      this.turnByChat.get(params.chatId) !== state ||
+      state.token !== params.turnToken
+    ) {
+      return;
+    }
     if (state.pendingFlush) {
       clearTimeout(state.pendingFlush);
       state.pendingFlush = null;
     }
 
-    await this.flush(params.chatId);
+    do {
+      await this.flush(params.chatId, state);
+    } while (
+      this.turnByChat.get(params.chatId) === state &&
+      (state.flushInFlight !== null || state.pendingSnapshot !== null)
+    );
     if (this.turnByChat.get(params.chatId) !== state) return;
 
     const missionId = state.missionId;
@@ -129,23 +197,35 @@ export class MissionLane {
     const body = summary.length > 0 ? { summary } : {};
 
     try {
-      if (failed) {
-        await this.api.failMission(state.assistantId, missionId, body);
-      } else {
-        await this.api.completeMission(state.assistantId, missionId, body);
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        if (this.turnByChat.get(params.chatId) !== state) break;
+        try {
+          if (failed) {
+            await this.api.failMission(state.assistantId, missionId, body);
+          } else {
+            await this.api.completeMission(state.assistantId, missionId, body);
+          }
+          this.forgetMission(missionId);
+          break;
+        } catch (err) {
+          if (this.turnByChat.get(params.chatId) !== state) break;
+          const notFound = isNotFound(err);
+          if (!notFound && attempt === 0) continue;
+          if (notFound) {
+            this.clearMission(params.chatId, state, missionId);
+          }
+          // eslint-disable-next-line no-console
+          console.warn(
+            `${LOG} mission ${failed ? "fail" : "complete"} PATCH failed chat=` +
+              params.chatId +
+              " mission=" +
+              missionId +
+              " err=" +
+              errorText(err),
+          );
+          break;
+        }
       }
-      this.forgetMission(missionId);
-    } catch (err) {
-      if (isNotFound(err)) this.clearMission(params.chatId, state, missionId);
-      // eslint-disable-next-line no-console
-      console.warn(
-        `${LOG} mission ${failed ? "fail" : "complete"} PATCH failed chat=` +
-          params.chatId +
-          " mission=" +
-          missionId +
-          " err=" +
-          errorText(err),
-      );
     } finally {
       if (this.turnByChat.get(params.chatId) === state) {
         this.turnByChat.delete(params.chatId);
@@ -153,14 +233,54 @@ export class MissionLane {
     }
   }
 
-  /** Cancel deferred work and forget process-local mission ownership. */
-  dispose(): void {
+  /** Fail managed missions, cancel deferred work, and forget ownership. */
+  async dispose(): Promise<void> {
+    const managed = new Map<
+      string,
+      { assistantId: number; missionId: number }
+    >();
+    for (const stored of this.storedByChat.values()) {
+      managed.set(`${stored.assistantId}:${stored.missionId}`, {
+        assistantId: stored.assistantId,
+        missionId: stored.missionId,
+      });
+    }
     for (const state of this.turnByChat.values()) {
       if (state.pendingFlush) clearTimeout(state.pendingFlush);
+      if (state.managedThisTurn && state.missionId !== null) {
+        managed.set(`${state.assistantId}:${state.missionId}`, {
+          assistantId: state.assistantId,
+          missionId: state.missionId,
+        });
+      }
     }
     this.turnByChat.clear();
     this.storedByChat.clear();
     this.createdMissionIds.clear();
+
+    await Promise.all(
+      Array.from(managed.values(), async ({ assistantId, missionId }) => {
+        try {
+          await this.api.failMission(
+            assistantId,
+            missionId,
+            { summary: DISPOSE_SUMMARY },
+            { timeout: DISPOSE_TIMEOUT_MS },
+          );
+        } catch (err) {
+          if (isNotFound(err)) return;
+          // eslint-disable-next-line no-console
+          console.warn(
+            `${LOG} mission shutdown fail PATCH failed assistant=` +
+              assistantId +
+              " mission=" +
+              missionId +
+              " err=" +
+              errorText(err),
+          );
+        }
+      }),
+    );
   }
 
   private async attachMission(
@@ -183,11 +303,14 @@ export class MissionLane {
     }
 
     if (this.turnByChat.get(chatId) !== state) return;
+    const stored = this.storedByChat.get(chatId);
     const canAdopt =
       active !== null &&
       (active.status === "active" || active.status === "paused") &&
       active.origin === "derived" &&
-      this.createdMissionIds.has(active.id);
+      this.createdMissionIds.has(active.id) &&
+      stored?.assistantId === state.assistantId &&
+      stored?.missionId === active.id;
 
     if (canAdopt && active !== null) {
       this.setMission(chatId, state, active.id, item.items);
@@ -210,8 +333,8 @@ export class MissionLane {
       if (!Number.isInteger(created?.id) || created.id <= 0) {
         throw new Error("mission create returned no valid id");
       }
-      this.createdMissionIds.add(created.id);
       if (this.turnByChat.get(chatId) === state) {
+        this.createdMissionIds.add(created.id);
         this.setMission(chatId, state, created.id, item.items);
       }
     } catch (err) {
@@ -231,6 +354,7 @@ export class MissionLane {
     for (const [otherChatId, other] of this.turnByChat) {
       if (other === state || other.assistantId !== state.assistantId) continue;
       this.detachState(other);
+      this.turnByChat.delete(otherChatId);
       this.storedByChat.delete(otherChatId);
     }
     for (const [storedChatId, stored] of this.storedByChat) {
@@ -257,69 +381,93 @@ export class MissionLane {
 
   private recordUpdate(state: TurnState, items: TodoStep[]): void {
     const next = copyItems(items);
-    for (let index = 0; index < next.length; index += 1) {
-      const before = state.latestObserved[index];
-      const after = next[index]!;
-      if (before?.completed === false && after.completed) {
-        state.pendingWorkedText = clipText(after.text, 200);
+    const previouslyCompleted = new Set(
+      state.latestObserved
+        .filter((item) => item.completed)
+        .map((item) => item.text),
+    );
+    for (const item of next) {
+      if (item.completed && !previouslyCompleted.has(item.text)) {
+        state.pendingWorkedText = clipText(item.text, 200);
       }
     }
     state.latestObserved = next;
     state.pendingSnapshot = copyItems(next);
   }
 
-  private async maybePatchSoon(chatId: number): Promise<void> {
-    const state = this.turnByChat.get(chatId);
-    if (!state || state.missionId === null) return;
+  private async maybePatchSoon(
+    chatId: number,
+    state: TurnState,
+  ): Promise<void> {
+    if (this.turnByChat.get(chatId) !== state || state.missionId === null) {
+      return;
+    }
+    if (state.flushInFlight) {
+      await state.flushInFlight;
+      return;
+    }
     const elapsed = Date.now() - state.lastPatchAt;
     if (elapsed >= this.debounceMs) {
-      await this.flush(chatId);
+      await this.flush(chatId, state);
       return;
     }
     if (state.pendingFlush) return;
     state.pendingFlush = setTimeout(() => {
-      void this.flush(chatId);
+      void this.flush(chatId, state);
     }, this.debounceMs - elapsed);
   }
 
-  private async flush(chatId: number): Promise<void> {
-    let state = this.turnByChat.get(chatId);
-    if (!state) return;
-    if (state.flushInFlight) {
-      await state.flushInFlight;
-      state = this.turnByChat.get(chatId);
-      if (state?.pendingSnapshot) await this.flush(chatId);
-      return;
-    }
-    if (state.missionId === null || state.pendingSnapshot === null) return;
+  private async flush(chatId: number, state: TurnState): Promise<void> {
+    if (this.turnByChat.get(chatId) !== state) return;
     if (state.pendingFlush) {
       clearTimeout(state.pendingFlush);
       state.pendingFlush = null;
     }
-
-    const missionId = state.missionId;
-    const snapshot = state.pendingSnapshot;
-    const workedText = state.pendingWorkedText;
-    state.pendingSnapshot = null;
-    state.pendingWorkedText = null;
-    state.lastPatchAt = Date.now();
-
-    const stored = this.storedByChat.get(chatId);
-    if (stored?.missionId === missionId) {
-      stored.lastSnapshot = copyItems(snapshot);
+    if (state.flushInFlight) {
+      await state.flushInFlight;
+      return;
     }
+    if (state.missionId === null || state.pendingSnapshot === null) return;
 
-    const body: PatchMissionProgressInput = {
-      progress: {
-        current: completedCount(snapshot),
-        total: snapshot.length,
-      },
-    };
-    if (workedText !== null) {
-      body.feedEntry = { kind: "worked", text: workedText };
-    }
+    const operation = this.drainProgress(chatId, state).finally(() => {
+      state.flushInFlight = null;
+    });
+    state.flushInFlight = operation;
+    await operation;
+  }
 
-    const operation = (async () => {
+  private async drainProgress(
+    chatId: number,
+    state: TurnState,
+  ): Promise<void> {
+    while (
+      this.turnByChat.get(chatId) === state &&
+      state.missionId !== null &&
+      state.pendingSnapshot !== null
+    ) {
+      const missionId = state.missionId;
+      const snapshot = state.pendingSnapshot;
+      const workedText = state.pendingWorkedText;
+      state.pendingSnapshot = null;
+      state.pendingWorkedText = null;
+
+      const stored = this.storedByChat.get(chatId);
+      if (stored?.missionId === missionId) {
+        stored.lastSnapshot = copyItems(snapshot);
+      }
+      if (snapshot.length === 0) continue;
+
+      state.lastPatchAt = Date.now();
+      const body: PatchMissionProgressInput = {
+        progress: {
+          current: completedCount(snapshot),
+          total: snapshot.length,
+        },
+      };
+      if (workedText !== null) {
+        body.feedEntry = { kind: "worked", text: workedText };
+      }
+
       try {
         await this.api.patchMissionProgress(
           state.assistantId,
@@ -337,12 +485,8 @@ export class MissionLane {
             " err=" +
             errorText(err),
         );
-      } finally {
-        state.flushInFlight = null;
       }
-    })();
-    state.flushInFlight = operation;
-    await operation;
+    }
   }
 
   private clearMission(
@@ -373,6 +517,12 @@ export class MissionLane {
     state.managedThisTurn = false;
     state.missionId = null;
   }
+}
+
+function waitForStateOperations(state: TurnState): Promise<void> {
+  const pending = new Set([state.predecessor, ...state.operations]);
+  if (state.flushInFlight) pending.add(state.flushInFlight);
+  return Promise.allSettled(Array.from(pending)).then(() => undefined);
 }
 
 function copyItems(items: TodoStep[]): TodoStep[] {
