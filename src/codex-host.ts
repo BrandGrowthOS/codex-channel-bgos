@@ -20,7 +20,11 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 
-import { RunAccumulator, type ToolCard } from "./event-mapper.js";
+import {
+  RunAccumulator,
+  type TodoListSignal,
+  type ToolCard,
+} from "./event-mapper.js";
 import {
   loadThreadMap,
   getThreadId,
@@ -47,12 +51,16 @@ export interface CodexHostOptions {
 export interface RunTurnCallbacks {
   /** Fired once the first time each tool item appears (drives tool_progress). */
   onTool?: (card: ToolCard, id: string) => void;
+  /** Fired for every todo_list lifecycle event (drives derived missions). */
+  onTodoList?: (signal: TodoListSignal) => void | Promise<void>;
   /** Periodic keepalive while a turn is in flight (drives the typing dots). */
   onTick?: () => void;
 }
 
 export interface RunTurnResult {
   replyText: string;
+  finalAgentMessageText: string;
+  turnCompleted: boolean;
   error: string | null;
   threadId: string | null;
 }
@@ -154,7 +162,18 @@ export class CodexHost {
     try {
       const { events } = await thread.runStreamed(input);
       for await (const event of events) {
-        acc.handle(event as ThreadEvent);
+        const todo = acc.handle(event as ThreadEvent);
+        if (todo && cb.onTodoList) {
+          try {
+            await cb.onTodoList(todo);
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn(
+              "[codex-channel-bgos] todo_list callback failed err=" +
+                (err instanceof Error ? err.message : String(err)),
+            );
+          }
+        }
         if (cb.onTool) {
           for (const [id, card] of acc.toolEntries()) {
             if (!reported.has(id)) {
@@ -177,6 +196,8 @@ export class CodexHost {
 
     return {
       replyText: acc.replyText,
+      finalAgentMessageText: acc.finalAgentMessageText,
+      turnCompleted: acc.turnCompleted,
       error: acc.error ?? thrown,
       threadId,
     };
