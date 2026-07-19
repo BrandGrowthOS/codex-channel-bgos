@@ -16,6 +16,58 @@ import type { HeartbeatDto } from "./heartbeat.js";
 
 const SKILLS_RPC_POST_TIMEOUT_MS = 3_000;
 
+export type MissionStatus =
+  | "active"
+  | "paused"
+  | "completed"
+  | "abandoned"
+  | "failed";
+
+export type MissionOrigin = "derived" | "self_report";
+
+export interface MissionProgress {
+  current: number;
+  total: number;
+  label?: string;
+}
+
+export interface MissionEffort {
+  used: number;
+  budget: number;
+  unit: "turns";
+}
+
+export type MissionFeedKind =
+  | "started"
+  | "worked"
+  | "checked"
+  | "paused"
+  | "resumed"
+  | "done"
+  | "failed";
+
+export interface MissionSnapshot {
+  id: number;
+  assistantId: number;
+  title: string;
+  status: MissionStatus;
+  origin: MissionOrigin;
+  progress: MissionProgress | null;
+}
+
+export interface CreateMissionInput {
+  title: string;
+  progress?: MissionProgress;
+  effort?: MissionEffort;
+  origin: MissionOrigin;
+  firstFeedText?: string;
+}
+
+export interface PatchMissionProgressInput {
+  progress?: MissionProgress;
+  feedEntry?: { kind: MissionFeedKind; text: string };
+}
+
 /**
  * Thin typed wrapper around the BGOS integration endpoints. All methods
  * attach the X-BGOS-Pairing header from cfg.pairingToken.
@@ -262,6 +314,67 @@ export class BgosApi {
   ): Promise<{ id: number }> {
     const r = await this.http.patch(`messages/${messageId}`, payload);
     return r.data;
+  }
+
+  /** Create a host-derived or self-reported mission for one assistant. */
+  async createMission(
+    assistantId: number,
+    body: CreateMissionInput,
+  ): Promise<MissionSnapshot> {
+    const r = await this.http.post(
+      `integrations/assistants/${assistantId}/missions`,
+      body,
+    );
+    return r.data.mission;
+  }
+
+  /** Fetch the assistant's current open mission, if any. */
+  async getActiveMission(assistantId: number): Promise<MissionSnapshot | null> {
+    const r = await this.http.get(
+      `integrations/assistants/${assistantId}/missions/active`,
+    );
+    return r.data?.mission ?? null;
+  }
+
+  /** Replace mission progress and optionally append one feed entry. */
+  async patchMissionProgress(
+    assistantId: number,
+    missionId: number,
+    body: PatchMissionProgressInput,
+  ): Promise<MissionSnapshot> {
+    const r = await this.http.patch(
+      `integrations/assistants/${assistantId}/missions/${missionId}/progress`,
+      body,
+    );
+    return r.data.mission;
+  }
+
+  /** Mark a mission completed with an optional final summary. */
+  async completeMission(
+    assistantId: number,
+    missionId: number,
+    body: { summary?: string } = {},
+  ): Promise<MissionSnapshot> {
+    const r = await this.http.patch(
+      `integrations/assistants/${assistantId}/missions/${missionId}/complete`,
+      body,
+    );
+    return r.data.mission;
+  }
+
+  /** Mark a mission failed with an optional error summary. */
+  async failMission(
+    assistantId: number,
+    missionId: number,
+    body: { summary?: string } = {},
+    options?: { timeout?: number },
+  ): Promise<MissionSnapshot> {
+    const r = await this.http.patch(
+      `integrations/assistants/${assistantId}/missions/${missionId}/fail`,
+      body,
+      options,
+    );
+    return r.data.mission;
   }
 
   /** Request a presigned PUT for a file ≥500 KB that the agent wants to send.

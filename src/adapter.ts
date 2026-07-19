@@ -21,6 +21,7 @@ import { BgosWs } from "./bgos-ws.js";
 import { BgosOutbound } from "./outbound.js";
 import { CommandsSync } from "./commands-sync.js";
 import { ToolProgressOrchestrator } from "./tool-progress.js";
+import { MissionLane } from "./mission-lane.js";
 import { HeartbeatController } from "./heartbeat.js";
 import { getPackageVersion } from "./version.js";
 import { syncCatalog, type CatalogAgent } from "./catalog-sync.js";
@@ -39,7 +40,7 @@ import {
 } from "./inbound-handler.js";
 import { pendingUnknownStats } from "./pending-unknown-store.js";
 import { pickCapabilitiesText } from "./capabilities.js";
-import { CodexHost } from "./codex-host.js";
+import { CodexHost, type RunTurnResult } from "./codex-host.js";
 import { buildCodexInput, type InboundFileForCodex } from "./inbound-input.js";
 import { parseReply } from "./reply-markers.js";
 import { createSkillsHandler } from "./skills-handler.js";
@@ -55,6 +56,11 @@ import {
 } from "./types.js";
 
 const LOG = "[codex-channel-bgos]";
+
+function promptTextFromInput(input: Input): string {
+  if (typeof input === "string") return input;
+  return input.find((part) => part.type === "text")?.text ?? "";
+}
 
 export interface FatalInfo {
   code: string;
@@ -76,6 +82,7 @@ export class CodexAdapter {
   readonly outbound: BgosOutbound;
   readonly commandsSync: CommandsSync;
   readonly toolProgress: ToolProgressOrchestrator;
+  readonly missionLane: MissionLane;
 
   private readonly cfg: PluginConfig;
   private readonly ws: BgosWs;
@@ -122,6 +129,7 @@ export class CodexAdapter {
     this.outbound = new BgosOutbound(this.api);
     this.commandsSync = new CommandsSync(this.api);
     this.toolProgress = new ToolProgressOrchestrator(this.api);
+    this.missionLane = new MissionLane(this.api);
     this.host = new CodexHost({ auth, model: opts.model });
     this.heartbeat = new HeartbeatController({
       version: getPackageVersion(),
@@ -270,6 +278,7 @@ export class CodexAdapter {
     this.heartbeat.stop();
     this.ws.disconnect();
     this.toolProgress.dispose();
+    await this.missionLane.dispose();
     try {
       await this.commandsSync.flushAll();
     } catch {
@@ -378,15 +387,47 @@ export class CodexAdapter {
     await replyHandle.sendTyping().catch(() => {});
     const startedAt = Date.now();
     let toolCount = 0;
+    const missionTurn = this.missionLane.beginTurn({
+      assistantId,
+      chatId,
+      prompt: promptTextFromInput(input),
+    });
 
-    const result = await this.host.runTurn(chatId, input, {
-      onTool: (card) => {
-        toolCount += 1;
-        void replyHandle.sendToolStart(card.name, card.args).catch(() => {});
-      },
-      onTick: () => {
-        void replyHandle.sendTyping().catch(() => {});
-      },
+    let result: RunTurnResult;
+    try {
+      result = await this.host.runTurn(chatId, input, {
+        onTool: (card) => {
+          toolCount += 1;
+          void replyHandle.sendToolStart(card.name, card.args).catch(() => {});
+        },
+        onTick: () => {
+          void replyHandle.sendTyping().catch(() => {});
+        },
+        onTodoList: (signal) =>
+          this.missionLane.handleTodoList({
+            chatId,
+            turnToken: missionTurn,
+            ...signal,
+          }),
+      });
+    } catch (err) {
+      await this.missionLane.finalizeTurn({
+        chatId,
+        turnToken: missionTurn,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
+    const missionError =
+      result.error ??
+      (result.turnCompleted
+        ? null
+        : "Codex turn stream ended without a terminal event");
+    await this.missionLane.finalizeTurn({
+      chatId,
+      turnToken: missionTurn,
+      finalText: result.finalAgentMessageText,
+      error: missionError,
     });
     // eslint-disable-next-line no-console
     console.log(`${LOG} codex turn done`, {

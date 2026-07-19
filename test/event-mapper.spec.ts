@@ -59,6 +59,7 @@ describe("toolCardFromItem (Codex item -> tool_progress card)", () => {
   it("returns null for agent_message and reasoning items", () => {
     expect(toolCardFromItem({ id: "a", type: "agent_message", text: "hi" } as any)).toBeNull();
     expect(toolCardFromItem({ id: "r", type: "reasoning", text: "thinking" } as any)).toBeNull();
+    expect(toolCardFromItem({ id: "t", type: "todo_list", items: [] } as any)).toBeNull();
   });
 
   it("truncates long args to 120 chars", () => {
@@ -75,9 +76,55 @@ describe("toolCardFromItem (Codex item -> tool_progress card)", () => {
 });
 
 describe("RunAccumulator (fold a run's event stream)", () => {
+  it("surfaces every todo_list event without treating it as a tool", () => {
+    const acc = new RunAccumulator();
+    const started = ev({
+      type: "item.started",
+      item: {
+        id: "todo-1",
+        type: "todo_list",
+        items: [
+          { text: "Inspect", completed: false },
+          { text: "Implement", completed: false },
+          { text: "Verify", completed: false },
+        ],
+      },
+    });
+    const updated = ev({
+      ...started,
+      type: "item.updated",
+      item: {
+        ...started.item,
+        items: [
+          { text: "Inspect", completed: true },
+          { text: "Implement", completed: false },
+          { text: "Verify", completed: false },
+        ],
+      },
+    });
+    const completed = ev({ ...updated, type: "item.completed" });
+
+    expect(acc.handle(started)).toEqual({
+      eventType: "item.started",
+      item: started.item,
+    });
+    expect(acc.handle(updated)).toEqual({
+      eventType: "item.updated",
+      item: updated.item,
+    });
+    expect(acc.handle(completed)).toEqual({
+      eventType: "item.completed",
+      item: completed.item,
+    });
+    expect(acc.tools()).toEqual([]);
+    expect(acc.hadToolActivity).toBe(false);
+  });
+
   it("captures the thread id from thread.started", () => {
     const acc = new RunAccumulator();
-    acc.handle(ev({ type: "thread.started", thread_id: "thread_123" }));
+    expect(
+      acc.handle(ev({ type: "thread.started", thread_id: "thread_123" })),
+    ).toBeUndefined();
     expect(acc.threadId).toBe("thread_123");
   });
 
@@ -114,8 +161,10 @@ describe("RunAccumulator (fold a run's event stream)", () => {
   it("captures usage from turn.completed", () => {
     const acc = new RunAccumulator();
     const usage = { input_tokens: 10, cached_input_tokens: 0, output_tokens: 5, reasoning_output_tokens: 2 };
+    expect(acc.turnCompleted).toBe(false);
     acc.handle(ev({ type: "turn.completed", usage }));
     expect(acc.usage).toEqual(usage);
+    expect(acc.turnCompleted).toBe(true);
   });
 
   it("captures a turn.failed error", () => {

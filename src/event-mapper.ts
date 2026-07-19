@@ -11,7 +11,12 @@
  *
  * SDK item/event shapes are @openai/codex-sdk 0.144.1 (see docs/DESIGN.md).
  */
-import type { ThreadEvent, ThreadItem, Usage } from "@openai/codex-sdk";
+import type {
+  ThreadEvent,
+  ThreadItem,
+  TodoListItem,
+  Usage,
+} from "@openai/codex-sdk";
 
 export type ToolStatus = "running" | "done" | "error";
 
@@ -20,6 +25,11 @@ export interface ToolCard {
   name: string;
   args?: string;
   status: ToolStatus;
+}
+
+export interface TodoListSignal {
+  eventType: "item.started" | "item.updated" | "item.completed";
+  item: TodoListItem;
 }
 
 const ARGS_MAX = 120;
@@ -91,18 +101,20 @@ export class RunAccumulator {
   threadId: string | null = null;
   usage: Usage | null = null;
   error: string | null = null;
+  turnCompleted = false;
 
   private readonly messages: string[] = [];
   private readonly toolOrder: string[] = [];
   private readonly toolById = new Map<string, ToolCard>();
 
-  handle(event: ThreadEvent): void {
+  handle(event: ThreadEvent): TodoListSignal | undefined {
     switch (event.type) {
       case "thread.started":
         this.threadId = event.thread_id;
         return;
       case "turn.completed":
         this.usage = event.usage;
+        this.turnCompleted = true;
         return;
       case "turn.failed":
         this.error = event.error?.message ?? "turn failed";
@@ -114,7 +126,9 @@ export class RunAccumulator {
       case "item.updated":
       case "item.completed": {
         this.absorbItem(event.item, event.type === "item.completed");
-        return;
+        return event.item.type === "todo_list"
+          ? { eventType: event.type, item: event.item }
+          : undefined;
       }
       default:
         return;
@@ -137,6 +151,11 @@ export class RunAccumulator {
   /** The accumulated reply text (agent_message items joined by a blank line). */
   get replyText(): string {
     return this.messages.join("\n\n");
+  }
+
+  /** The final completed agent_message item, without earlier messages. */
+  get finalAgentMessageText(): string {
+    return this.messages.at(-1) ?? "";
   }
 
   /** Whether any tool item has appeared this run. */

@@ -19,7 +19,7 @@ export type { ParsedReply } from "./reply-markers.js";
 export { buildCodexInput } from "./inbound-input.js";
 export type { InboundFileForCodex } from "./inbound-input.js";
 export { RunAccumulator, toolCardFromItem } from "./event-mapper.js";
-export type { ToolCard } from "./event-mapper.js";
+export type { TodoListSignal, ToolCard } from "./event-mapper.js";
 export { BGOS_AGENT_HINTS } from "./agent-hints.js";
 export {
   BUNDLED_CAPABILITIES,
