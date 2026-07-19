@@ -201,7 +201,17 @@ describe("MissionLane (Codex todo_list)", () => {
         { text: "Third step", completed: false },
       ]),
     });
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await expect
+      .poll(
+        () =>
+          server.requests.filter(
+            (r) =>
+              r.method === "PATCH" &&
+              r.url.endsWith("/missions/102/progress"),
+          ).length,
+        { timeout: 5_000, interval: 20 },
+      )
+      .toBe(1);
 
     const patches = server.requests.filter(
       (r) => r.method === "PATCH" && r.url.endsWith("/missions/102/progress"),
