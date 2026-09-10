@@ -19,6 +19,15 @@ const tick = async () => {
   for (let i = 0; i < 5; i++) await Promise.resolve();
 };
 describe("interactive answers and native execution decisions", () => {
+  it("rejects a form with neither choices nor an answer input before writing", async () => {
+    const { bridge, ctx, api } = fixture();
+    await expect(
+      bridge.ask(ctx, [
+        { text: "Unanswerable", options: [], allow_free_text: false },
+      ]),
+    ).rejects.toThrow("Invalid question");
+    expect(api.agentRequest).not.toHaveBeenCalled();
+  });
   it("waits for the matching human and returns the original value without interpreting backslashes", async () => {
     vi.useFakeTimers();
     const { bridge, api, ctx, c } = fixture();

@@ -19,7 +19,7 @@ what you actually inspected. Archives remain files unless extraction is requeste
 Outbound reply files use local workspace paths (or configured media root). Caps:
 images 10 MB, video 100 MB, audio/documents 25 MB. Download remote media into the
 workspace first. Never send secret files. No special markers are needed.
-ask_user_input asks 1-4 blocking questions; reply buttons offer async choices.
+ask_user_input asks 1-4 blocking questions; a specific typed form field uses options: [] with allow_free_text: true. Use ordinary replies for broad open-ended conversation. Reply buttons offer async choices.
 edit_message, rename_chat and set_status perform their named operations.
 Boards tools enforce the owner's permission grants. Discover boards, describe
 their columns, then query rows before writing. Reuse an assigned row, preserve

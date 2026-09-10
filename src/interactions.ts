@@ -173,6 +173,7 @@ export class Interactions {
         !q.text.trim() ||
         !Array.isArray(q.options) ||
         q.options.length > 6 ||
+        (q.options.length === 0 && q.allow_free_text === false) ||
         q.options.some(
           (o) => typeof o.label !== "string" || typeof o.value !== "string",
         )

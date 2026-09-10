@@ -7,6 +7,27 @@ const context = () => ({
   signal: new AbortController().signal,
 });
 describe("typed HOAI boundary", () => {
+  it("accepts a native free-text form through the real dynamic tool schema", async () => {
+    const tools = new HoaiTools({} as any, () => "canon");
+    const ask = vi
+      .spyOn(tools.interactions, "ask")
+      .mockResolvedValue([{ question: "Which word?", free_text: "TOPAZ" }]);
+    const questions = [
+      { text: "Which word?", options: [], allow_free_text: true },
+    ];
+    const result: any = await tools.handleRequest(
+      "item/tool/call",
+      { tool: "ask_user_input", arguments: { chat_id: "17", questions } },
+      context(),
+    );
+    expect(result.success).toBe(true);
+    expect(ask).toHaveBeenCalledWith(
+      expect.objectContaining({ chatId: 17 }),
+      questions,
+      undefined,
+    );
+    expect(result.contentItems[0].text).toContain("TOPAZ");
+  });
   it("preserves useful Boards refusal bodies without request credentials", async () => {
     const api = {
       agentRequest: vi.fn(async () => {

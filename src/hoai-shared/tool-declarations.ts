@@ -174,11 +174,11 @@ export const HOAI_TOOL_DECLARATIONS = [
 {
       name: 'ask_user_input',
       description:
-        'Ask the user one or more multiple-choice questions through a polished ' +
+        'Ask the user one or more choice questions or short form fields through a polished ' +
         'modal/sheet in the BGOS app. BLOCKS until every question is answered ' +
         '(option picked, free text typed, or skipped) and returns structured ' +
-        'answers. Use ONLY when (a) you need the user to pick from a clear ' +
-        'set of options AND (b) the user is actively in this conversation. ' +
+        'answers. Use ONLY when (a) you need a choice or a specific form value ' +
+        'AND (b) the user is actively in this conversation. ' +
         'For open-ended questions use `reply`. For async/unprompted scenarios ' +
         '(scheduled check-ins, proactive nudges) DO NOT use this, a blocking ' +
         'modal is inappropriate when the user is not waiting on you. See the ' +
@@ -196,8 +196,8 @@ export const HOAI_TOOL_DECLARATIONS = [
           questions: {
             type: 'array',
             description:
-              '1, 4 questions to ask, in order. Each must have at least one option ' +
-              '(if you have no options, just send a regular reply instead).',
+              '1 to 4 questions to ask, in order. For a short typed form field, ' +
+              'use options: [] and allow_free_text: true.',
             items: {
               type: 'object',
               properties: {
@@ -208,7 +208,8 @@ export const HOAI_TOOL_DECLARATIONS = [
                 options: {
                   type: 'array',
                   description:
-                    'Selectable choices. 2, 6 items. Each label under ~30 chars.',
+                    'Up to 6 selectable choices. Empty only for a typed form field ' +
+                    'with allow_free_text enabled. Each label under ~30 chars.',
                   items: {
                     type: 'object',
                     properties: {
@@ -224,7 +225,8 @@ export const HOAI_TOOL_DECLARATIONS = [
                     },
                     required: ['label', 'value'],
                   },
-                  minItems: 2,
+                  minItems: 0,
+                  maxItems: 6,
                 },
                 allow_free_text: {
                   type: 'boolean',
