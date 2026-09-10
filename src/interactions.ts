@@ -211,7 +211,22 @@ export class Interactions {
           context,
           new Map(options.map((o) => [o.callbackData, o.text])),
           Math.max(1, Math.min(seconds, 600)) * 1000,
-        ).then((answer) => {
+        ).then(async (answer) => {
+          if (context.signal.aborted || answer.timed_out) {
+            // Retire the controls, not the user's answer or message history.
+            // HOAI hides question sheets without options; otherwise Stop
+            // leaves an actionable-looking picker for a turn that no longer exists.
+            await this.api
+              .agentRequest(
+                "PATCH",
+                `messages/${Number(result.id)}`,
+                context.assistantId,
+                { options: [] },
+              )
+              .catch(() => {
+                /* A failed UI cleanup never revives the cancelled turn. */
+              });
+          }
           const at = options.findIndex(
             (o) => o.callbackData === answer.picked_option_value,
           );

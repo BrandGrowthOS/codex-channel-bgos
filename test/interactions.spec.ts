@@ -144,11 +144,42 @@ describe("interactive answers and native execution decisions", () => {
   });
   it("cancelling the requesting turn resolves every pending question", async () => {
     vi.useFakeTimers();
-    const { bridge, ctx, c } = fixture();
+    const { bridge, ctx, c, api } = fixture();
     const answer = bridge.ask(ctx, [{ text: "Pick", options: [] }]);
     await tick();
     c.abort();
     expect((await answer)[0].skipped).toBe(true);
+    expect(api.agentRequest).toHaveBeenCalledWith("PATCH", "messages/41", 9, {
+      options: [],
+    });
+    await vi.runAllTimersAsync();
+  });
+  it("retires expired question controls and ignores a late selection", async () => {
+    vi.useFakeTimers();
+    const { bridge, ctx, api } = fixture();
+    const answer = bridge.ask(
+      ctx,
+      [{ text: "Pick", options: [{ label: "Blue", value: "blue" }] }],
+      1,
+    );
+    await tick();
+    const callbackData = (api.agentRequest.mock.calls[0] as any)[3].options[0]
+      .callbackData;
+    await vi.advanceTimersByTimeAsync(1200);
+    expect((await answer)[0]).toMatchObject({ skipped: true, timed_out: true });
+    expect(api.agentRequest).toHaveBeenCalledWith("PATCH", "messages/41", 9, {
+      options: [],
+    });
+    expect(
+      bridge.handleClick({
+        assistantId: 9,
+        chatId: 17,
+        userId: "owner",
+        messageId: 41,
+        optionId: 1,
+        callbackData,
+      }),
+    ).toBe(true);
     await vi.runAllTimersAsync();
   });
 });
