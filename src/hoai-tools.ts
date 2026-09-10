@@ -222,12 +222,30 @@ export class HoaiTools {
     if (name.startsWith("boards_")) {
       if (typeof args.file_path === "string")
         args.file_path = resolveAllowedMediaPath(args.file_path);
+      const boardRequest = async (
+        method: "GET" | "POST" | "PATCH" | "DELETE",
+        path: string,
+        body?: unknown,
+      ) => {
+        try {
+          return await request(method, path, body);
+        } catch (error) {
+          // The shared Boards handler expects a body-bearing Error rather
+          // than Axios's generic status message. Preserve the refusal body,
+          // never the request/config (which carries pairing credentials).
+          const data = (error as { response?: { data?: unknown } })?.response
+            ?.data;
+          if (data && typeof data === "object")
+            throw new Error(JSON.stringify(data));
+          throw error;
+        }
+      };
       const result = await handleBoardsTool(name, args, {
         assistantId: context.assistantId,
-        bgosGet: (path) => request("GET", path),
-        bgosPost: post,
-        bgosPatch: (path, body) => request("PATCH", path, body),
-        bgosDelete: (path) => request("DELETE", path),
+        bgosGet: (path) => boardRequest("GET", path),
+        bgosPost: (path, body) => boardRequest("POST", path, body),
+        bgosPatch: (path, body) => boardRequest("PATCH", path, body),
+        bgosDelete: (path) => boardRequest("DELETE", path),
       });
       if (result?.isError) throw new Error(JSON.stringify(result.content));
       return result;

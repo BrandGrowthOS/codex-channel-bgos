@@ -7,6 +7,34 @@ const context = () => ({
   signal: new AbortController().signal,
 });
 describe("typed HOAI boundary", () => {
+  it("preserves useful Boards refusal bodies without request credentials", async () => {
+    const api = {
+      agentRequest: vi.fn(async () => {
+        throw Object.assign(new Error("Request failed with status code 400"), {
+          response: {
+            status: 400,
+            data: {
+              message: "Board ledger signing key is not configured",
+              operation: "boards.ledger_unconfigured",
+            },
+          },
+          config: { headers: { secret: "NEVER_SHOW" } },
+        });
+      }),
+    };
+    const tools = new HoaiTools(api as any, () => "canon");
+    const result: any = await tools.handleRequest(
+      "item/tool/call",
+      { tool: "boards_create", arguments: { name: "QA" } },
+      context(),
+    );
+    expect(result.success).toBe(false);
+    expect(result.contentItems[0].text).toContain(
+      "Board ledger signing key is not configured",
+    );
+    expect(result.contentItems[0].text).toContain("boards.ledger_unconfigured");
+    expect(result.contentItems[0].text).not.toContain("NEVER_SHOW");
+  });
   it("does not infer group authorship from the chat carrier", async () => {
     const api = {
       agentRequest: vi.fn(),
