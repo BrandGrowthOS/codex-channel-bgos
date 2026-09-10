@@ -166,8 +166,10 @@ export class NativeCommands {
     },
   ) {}
 
-  cancel(chatId: number): void {
-    this.controllers.get(chatId)?.abort();
+  cancel(chatId: number): boolean {
+    const controller = this.controllers.get(chatId);
+    controller?.abort();
+    return !!controller;
   }
   close(): void {
     for (const c of this.controllers.values()) c.abort();
@@ -178,7 +180,8 @@ export class NativeCommands {
     title: string,
     choices: Choice[],
   ): Promise<string | undefined> {
-    if (!choices.length) return undefined;
+    if (!choices.length)
+      throw new Error("No options are available for this control right now.");
     let page = 0;
     // Four choices leave room for Back/More without exceeding HOAI's six-option contract.
     const size = choices.length <= 6 ? 6 : 4;
@@ -191,7 +194,12 @@ export class NativeCommands {
       const [answer] = await this.deps.interactions.ask(context, [
         { text: title, options, allow_free_text: false, allow_skip: true },
       ]);
-      if (answer.skipped || context.signal.aborted) return undefined;
+      if (context.signal.aborted) return undefined;
+      // HOAI acknowledges a skipped question by showing Thinking until the
+      // agent replies. A silent return strands that indicator even though
+      // this native control is already complete. Superseded menus stay silent.
+      if (answer.skipped)
+        throw new Error("Selection cancelled. No changes were made.");
       if (answer.picked_option_value === "__next_page") page++;
       else if (answer.picked_option_value === "__previous_page") page--;
       else if (choices.some((c) => c.value === answer.picked_option_value))

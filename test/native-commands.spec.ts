@@ -26,6 +26,10 @@ function setup() {
     updateSettings: vi.fn(async (_id, v) => v),
     contextUsage: vi.fn(),
     steer: vi.fn(async () => {}),
+    savedThreads: vi.fn(async () => [
+      { id: "saved", name: "Saved conversation" },
+    ]),
+    resumeSavedThread: vi.fn(async () => {}),
   };
   const interactions = { ask: vi.fn() };
   const run = vi.fn();
@@ -113,6 +117,43 @@ describe("native controls", () => {
       ).toBe(false);
     expect(s.host.listModels).not.toHaveBeenCalled();
   });
+  it.each(["model", "effort", "permissions", "personality", "fast", "resume"])(
+    "finishes a cancelled %s picker with a reply and no state change",
+    async (name) => {
+      const s = setup();
+      s.interactions.ask.mockResolvedValue([{ skipped: true }]);
+      await s.router.handle(s.args(name));
+      expect(s.sendText).toHaveBeenCalledTimes(1);
+      expect(s.sendText).toHaveBeenCalledWith(
+        "Selection cancelled. No changes were made.",
+      );
+      expect(s.host.updateSettings).not.toHaveBeenCalled();
+      expect(s.host.resumeSavedThread).not.toHaveBeenCalled();
+      expect(s.run).not.toHaveBeenCalled();
+    },
+  );
+  it("leaves the model unchanged when its second reasoning picker is cancelled", async () => {
+    const s = setup();
+    s.interactions.ask
+      .mockResolvedValueOnce([{ picked_option_value: "two" }])
+      .mockResolvedValueOnce([{ skipped: true }]);
+    await s.router.handle(s.args("model"));
+    expect(s.host.updateSettings).not.toHaveBeenCalled();
+    expect(s.sendText).toHaveBeenCalledTimes(1);
+    expect(s.sendText).toHaveBeenCalledWith(
+      "Selection cancelled. No changes were made.",
+    );
+  });
+  it("replies when the account catalog offers no options instead of staying busy", async () => {
+    const s = setup();
+    s.host.listModels.mockResolvedValue([]);
+    await s.router.handle(s.args("model"));
+    expect(s.interactions.ask).not.toHaveBeenCalled();
+    expect(s.sendText).toHaveBeenCalledTimes(1);
+    expect(s.sendText).toHaveBeenCalledWith(
+      "No options are available for this control right now.",
+    );
+  });
   it("cancels an old menu when a new control arrives", async () => {
     const s = setup();
     let complete: (v: any) => void = () => {};
@@ -128,6 +169,7 @@ describe("native controls", () => {
     complete([{ picked_option_value: "two" }]);
     await pending;
     expect(s.host.updateSettings).toHaveBeenCalledTimes(1);
+    expect(s.sendText).toHaveBeenCalledTimes(1);
   });
   it("routes review and steering through native operations", async () => {
     const s = setup();

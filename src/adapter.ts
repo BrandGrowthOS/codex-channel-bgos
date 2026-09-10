@@ -814,12 +814,18 @@ export class CodexAdapter {
         if (!Number.isSafeInteger(chatId) || chatId <= 0)
           throw new Error("No chat to stop.");
         const active = this.turnControllers.get(chatId);
+        const stoppedControl = this.nativeCommands.cancel(chatId);
+        const stoppedTurn = !!active?.size;
         this.generations.set(chatId, (this.generations.get(chatId) ?? 0) + 1);
         for (const controller of active ?? []) controller.abort();
         await this.host.stopTurn(chatId);
+        // The stop endpoint is advisory: its RPC result does not reach the
+        // chat UI. A reply also settles a pending picker or stale Thinking
+        // state when there is no native model turn left to emit completion.
+        await this.outbound.sendText({ assistantId, chatId, text: "Stopped." });
         await this.api.postVoiceRpcResult(frame.rpcId, {
           ok: true,
-          payload: { stopped: !!active?.size, supported: true },
+          payload: { stopped: stoppedTurn || stoppedControl, supported: true },
         });
         return;
       }
