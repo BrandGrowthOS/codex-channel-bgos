@@ -1,42 +1,11 @@
 /**
- * Tool-progress card lifecycle for Codex.
+ * One tool-progress card per chat/turn. Native item ids update entries in place
+ * from running to done/error. The adapter serializes publication, then waits
+ * for result events before finalizing. Legacy sendToolStart callers without
+ * ids retain their historical post-hoc done behavior.
  *
- * Unlike OpenClaw (which hides tool lifecycle from the channel adapter and
- * relies on a post-hoc agent-emitted marker block), Codex streams Claude's
- * `tool_use` blocks LIVE in `src/lib/claude.ts:391` of the fork via the
- * `onToolStart` hook. The fork wires this hook into our `sendToolStart`
- * method below, so we render REAL live cards - pulsing-dot + auto-collapse
- * at end-of-turn, identical to Hermes's behavior.
- *
- * Lifecycle (per chat, per turn):
- *
- *   first sendToolStart(toolName)
- *     → POST messages { messageType:"tool_progress", toolProgress: {
- *         state:"running", tools:[{ icon, name, status:"done" }] } }
- *     → store new card id in `cardByChat[chatId]`
- *
- *   subsequent sendToolStart(toolName) within the same turn
- *     → push entry, debounce ≥600 ms (configurable), PATCH the card
- *
- *   finalizeTurn() at end of dispatch
- *     → PATCH the card to { state:"done", tools:[...] }
- *     → drop `cardByChat[chatId]`
- *
- * "All status fires post-hoc done" is the same simplification Hermes makes:
- * Claude doesn't emit per-tool result events to the streaming pipeline,
- * only the start event. By the time the next tool_use arrives (or the turn
- * ends), the previous tool has obviously settled. State="running" on the
- * top-level card stays accurate while at least one tool's run might still
- * be in flight; finalize flips it.
- *
- * Throttling: each tool fires its own PATCH only after `debounceMs`
- * elapses since the last PATCH for the same chat. Cumulative tool list
- * lives in memory; the PATCH always carries the FULL list (server-side
- * is replace-not-append for `toolProgress.tools`).
- *
- * Best-effort by design: a PATCH failure logs a warning but does not block
- * the agent's actual reply. The state is pruned from `cardByChat` so the
- * next tool starts a fresh card cleanly.
+ * Patches carry the full bounded list and are debounced. Failures never block
+ * the agent's reply. Cards are pruned after finalizeTurn.
  */
 import type { BgosApi } from "./bgos-api.js";
 
@@ -53,6 +22,7 @@ interface ChatState {
   cardId: number;
   /** Full tool list accumulated for this turn. Server replaces on each PATCH. */
   tools: ToolProgressEntry[];
+  itemIds: Array<string | undefined>;
   /** Last PATCH timestamp (monotonic ms). Used to throttle subsequent updates. */
   lastPatchAt: number;
   /** Pending debounced flush if a tool fired during the throttle window. */
@@ -99,12 +69,14 @@ export class ToolProgressOrchestrator {
     chatId: number;
     toolName: string;
     args?: string;
+    itemId?: string;
+    status?: ToolProgressEntry["status"];
   }): Promise<void> {
     const { assistantId, chatId, toolName, args } = params;
     const entry: ToolProgressEntry = {
       icon: this.iconForToolName(toolName),
       name: toolName,
-      status: "done", // see lifecycle comment at top - only start events stream
+      status: params.status ?? "done", // legacy callers have no result event
     };
     if (args !== undefined && args.length > 0) {
       entry.args = args.length > 120 ? args.slice(0, 119) + "…" : args;
@@ -112,10 +84,19 @@ export class ToolProgressOrchestrator {
 
     const existing = this.cardByChat.get(chatId);
     if (existing) {
-      existing.tools.push(entry);
+      const index = params.itemId
+        ? existing.itemIds.indexOf(params.itemId)
+        : -1;
+      if (index >= 0)
+        existing.tools[index] = { ...existing.tools[index], ...entry };
+      else {
+        existing.tools.push(entry);
+        existing.itemIds.push(params.itemId);
+      }
       // Backend caps tools[] at 50 - clip so the PATCH doesn't 400.
       if (existing.tools.length > 50) {
         existing.tools = existing.tools.slice(0, 50);
+        existing.itemIds = existing.itemIds.slice(0, 50);
       }
       await this.maybePatchSoon(chatId);
       return;
@@ -134,6 +115,7 @@ export class ToolProgressOrchestrator {
       this.cardByChat.set(chatId, {
         cardId: created.id,
         tools: [entry],
+        itemIds: [params.itemId],
         lastPatchAt: Date.now(),
         pendingFlush: null,
       });
@@ -255,10 +237,7 @@ export class ToolProgressOrchestrator {
   }
 }
 
-function buildSummary(
-  tools: ToolProgressEntry[],
-  done: boolean,
-): string {
+function buildSummary(tools: ToolProgressEntry[], done: boolean): string {
   if (tools.length === 0) {
     return done ? "No tools used" : "Working…";
   }
@@ -283,11 +262,13 @@ function defaultIconForToolName(toolName: string): string {
   if (t === "read" || t === "read_file" || t.startsWith("read")) return "📖";
   if (t === "edit" || t === "write" || t === "write_file") return "📝";
   if (t === "grep" || t === "search" || t.startsWith("search")) return "🔎";
-  if (t === "glob" || t === "find" || t === "ls" || t.startsWith("list")) return "📂";
+  if (t === "glob" || t === "find" || t === "ls" || t.startsWith("list"))
+    return "📂";
   if (t === "fetch" || t === "web_fetch" || t === "curl") return "🌐";
   if (t === "task" || t === "todowrite" || t === "todo_write") return "✅";
   if (t.includes("test")) return "🧪";
-  if (t.includes("install") || t.includes("npm") || t.includes("pip")) return "📦";
+  if (t.includes("install") || t.includes("npm") || t.includes("pip"))
+    return "📦";
   if (t.includes("db") || t.includes("sql") || t.includes("psql")) return "🗃️";
   // Sensible default - a single-character glyph the frontend can render
   // in the card's icon slot without breaking layout.

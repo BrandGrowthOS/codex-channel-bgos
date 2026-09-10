@@ -244,6 +244,16 @@ export class BgosApi {
     });
   }
 
+  async mergeCommands(
+    assistantId: number,
+    commands: CommandManifestEntry[],
+  ): Promise<void> {
+    await this.http.post(
+      `integrations/assistants/${assistantId}/commands/merge`,
+      { commands },
+    );
+  }
+
   /** REST backfill after a WS reconnect. */
   async inboundSince(sinceMessageId: number): Promise<{
     messages: InboundMessagePayload[];

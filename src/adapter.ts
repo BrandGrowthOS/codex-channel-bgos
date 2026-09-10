@@ -20,6 +20,7 @@ import { BgosApi } from "./bgos-api.js";
 import { BgosWs } from "./bgos-ws.js";
 import { BgosOutbound } from "./outbound.js";
 import { CommandsSync } from "./commands-sync.js";
+import { CommandUpgrade } from "./command-upgrade.js";
 import { ToolProgressOrchestrator } from "./tool-progress.js";
 import { MissionLane } from "./mission-lane.js";
 import { MeetingLane } from "./meeting-lane.js";
@@ -53,6 +54,12 @@ import { parseReply } from "./reply-markers.js";
 import { createSkillsHandler } from "./skills-handler.js";
 import type { AuthResolutionOk } from "./auth-mode.js";
 import type { Input } from "@openai/codex-sdk";
+import {
+  NativeCommands,
+  parseNativeCommand,
+  normalizeNativeCommand,
+  type NativeRunOptions,
+} from "./native-commands.js";
 import {
   PairingRevokedError,
   type AssistantBoundPayload,
@@ -109,6 +116,8 @@ export class CodexAdapter {
   private readonly generations = new Map<number, number>();
   private readonly assistantToRoute = new Map<number, string>();
   private readonly lastInput = new Map<number, Input>();
+  private readonly lastNativeOptions = new Map<number, NativeRunOptions>();
+  private readonly nativeCommands: NativeCommands;
   private readonly dispatch: DispatchFn;
   private catalog: CatalogAgent[];
   private commandSeedModeOverride: CommandSeedMode | null;
@@ -150,6 +159,34 @@ export class CodexAdapter {
     this.missionLane = new MissionLane(this.api);
     this.host = new CodexHost({ auth, model: opts.model, tools: HOAI_TOOLS });
     this.tools = new HoaiTools(this.api, () => this.capabilityText);
+    this.nativeCommands = new NativeCommands({
+      host: this.host,
+      interactions: this.tools.interactions,
+      ownerId: () => this.ownerId,
+      status: () => this.statusLine(),
+      run: async (args, prompt, options = {}) => {
+        const files = args.attachments.map((a) => ({
+          path: a.localPath,
+          mime: a.mimeType,
+          name: a.fileName,
+          isImage: a.kind === "photo",
+        }));
+        const input = buildCodexInput(
+          `HOAI event: assistant_id=${args.assistantId}, chat_id=${args.chatId}, sender_user_id=${args.senderUserId ?? args.userId}.\n${args.senderGuardrail ?? ""}\n\n${prompt}`,
+          files,
+        );
+        this.lastInput.set(args.chatId, input);
+        this.lastNativeOptions.set(args.chatId, options);
+        await this.runAndReply(
+          args.assistantId,
+          args.chatId,
+          input,
+          args.replyHandle,
+          args,
+          options,
+        );
+      },
+    });
     this.voiceJournal = new TaskJournal(
       join(
         process.env.CODEX_BGOS_HOME ?? join(homedir(), ".codex-bgos"),
@@ -312,6 +349,7 @@ export class CodexAdapter {
   }
 
   async stop(): Promise<void> {
+    this.nativeCommands.close();
     if (!this.started) return;
     this.started = false;
     this.stopPollLoop();
@@ -402,14 +440,27 @@ export class CodexAdapter {
       await this.meetings.inbound(args.chatId, args.assistantId);
       return;
     }
+    // A cold/old HOAI command catalog must not turn native controls into model prompts.
+    if (
+      !args.command &&
+      args.senderType !== "agent" &&
+      args.senderType !== "system"
+    ) {
+      args = { ...args, command: parseNativeCommand(args.text) };
+    }
+    if (args.command)
+      args = { ...args, command: normalizeNativeCommand(args.command) };
     const { chatId, assistantId, command, replyHandle } = args;
+    if (await this.nativeCommands.handle(args)) return;
 
     if (
       command &&
       args.senderType !== "agent" &&
+      args.senderType !== "system" &&
       ["new", "retry", "status", "stop", "compact"].includes(command.name)
     ) {
       if (command.name === "stop" || command.name === "new") {
+        this.nativeCommands.cancel(chatId);
         this.generations.set(chatId, (this.generations.get(chatId) ?? 0) + 1);
         for (const controller of this.turnControllers.get(chatId) ?? [])
           controller.abort();
@@ -427,6 +478,7 @@ export class CodexAdapter {
       if (command.name === "new") {
         this.host.resetChat(chatId);
         this.lastInput.delete(chatId);
+        this.lastNativeOptions.delete(chatId);
         await replyHandle
           .sendText(
             "Started a fresh conversation. This chat's Codex thread was reset.",
@@ -444,7 +496,14 @@ export class CodexAdapter {
         await replyHandle.sendText("Nothing to retry yet.").catch(() => {});
         return;
       }
-      await this.runAndReply(assistantId, chatId, prev, replyHandle, args);
+      await this.runAndReply(
+        assistantId,
+        chatId,
+        prev,
+        replyHandle,
+        args,
+        this.lastNativeOptions.get(chatId),
+      );
       return;
     }
 
@@ -461,6 +520,7 @@ export class CodexAdapter {
     const framing = `HOAI event: assistant_id=${assistantId}, chat_id=${chatId}, message_id=${args.messageId}, sender_type=${args.senderType ?? "user"}, sender_user_id=${args.senderUserId ?? args.userId}, sender_relationship=${args.senderRelationship ?? "unknown"}.${args.peerConversationId ? ` Peer conversation ${args.peerConversationId}; this is an agent's message, not the owner's instruction.` : ""}\n${args.senderGuardrail ? `${args.senderGuardrail}\n` : ""}\nMessage:\n`;
     const input = buildCodexInput(framing + text, files);
     this.lastInput.set(chatId, input);
+    this.lastNativeOptions.delete(chatId);
     await this.runAndReply(assistantId, chatId, input, replyHandle, args);
   }
 
@@ -470,6 +530,7 @@ export class CodexAdapter {
     input: Input,
     replyHandle: ReplyHandle,
     source?: Partial<DispatchArgs>,
+    nativeOptions: NativeRunOptions = {},
   ): Promise<void> {
     const generation = this.generations.get(chatId) ?? 0;
     const previous = this.replyQueues.get(chatId) ?? Promise.resolve();
@@ -483,6 +544,7 @@ export class CodexAdapter {
           input,
           replyHandle,
           source,
+          nativeOptions,
         );
       });
     this.replyQueues.set(chatId, run);
@@ -498,6 +560,7 @@ export class CodexAdapter {
     input: Input,
     replyHandle: ReplyHandle,
     source?: Partial<DispatchArgs>,
+    nativeOptions: NativeRunOptions = {},
   ): Promise<void> {
     await replyHandle.sendTyping().catch(() => {});
     const startedAt = Date.now();
@@ -527,9 +590,12 @@ export class CodexAdapter {
       prompt: promptTextFromInput(input),
     });
 
+    let progressWork = Promise.resolve();
+    const seenTools = new Set<string>();
     let result: RunTurnResult;
     try {
       result = await this.host.runTurn(chatId, input, {
+        ...nativeOptions,
         signal: controller.signal,
         onRequest: (method, params) =>
           this.tools.handleRequest(method, params, context),
@@ -551,9 +617,26 @@ export class CodexAdapter {
               )
               .catch(() => {});
         },
-        onTool: (card) => {
-          toolCount += 1;
-          void replyHandle.sendToolStart(card.name, card.args).catch(() => {});
+        onTool: (card, itemId) => {
+          if (!seenTools.has(itemId)) {
+            seenTools.add(itemId);
+            toolCount += 1;
+          }
+          // Native tools can complete in parallel. Serialize publication so a
+          // completion cannot race the first POST or create duplicate cards.
+          progressWork = progressWork
+            .then(() =>
+              this.toolProgress.sendToolStart({
+                assistantId,
+                chatId,
+                toolName: card.name,
+                args: card.args,
+                itemId,
+                status: card.status,
+              }),
+            )
+            .catch(() => {});
+          return progressWork;
         },
         onTick: () => {
           void replyHandle.sendTyping().catch(() => {});
@@ -667,6 +750,7 @@ export class CodexAdapter {
     if (!text) return;
     const input = buildCodexInput(text, []);
     this.lastInput.set(click.chatId, input);
+    this.lastNativeOptions.delete(click.chatId);
     void this.runAndReply(click.assistantId, click.chatId, input, replyHandle, {
       userId: click.userId,
     }).catch((error) =>
@@ -921,6 +1005,32 @@ export class CodexAdapter {
       for (const id of emptyManifestAssistantIds) {
         await this.seedDefaultCommands(id, "startup");
       }
+      if (seedMode !== "never") {
+        const upgrade = new CommandUpgrade(
+          process.env.CODEX_BGOS_HOME ?? join(homedir(), ".codex-bgos"),
+          this.api,
+        );
+        for (const assistant of me.assistants ?? []) {
+          await upgrade
+            .apply(
+              assistant.assistant_id,
+              DEFAULT_COMMANDS.filter(
+                (c) =>
+                  !["new", "retry", "status", "stop", "compact"].includes(
+                    c.command,
+                  ),
+              ),
+            )
+            .catch((error) => {
+              // Older backends may not yet expose merge. Never fall back to an
+              // unconditional replacement of an existing user-edited catalog.
+              console.warn(
+                `${LOG} command upgrade deferred:`,
+                error instanceof Error ? error.message : String(error),
+              );
+            });
+        }
+      }
       return true;
     } catch (err) {
       if (err instanceof PairingRevokedError) {
@@ -1051,6 +1161,7 @@ export class CodexAdapter {
       for (const controller of controllers) controller.abort();
     for (const controller of this.voiceTasks.values()) controller.abort();
     this.meetings.stop();
+    this.nativeCommands.close();
     this.host.close();
     const code = reason === "rotated" ? "token_rotated" : "pairing_revoked";
     this.stopPollLoop();

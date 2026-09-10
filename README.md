@@ -37,7 +37,7 @@ Do not run two foreground daemons for the same home. Managed services use a rene
 | Files | Native image input; bounded download and local paths for documents/audio/video; typed `reply` uploads for workspace files or public URLs |
 | Questions and buttons | Blocking `ask_user_input`, 1–4 questions, optional free text/skip; asynchronous inline reply buttons |
 | Execution approval | Native command, file-change and permission requests use HOAI approval cards; denial, timeout, cancellation and missing handlers fail closed |
-| Tools and context | Live tool cards, context usage, scoped stop, `/new`, `/retry`, `/status`, `/stop`, `/compact` |
+| Tools and context | Native running/completed/failed tool cards, context usage, scoped stop, 22 session commands, context-preserving model changes |
 | Boards | All 12 shared `boards_*` tools, including real permission checks and refusal responses |
 | Peers and side chats | Peer discovery, sending, status, completing threads; caller identity comes from the bound event |
 | Meetings | Server floor and membership checked before a turn; text/yield uses the guarded meeting reply endpoint; durable reconnect deduplication |
@@ -49,6 +49,26 @@ Do not run two foreground daemons for the same home. Managed services use a rene
 Receiving an audio/video file does not imply transcription or video understanding. Codex can inspect file paths with its available tools. Meeting turn-refresh is not advertised. Codex consults return directly through the host; they do not expose Claude's cooperative `voice_consult_reply` tool. Outbound caps: images 10 MB, videos 100 MB, other files 25 MB.
 
 The backend capability canon is requested with `channel=codex&daemonVersion=0.3.0`. Older daemons continue receiving their old syntax. Tool declarations and pure request builders are adapted from the Claude Code plugin at the revision recorded in `NOTICE`.
+
+## Native chat controls
+
+Both `/model` and `\model` work. A leading slash/backslash is recognized only as a command token; ordinary Windows, UNC and POSIX paths remain text. Arguments retain their backslashes. Commands appear as selectable command chips in HOAI immediately and after history reload.
+
+| Controls | Native behavior |
+|---|---|
+| `model`, `effort`, `personality`, `fast` | Current account model catalog and supported settings; model switches preserve the current conversation. Fast is never enabled automatically. |
+| `plan`, `code`, `permissions` | Per-chat planning/coding and local-file access. Connected HOAI tools retain their own permission checks. |
+| `new`, `retry`, `stop`, `compact`, `steer`, `ps`, `status` | New context, repeat the last request, interrupt, compact, correct the running turn, and inspect actual state. |
+| `resume`, `fork` | Select only conversations recorded for this HOAI chat or fork its native conversation. |
+| `skills`, `mcp`, `review`, `diff`, `usage`, `help` | Native skills and MCP status, inline review, local Git diff, account/context limits, and command help. |
+
+Examples: `/model` opens the model and reasoning pickers; `/model model-id high` chooses directly; `/plan outline the migration` starts a planning turn; `/skills skill-name your task` passes a native skill input. `clear` aliases `new`; `approvals` aliases `permissions`.
+
+Settings persist across daemon restarts without modifying the user's shared Codex configuration. The owner controls native session settings. New controls are appended once to an existing catalog without replacing customized descriptions/order; deleting one afterward keeps it deleted on restart. This upgrade requires the companion backend's pairing-scoped `commands/merge` endpoint.
+
+Native MCP forms reuse identity-bound question cards with typed values, format validation, and paginated multiple-choice selection. Secret entry and URL verification stay with the provider. Unsupported form schemas cancel instead of fabricating success. Tool status uses actual native item completion events, including failed commands.
+
+HOAI supplies its own theme, profile, navigation and integrations UI. Terminal-only appearance/account controls do not modify it; the bridge explains the appropriate surface. Codex `/import` is unavailable through local app-server. Autonomous native `/goal` continuation and experimental terminal controls are not implemented. These are explicit compatibility limits, not commands forwarded to the model as pretend actions. See the companion PR's capability matrix for live versus automated verification coverage.
 
 ## Upgrading existing conversations
 

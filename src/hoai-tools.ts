@@ -1,5 +1,6 @@
 /** Typed HOAI tools, sharing Claude Code's schemas and pure request builders. */
 import { randomUUID } from "node:crypto";
+import { answerElicitation } from "./mcp-elicitation.js";
 import type { BgosApi } from "./bgos-api.js";
 import type { DynamicTool } from "./codex-host.js";
 import type { RpcObject } from "./app-server.js";
@@ -164,6 +165,22 @@ export class HoaiTools {
     context: ToolContext,
   ): Promise<unknown> {
     context.signal.throwIfAborted();
+    if (method === "mcpServer/elicitation/request") {
+      const answer = await answerElicitation(
+        this.interactions,
+        context,
+        params,
+      );
+      if (answer.action === "cancel" && !context.signal.aborted) {
+        await this.api.agentRequest("POST", "messages", context.assistantId, {
+          assistantId: context.assistantId,
+          chatId: context.chatId,
+          sender: "assistant",
+          text: "This MCP request could not be completed in chat. Reconnect its provider in Codex for authentication, or ask the agent to use a simpler form.",
+        });
+      }
+      return answer;
+    }
     if (method === "item/tool/requestUserInput")
       return this.interactions.nativeAsk(context, params);
     if (
