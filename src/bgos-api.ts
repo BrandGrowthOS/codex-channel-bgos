@@ -110,7 +110,26 @@ export class BgosApi {
     assistantId: number,
     body?: unknown,
   ): Promise<any> {
-    if (!/^[a-z][a-z0-9/-]*(?:\?[^#]*)?$/.test(path) || path.includes(".."))
+    // Board names are percent-encoded path segments, including Unicode,
+    // spaces, uppercase letters and punctuation. Validate route structure
+    // without rejecting those legitimate names or permitting an absolute URL.
+    const segments = path.split("?", 1)[0]!.split("/");
+    let unsafeSegment = false;
+    try {
+      unsafeSegment = segments.some((segment) => {
+        const decoded = decodeURIComponent(segment);
+        return (
+          /[\\\x00-\x1f\x7f]/.test(decoded) ||
+          decoded.split("/").some((part) => part === "." || part === "..")
+        );
+      });
+    } catch {
+      unsafeSegment = true;
+    }
+    if (
+      !/^[a-z][a-z0-9_.~!'()*%/-]*(?:\?[^#\r\n]*)?$/i.test(path) ||
+      unsafeSegment
+    )
       throw new Error("Invalid HOAI tool route");
     const response = await this.http.request({
       method,
