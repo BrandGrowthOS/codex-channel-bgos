@@ -648,12 +648,29 @@ export class CodexAdapter {
             ...signal,
           }),
       });
+      if (controller.signal.aborted) {
+        // Stop already acknowledges in chat. Native interruption may resolve
+        // with partial text and an error; neither is a new assistant reply.
+        await progressWork;
+        await this.missionLane.finalizeTurn({
+          chatId,
+          turnToken: missionTurn,
+          error: "Stopped by you.",
+        });
+        await replyHandle.finalizeTurn().catch(() => {});
+        return;
+      }
     } catch (err) {
       await this.missionLane.finalizeTurn({
         chatId,
         turnToken: missionTurn,
         error: err instanceof Error ? err.message : String(err),
       });
+      if (controller.signal.aborted) {
+        await progressWork;
+        await replyHandle.finalizeTurn().catch(() => {});
+        return;
+      }
       throw err;
     } finally {
       controller.abort();
