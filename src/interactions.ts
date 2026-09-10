@@ -214,14 +214,14 @@ export class Interactions {
         ).then(async (answer) => {
           if (context.signal.aborted || answer.timed_out) {
             // Retire the controls, not the user's answer or message history.
-            // HOAI hides question sheets without options; otherwise Stop
-            // leaves an actionable-looking picker for a turn that no longer exists.
+            // Inline mode also retires free-text-only questions: removing
+            // options alone would leave their answer input active after Stop.
             await this.api
               .agentRequest(
                 "PATCH",
                 `messages/${Number(result.id)}`,
                 context.assistantId,
-                { options: [] },
+                { options: [], renderMode: "inline" },
               )
               .catch(() => {
                 /* A failed UI cleanup never revives the cancelled turn. */

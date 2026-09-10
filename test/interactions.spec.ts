@@ -151,6 +151,7 @@ describe("interactive answers and native execution decisions", () => {
     expect((await answer)[0].skipped).toBe(true);
     expect(api.agentRequest).toHaveBeenCalledWith("PATCH", "messages/41", 9, {
       options: [],
+      renderMode: "inline",
     });
     await vi.runAllTimersAsync();
   });
@@ -169,6 +170,7 @@ describe("interactive answers and native execution decisions", () => {
     expect((await answer)[0]).toMatchObject({ skipped: true, timed_out: true });
     expect(api.agentRequest).toHaveBeenCalledWith("PATCH", "messages/41", 9, {
       options: [],
+      renderMode: "inline",
     });
     expect(
       bridge.handleClick({
