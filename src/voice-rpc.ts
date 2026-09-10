@@ -1,18 +1,20 @@
 /**
  * Voice control-plane wire types + normalizer.
  *
- * In-app realtime voice (mint / consult / dispatch) is DEFERRED for the Codex
- * adapter v1 (parity with the Hermes / OpenClaw / Gobot decision to ship chat
- * first). We keep the frame types and the normalizer so the WS layer can accept
- * and safely drop `voice_rpc` frames, and so `bgos-api` can expose the ack /
- * result endpoints for a later voice build. No handler is wired: an unhandled
- * frame simply times out on the backend, which surfaces the failure to the app.
+ * v0.3 handles mint, invisible consult/compose, confirmed background dispatch,
+ * per-chat stop, and cancellation in the adapter. Only server control frames
+ * enter this lane; chat text never becomes a control-plane instruction.
  *
  * Types mirror gobot-channel-bgos/src/voice-rpc.ts (originally the OpenClaw
  * normalizer) so a future voice module drops in without a wire change.
  */
 
-export type VoiceRpcOp = "mint" | "consult" | "dispatch";
+export type VoiceRpcOp =
+  | "mint"
+  | "consult"
+  | "dispatch"
+  | "stop_turn"
+  | "cancel";
 
 export interface VoiceRpcFrame {
   rpcId: string;
@@ -39,7 +41,11 @@ export function normalizeVoiceRpc(raw: unknown): VoiceRpcFrame | null {
   const r = raw as Record<string, unknown>;
   const rpcId = typeof r.rpcId === "string" ? r.rpcId : "";
   const op =
-    r.op === "mint" || r.op === "consult" || r.op === "dispatch"
+    r.op === "mint" ||
+    r.op === "consult" ||
+    r.op === "dispatch" ||
+    r.op === "stop_turn" ||
+    r.op === "cancel"
       ? r.op
       : null;
   if (!rpcId || !op) return null;

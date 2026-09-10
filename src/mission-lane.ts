@@ -1,9 +1,6 @@
 import type { TodoListItem } from "@openai/codex-sdk";
 
-import type {
-  BgosApi,
-  PatchMissionProgressInput,
-} from "./bgos-api.js";
+import type { BgosApi, PatchMissionProgressInput } from "./bgos-api.js";
 
 const LOG = "[codex-channel-bgos]";
 const DISPOSE_TIMEOUT_MS = 3_000;
@@ -191,7 +188,7 @@ export class MissionLane {
 
     const failed = params.error !== undefined && params.error !== null;
     const summary = clipAtWordBoundary(
-      failed ? params.error ?? "" : params.finalText ?? "",
+      failed ? (params.error ?? "") : (params.finalText ?? ""),
       500,
     );
     const body = summary.length > 0 ? { summary } : {};
@@ -303,6 +300,8 @@ export class MissionLane {
     }
 
     if (this.turnByChat.get(chatId) !== state) return;
+    // Explicit goal cards belong to the agent/user, not the Codex plan stream.
+    if (active?.origin === "self_report") return;
     const stored = this.storedByChat.get(chatId);
     const canAdopt =
       active !== null &&
@@ -358,10 +357,7 @@ export class MissionLane {
       this.storedByChat.delete(otherChatId);
     }
     for (const [storedChatId, stored] of this.storedByChat) {
-      if (
-        storedChatId !== chatId &&
-        stored.assistantId === state.assistantId
-      ) {
+      if (storedChatId !== chatId && stored.assistantId === state.assistantId) {
         this.storedByChat.delete(storedChatId);
       }
     }
@@ -436,10 +432,7 @@ export class MissionLane {
     await operation;
   }
 
-  private async drainProgress(
-    chatId: number,
-    state: TurnState,
-  ): Promise<void> {
+  private async drainProgress(chatId: number, state: TurnState): Promise<void> {
     while (
       this.turnByChat.get(chatId) === state &&
       state.missionId !== null &&
@@ -469,11 +462,7 @@ export class MissionLane {
       }
 
       try {
-        await this.api.patchMissionProgress(
-          state.assistantId,
-          missionId,
-          body,
-        );
+        await this.api.patchMissionProgress(state.assistantId, missionId, body);
       } catch (err) {
         if (isNotFound(err)) this.clearMission(chatId, state, missionId);
         // eslint-disable-next-line no-console
@@ -504,7 +493,8 @@ export class MissionLane {
       this.detachState(state);
     }
     for (const [storedChatId, stored] of this.storedByChat) {
-      if (stored.missionId === missionId) this.storedByChat.delete(storedChatId);
+      if (stored.missionId === missionId)
+        this.storedByChat.delete(storedChatId);
     }
     this.createdMissionIds.delete(missionId);
   }

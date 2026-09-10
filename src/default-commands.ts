@@ -12,9 +12,14 @@ const _DEFAULT_COMMANDS: ReadonlyArray<{
   name: string;
   description: string;
 }> = [
-  { name: "new", description: "Start a fresh conversation (resets the Codex thread)" },
+  {
+    name: "new",
+    description: "Start a fresh conversation (resets the Codex thread)",
+  },
   { name: "retry", description: "Re-run your last message" },
   { name: "status", description: "Show the Codex daemon health and auth mode" },
+  { name: "stop", description: "Stop the current response in this chat" },
+  { name: "compact", description: "Compact this chat's Codex context" },
 ] as const;
 
 /**

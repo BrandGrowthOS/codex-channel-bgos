@@ -103,6 +103,26 @@ export class BgosApi {
     );
   }
 
+  /** Internal tool transport. Paths are constructed by our handlers, never supplied by a model. */
+  async agentRequest(
+    method: "GET" | "POST" | "PATCH" | "DELETE",
+    path: string,
+    assistantId: number,
+    body?: unknown,
+  ): Promise<any> {
+    if (!/^[a-z][a-z0-9/-]*(?:\?[^#]*)?$/.test(path) || path.includes(".."))
+      throw new Error("Invalid HOAI tool route");
+    const response = await this.http.request({
+      method,
+      url: path,
+      data: body,
+      headers: { "X-Caller-Assistant-Id": String(assistantId) },
+      timeout: 55_000,
+      maxContentLength: 8 * 1024 * 1024,
+    });
+    return response.data;
+  }
+
   /** GET /integrations/me - confirms token + touches last_seen_at.
    *  Includes assistant→agent_route bindings so the plugin can seed
    *  its dispatch map on cold start.
@@ -136,7 +156,10 @@ export class BgosApi {
    * Any non-2xx (including a 404 from an older backend that predates the
    * endpoint) throws, and the caller keeps the bundled fallback.
    */
-  async getCapabilities(channel = "codex"): Promise<{
+  async getCapabilities(
+    channel = "codex",
+    daemonVersion?: string,
+  ): Promise<{
     channel: string;
     version: string;
     text: string;
@@ -149,7 +172,7 @@ export class BgosApi {
     // (disk/memory DoS). axios rejects past maxContentLength and the caller
     // keeps the bundled fallback.
     const r = await this.http.get("integrations/capabilities", {
-      params: { channel },
+      params: { channel, ...(daemonVersion ? { daemonVersion } : {}) },
       maxContentLength: 1024 * 1024,
       maxBodyLength: 1024 * 1024,
     });
@@ -172,6 +195,7 @@ export class BgosApi {
       integration?: string;
       /** Daemon version stamped on the pairing row (contract C1). */
       daemonVersion?: string;
+      intended_assistant_id?: number;
     },
   ): Promise<PairExchangeResponse> {
     const base = baseUrl.replace(/\/+$/, "") + "/api/v1";
@@ -196,10 +220,9 @@ export class BgosApi {
     assistantId: number,
     commands: CommandManifestEntry[],
   ): Promise<void> {
-    await this.http.put(
-      `integrations/assistants/${assistantId}/commands`,
-      { commands },
-    );
+    await this.http.put(`integrations/assistants/${assistantId}/commands`, {
+      commands,
+    });
   }
 
   /** REST backfill after a WS reconnect. */
@@ -255,9 +278,7 @@ export class BgosApi {
   }
 
   /** Agent reply - assistant message with optional inline buttons/approval. */
-  async postMessage(
-    payload: OutboundMessagePayload,
-  ): Promise<{ id: number }> {
+  async postMessage(payload: OutboundMessagePayload): Promise<{ id: number }> {
     const r = await this.http.post("messages", payload);
     return r.data;
   }
@@ -276,9 +297,7 @@ export class BgosApi {
    * created message nested under `message` (HTTP 200) rather than a bare
    * `{ id }` (HTTP 201), so unwrap both shapes.
    */
-  async sendMessage(
-    payload: OutboundMessagePayload,
-  ): Promise<{ id: number }> {
+  async sendMessage(payload: OutboundMessagePayload): Promise<{ id: number }> {
     const r = await this.http.post("send-message", payload);
     const data = (r.data ?? {}) as {
       id?: number;

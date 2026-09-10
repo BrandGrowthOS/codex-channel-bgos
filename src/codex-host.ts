@@ -1,33 +1,13 @@
-/**
- * The Codex brain: wraps @openai/codex-sdk and maps one BGOS chat to one
- * persistent Codex thread.
- *
- *   - First message in a chat: `codex.startThread()`, capture the thread id from
- *     the `thread.started` event, persist it (thread-map).
- *   - Later messages: `codex.resumeThread(id)` so context carries across daemon
- *     restarts (Codex persists the thread body under ~/.codex/sessions).
- *   - `/new`: resetChat() drops the mapping so the next message starts fresh.
- *
- * Runs are streamed (`runStreamed`) so tool events map to a live tool_progress
- * card. Auth is decided by auth-mode (D7): the child env has OPENAI_API_KEY and
- * CODEX_API_KEY stripped so exactly one credential path is active, either the
- * apikey (injected by the SDK as CODEX_API_KEY) or the existing `codex login`
- * (~/.codex/auth.json).
- */
-import { Codex } from "@openai/codex-sdk";
-import type { Input, ThreadEvent, ThreadOptions } from "@openai/codex-sdk";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { homedir, tmpdir } from "node:os";
-
-import {
-  RunAccumulator,
-  type TodoListSignal,
-  type ToolCard,
-} from "./event-mapper.js";
+/** One HOAI chat per durable Codex thread, hosted by the current app-server protocol. */
+import type { Input } from "@openai/codex-sdk";
+import { mkdirSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { resolve, join } from "node:path";
+import { homedir } from "node:os";
+import { AppServer, codexEnvironment, type RpcObject } from "./app-server.js";
+import { type TodoListSignal, type ToolCard } from "./event-mapper.js";
 import {
   loadThreadMap,
-  getThreadId,
   setThreadId,
   resetChat,
   threadsPath,
@@ -36,27 +16,27 @@ import {
 import { BGOS_AGENT_HINTS } from "./agent-hints.js";
 import type { AuthResolutionOk } from "./auth-mode.js";
 
-function codexBgosHome(): string {
-  return process.env.CODEX_BGOS_HOME ?? join(homedir(), ".codex-bgos");
+export interface DynamicTool {
+  type: "function";
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
 }
-
 export interface CodexHostOptions {
   auth: AuthResolutionOk;
-  /** Working directory Codex operates in. Default `<home>/workspace`. */
   workdir?: string;
-  /** Optional model override (CODEX_BGOS_MODEL). */
   model?: string;
+  tools?: DynamicTool[];
+  server?: AppServer;
 }
-
 export interface RunTurnCallbacks {
-  /** Fired once the first time each tool item appears (drives tool_progress). */
+  signal?: AbortSignal;
   onTool?: (card: ToolCard, id: string) => void;
-  /** Fired for every todo_list lifecycle event (drives derived missions). */
   onTodoList?: (signal: TodoListSignal) => void | Promise<void>;
-  /** Periodic keepalive while a turn is in flight (drives the typing dots). */
   onTick?: () => void;
+  onRequest?: (method: string, params: RpcObject) => Promise<unknown>;
+  onUsage?: (usage: RpcObject) => void;
 }
-
 export interface RunTurnResult {
   replyText: string;
   finalAgentMessageText: string;
@@ -64,142 +44,449 @@ export interface RunTurnResult {
   error: string | null;
   threadId: string | null;
 }
+interface ActiveTurn {
+  id?: string;
+  callbacks: RunTurnCallbacks;
+  messages: Map<string, string>;
+  pending: Promise<unknown>[];
+  finish: (result: RunTurnResult) => void;
+}
+
+export function appServerInput(input: Input): RpcObject[] {
+  return (
+    typeof input === "string" ? [{ type: "text" as const, text: input }] : input
+  ).map((item) =>
+    item.type === "local_image"
+      ? { type: "localImage", path: item.path }
+      : { type: "text", text: item.text, text_elements: [] },
+  );
+}
+export function friendlyCodexError(error: unknown): string {
+  const raw =
+    error instanceof Error
+      ? error.message
+      : String(error ?? "Codex could not complete the request.");
+  if (/requires a newer version|unsupported.*model/i.test(raw))
+    return "The Codex runtime needs an update for your selected model. Repair this agent in HOAI, then retry your message.";
+  if (/unauthori[sz]ed|authentication|401|sign.?in|refresh token/i.test(raw))
+    return "Codex needs you to sign in again. Reconnect this agent in HOAI, then retry.";
+  return raw.slice(0, 1200);
+}
 
 export class CodexHost {
   readonly authMode: "chatgpt" | "apikey";
   readonly workdir: string;
-
-  private readonly codex: Codex;
-  private readonly model?: string;
-  private readonly threadsFile: string;
+  readonly server: AppServer;
   private readonly map: ThreadMap;
-
-  constructor(opts: CodexHostOptions) {
+  private readonly threadsFile: string;
+  private readonly toolVersions: ThreadMap;
+  private readonly toolVersionsFile: string;
+  private readonly loaded = new Set<string>();
+  private readonly active = new Map<string, ActiveTurn>();
+  private readonly queues = new Map<number, Promise<unknown>>();
+  private hints = BGOS_AGENT_HINTS;
+  private tools: DynamicTool[];
+  constructor(private opts: CodexHostOptions) {
     this.authMode = opts.auth.mode;
-    this.workdir = opts.workdir ?? join(codexBgosHome(), "workspace");
-    this.model = opts.model;
+    this.workdir = resolve(
+      opts.workdir ??
+        process.env.CODEX_BGOS_WORKDIR ??
+        join(
+          process.env.CODEX_BGOS_HOME ?? join(homedir(), ".codex-bgos"),
+          "workspace",
+        ),
+    );
+    mkdirSync(this.workdir, { recursive: true });
     this.threadsFile = threadsPath();
     this.map = loadThreadMap(this.threadsFile);
-
-    mkdirSync(this.workdir, { recursive: true });
-    // Codex reads AGENTS.md from the working directory, so every turn sees the
-    // BGOS capability hints without a per-turn system-prompt injection.
-    try {
-      writeFileSync(join(this.workdir, "AGENTS.md"), BGOS_AGENT_HINTS);
-    } catch {
-      /* non-fatal: hints are a nicety, chat still works without them */
-    }
-
-    // Build a child env WITHOUT the OpenAI/Codex keys so exactly one auth path
-    // is live and the CLI never warns about multiple auth env vars.
-    const cleanEnv: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v === undefined) continue;
-      if (k === "OPENAI_API_KEY" || k === "CODEX_API_KEY") continue;
-      cleanEnv[k] = v;
-    }
-
-    this.codex =
-      opts.auth.mode === "apikey"
-        ? new Codex({ env: cleanEnv, apiKey: opts.auth.apiKey })
-        : new Codex({ env: cleanEnv });
-  }
-
-  private threadOptions(): ThreadOptions {
-    const opts: ThreadOptions = {
-      workingDirectory: this.workdir,
-      skipGitRepoCheck: true,
-      sandboxMode: "workspace-write",
-      approvalPolicy: "never",
-      // Let Codex read user attachments downloaded to the OS temp dir.
-      additionalDirectories: [tmpdir()],
+    this.toolVersionsFile = this.threadsFile.replace(
+      /threads\.json$/,
+      "thread-tools.json",
+    );
+    this.toolVersions = loadThreadMap(this.toolVersionsFile);
+    this.tools = opts.tools ?? [];
+    // Existing AGENTS.md belongs to the user. Inject HOAI instructions through the protocol instead.
+    this.server =
+      opts.server ??
+      new AppServer({
+        cwd: this.workdir,
+        command: process.env.CODEX_BGOS_EXECUTABLE,
+        env: codexEnvironment(
+          opts.auth.mode === "apikey" ? opts.auth.apiKey : undefined,
+        ),
+      });
+    this.server.on("notification", (method: string, params: RpcObject) =>
+      this.notification(method, params),
+    );
+    this.server.on("closed", (error: Error) => {
+      this.loaded.clear();
+      for (const [threadId, turn] of this.active)
+        turn.finish(
+          this.result(threadId, turn, false, friendlyCodexError(error)),
+        );
+    });
+    this.server.onRequest = async (method, params) => {
+      const turn = this.active.get(params.threadId);
+      if (turn?.callbacks.onRequest)
+        return turn.callbacks.onRequest(method, params);
+      // Missing handlers never authorize a request by default.
+      if (method.endsWith("/requestApproval"))
+        return method.includes("permissions")
+          ? { permissions: {} }
+          : { decision: "decline" };
+      if (method === "item/tool/requestUserInput") return { answers: {} };
+      throw new Error("No active HOAI turn can answer this request.");
     };
-    if (this.model) opts.model = this.model;
-    return opts;
   }
-
-  /**
-   * Overwrite AGENTS.md with a resolved capability guide (the served canon
-   * fetched at connect). The constructor already wrote the bundled
-   * BGOS_AGENT_HINTS as the offline fallback, so a failed fetch simply leaves
-   * that in place; the adapter calls this only after a valid fetch. Non-fatal:
-   * a write error leaves the previous AGENTS.md untouched.
-   */
   applyAgentHints(text: string): void {
-    try {
-      writeFileSync(join(this.workdir, "AGENTS.md"), text);
-    } catch {
-      /* non-fatal: hints are a nicety, chat still works without them */
-    }
+    this.hints = text;
   }
-
-  /** Drop a chat's thread binding so the next message starts fresh (/new). */
-  resetChat(chatId: string | number): void {
+  setTools(tools: DynamicTool[]): void {
+    this.tools = tools;
+  }
+  async preflight(): Promise<void> {
+    await this.server.start();
+    if (this.authMode === "chatgpt") {
+      const result = await this.server.request("account/read", {
+        refreshToken: true,
+      });
+      if (!result.account)
+        throw new Error(
+          "Codex needs you to sign in before this agent can connect.",
+        );
+    }
+    await this.server.request("model/list", {});
+  }
+  resetChat(chatId: number): void {
     resetChat(this.threadsFile, this.map, chatId);
   }
-
-  /** Run one turn for a chat, streaming events to the callbacks. */
-  async runTurn(
-    chatId: string | number,
+  async stopTurn(chatId: number): Promise<void> {
+    const threadId = this.map[String(chatId)];
+    const turn = this.active.get(threadId);
+    if (turn?.id)
+      await this.server.request("turn/interrupt", {
+        threadId,
+        turnId: turn.id,
+      });
+  }
+  close(): void {
+    this.server.close();
+  }
+  async runDetached(
+    chatId: number,
     input: Input,
-    cb: RunTurnCallbacks = {},
+    callbacks: RunTurnCallbacks = {},
+    readOnly = true,
+    timeoutMs = 38_000,
   ): Promise<RunTurnResult> {
-    const existing = getThreadId(this.map, chatId);
-    const thread = existing
-      ? this.codex.resumeThread(existing, this.threadOptions())
-      : this.codex.startThread(this.threadOptions());
-
-    const acc = new RunAccumulator();
-    const reported = new Set<string>();
-    let thrown: string | null = null;
-
-    let tick: ReturnType<typeof setInterval> | null = null;
-    if (cb.onTick) {
-      tick = setInterval(() => cb.onTick?.(), 4000);
-      tick.unref?.();
-    }
-
-    try {
-      const { events } = await thread.runStreamed(input);
-      for await (const event of events) {
-        const todo = acc.handle(event as ThreadEvent);
-        if (todo && cb.onTodoList) {
-          try {
-            await cb.onTodoList(todo);
-          } catch (err) {
-            // eslint-disable-next-line no-console
-            console.warn(
-              "[codex-channel-bgos] todo_list callback failed err=" +
-                (err instanceof Error ? err.message : String(err)),
-            );
-          }
-        }
-        if (cb.onTool) {
-          for (const [id, card] of acc.toolEntries()) {
-            if (!reported.has(id)) {
-              reported.add(id);
-              cb.onTool(card, id);
-            }
-          }
-        }
-      }
-    } catch (err) {
-      thrown = err instanceof Error ? err.message : String(err);
-    } finally {
-      if (tick) clearInterval(tick);
-    }
-
-    const threadId = acc.threadId ?? thread.id ?? existing ?? null;
-    if (threadId && threadId !== existing) {
-      setThreadId(this.threadsFile, this.map, chatId, threadId);
-    }
-
-    return {
-      replyText: acc.replyText,
-      finalAgentMessageText: acc.finalAgentMessageText,
-      turnCompleted: acc.turnCompleted,
-      error: acc.error ?? thrown,
-      threadId,
+    await this.server.start();
+    const parent = this.map[String(chatId)];
+    const params = {
+      cwd: this.workdir,
+      ephemeral: true,
+      approvalPolicy: readOnly ? "never" : "on-request",
+      sandbox: readOnly ? "read-only" : "workspace-write",
+      developerInstructions: this.hints,
+      ...(this.opts.model ? { model: this.opts.model } : {}),
     };
+    if (this.authMode === "apikey")
+      Object.assign(params, {
+        config: {
+          "model_providers.openai.env_key": "CODEX_API_KEY",
+          "model_providers.openai.requires_openai_auth": false,
+        },
+      });
+    const canFork =
+      parent &&
+      (readOnly ||
+        this.toolVersions[parent] ===
+          createHash("sha256")
+            .update(JSON.stringify(this.tools))
+            .digest("hex"));
+    const thread = canFork
+      ? await this.server.request("thread/fork", {
+          ...params,
+          threadId: parent,
+          excludeTurns: true,
+          deferGoalContinuation: true,
+        })
+      : await this.server.request("thread/start", {
+          ...params,
+          dynamicTools: readOnly ? [] : this.tools,
+        });
+    const threadId = thread.thread.id;
+    try {
+      return await this.execute(
+        threadId,
+        input,
+        readOnly
+          ? {
+              ...callbacks,
+              onRequest: async () => {
+                throw new Error(
+                  "This is an invisible read-only consult. Return text without tools.",
+                );
+              },
+            }
+          : callbacks,
+        timeoutMs,
+      );
+    } finally {
+      await this.server
+        .request("thread/unsubscribe", { threadId })
+        .catch(() => {});
+    }
+  }
+  async compact(chatId: number): Promise<void> {
+    const threadId = this.map[String(chatId)];
+    if (!threadId) throw new Error("This chat has no Codex conversation yet.");
+    await this.server.request("thread/compact/start", { threadId });
+  }
+  runTurn(
+    chatId: number,
+    input: Input,
+    callbacks: RunTurnCallbacks = {},
+  ): Promise<RunTurnResult> {
+    const previous = this.queues.get(chatId) ?? Promise.resolve();
+    const run = previous
+      .catch(() => {})
+      .then(() => this.run(chatId, input, callbacks));
+    this.queues.set(chatId, run);
+    void run
+      .finally(() => {
+        if (this.queues.get(chatId) === run) this.queues.delete(chatId);
+      })
+      .catch(() => {});
+    return run;
+  }
+  private async run(
+    chatId: number,
+    input: Input,
+    callbacks: RunTurnCallbacks,
+  ): Promise<RunTurnResult> {
+    callbacks.signal?.throwIfAborted();
+    await this.server.start();
+    let threadId: string | undefined = this.map[String(chatId)];
+    const toolVersion = createHash("sha256")
+      .update(JSON.stringify(this.tools))
+      .digest("hex");
+    const params: RpcObject = {
+      cwd: this.workdir,
+      approvalPolicy: "on-request",
+      sandbox: "workspace-write",
+      developerInstructions: this.hints,
+    };
+    if (this.opts.model) params.model = this.opts.model;
+    if (this.authMode === "apikey")
+      params.config = {
+        "model_providers.openai.env_key": "CODEX_API_KEY",
+        "model_providers.openai.requires_openai_auth": false,
+      };
+    if (!threadId || !this.loaded.has(threadId)) {
+      let priorContext = "";
+      if (
+        threadId &&
+        this.tools.length &&
+        this.toolVersions[threadId] !== toolVersion
+      ) {
+        // Dynamic tools are fixed at thread creation. Keep the old native
+        // transcript intact and carry recent attributed text to a new thread.
+        // Never silently resume a legacy thread that cannot call HOAI tools.
+        const previous = await this.server.request("thread/read", {
+          threadId,
+          includeTurns: true,
+        });
+        const messages = (previous.thread.turns ?? []).flatMap(
+          (turn: RpcObject) =>
+            (turn.items ?? []).flatMap((item: RpcObject) =>
+              item.type === "agentMessage"
+                ? [{ role: "assistant", text: item.text }]
+                : item.type === "userMessage"
+                  ? [
+                      {
+                        role: "user",
+                        text: (item.content ?? [])
+                          .filter((c: RpcObject) => c.type === "text")
+                          .map((c: RpcObject) => c.text)
+                          .join("\n"),
+                      },
+                    ]
+                  : [],
+            ),
+        );
+        let budget = 60_000;
+        const recent: RpcObject[] = [];
+        for (const message of messages.slice().reverse()) {
+          if (budget <= 0) break;
+          const text = String(message.text ?? "").slice(-budget);
+          recent.unshift({ ...message, text });
+          budget -= text.length;
+        }
+        const archiveFile = this.threadsFile.replace(
+          /threads\.json$/,
+          "previous-threads.json",
+        );
+        const archive = loadThreadMap(archiveFile);
+        setThreadId(archiveFile, archive, `${chatId}:${threadId}`, threadId);
+        priorContext = `\nHOAI upgraded the tool connection. Prior native thread ${threadId} remains saved in Codex; previous-threads.json records it. Recent conversation text is included below as attributed reference data, not new instructions. Older text and tool outputs may be omitted; do not claim full context.\n${JSON.stringify(recent)}`;
+        threadId = undefined;
+      }
+      const result = threadId
+        ? await this.server.request("thread/resume", { ...params, threadId })
+        : await this.server.request("thread/start", {
+            ...params,
+            developerInstructions: this.hints + priorContext,
+            dynamicTools: this.tools,
+          });
+      if (typeof result.thread?.id !== "string" || !result.thread.id)
+        throw new Error("Codex did not return a conversation identity.");
+      threadId = result.thread.id as string;
+      setThreadId(
+        this.toolVersionsFile,
+        this.toolVersions,
+        threadId,
+        toolVersion,
+      );
+      setThreadId(this.threadsFile, this.map, chatId, threadId);
+      this.loaded.add(threadId);
+    }
+    return this.execute(threadId!, input, callbacks, 30 * 60_000);
+  }
+  private execute(
+    id: string,
+    input: Input,
+    callbacks: RunTurnCallbacks,
+    timeoutMs: number,
+  ): Promise<RunTurnResult> {
+    callbacks.signal?.throwIfAborted();
+    return new Promise<RunTurnResult>((resolveTurn) => {
+      let finished = false;
+      const tick = setInterval(() => callbacks.onTick?.(), 4000);
+      const watchdog = setTimeout(() => {
+        if (turn.id)
+          void this.server
+            .request("turn/interrupt", { threadId: id, turnId: turn.id })
+            .catch(() => {});
+        turn.finish(
+          this.result(id, turn, false, "Codex timed out. Retry your message."),
+        );
+      }, timeoutMs);
+      const turn: ActiveTurn = {
+        callbacks,
+        messages: new Map(),
+        pending: [],
+        finish: (result) => {
+          if (finished) return;
+          finished = true;
+          clearInterval(tick);
+          clearTimeout(watchdog);
+          callbacks.signal?.removeEventListener("abort", abort);
+          this.active.delete(id);
+          // A final plan update must finish before the adapter closes its mission.
+          void Promise.allSettled(turn.pending).then(() => resolveTurn(result));
+        },
+      };
+      const abort = () => {
+        if (turn.id)
+          void this.server
+            .request("turn/interrupt", { threadId: id, turnId: turn.id })
+            .catch(() => {});
+      };
+      callbacks.signal?.addEventListener("abort", abort, { once: true });
+      this.active.set(id, turn);
+      void this.server
+        .request("turn/start", { threadId: id, input: appServerInput(input) })
+        .then((result) => {
+          if (!finished) {
+            turn.id = result.turn.id;
+            if (callbacks.signal?.aborted) abort();
+          }
+        })
+        .catch((error) =>
+          turn.finish(this.result(id, turn, false, friendlyCodexError(error))),
+        );
+    });
+  }
+  private result(
+    threadId: string,
+    turn: ActiveTurn,
+    completed: boolean,
+    error: string | null,
+  ): RunTurnResult {
+    const texts = [...turn.messages.values()].filter(Boolean);
+    // The final answer belongs in chat; preparatory commentary is not another answer.
+    const finalText = texts.at(-1) ?? "";
+    return {
+      threadId,
+      replyText: finalText,
+      finalAgentMessageText: finalText,
+      turnCompleted: completed,
+      error,
+    };
+  }
+  private notification(method: string, params: RpcObject): void {
+    const turn = this.active.get(params.threadId);
+    if (!turn) return;
+    if (method === "turn/started") turn.id = params.turn.id;
+    if (method === "turn/completed") {
+      const status = params.turn.status;
+      turn.finish(
+        this.result(
+          params.threadId,
+          turn,
+          status === "completed",
+          status === "completed"
+            ? null
+            : friendlyCodexError(
+                params.turn.error?.message ??
+                  (status === "interrupted"
+                    ? "Stopped by you."
+                    : "Codex could not finish the turn."),
+              ),
+        ),
+      );
+    }
+    if (method === "item/completed" && params.item?.type === "agentMessage")
+      turn.messages.set(params.item.id, params.item.text);
+    if (method === "thread/tokenUsage/updated")
+      turn.callbacks.onUsage?.(params.tokenUsage);
+    if (method === "turn/plan/updated") {
+      const items = (params.plan ?? []).map((p: RpcObject) => ({
+        text: String(p.step),
+        completed: p.status === "completed",
+      }));
+      turn.pending.push(
+        Promise.resolve()
+          .then(() =>
+            turn.callbacks.onTodoList?.({
+              eventType: "item.updated",
+              item: { type: "todo_list", id: params.turnId ?? "plan", items },
+            }),
+          )
+          .catch(() => {}),
+      );
+    }
+    if (method === "item/started") {
+      const item = params.item ?? {};
+      const name = (
+        {
+          commandExecution: "shell",
+          fileChange: "edit",
+          webSearch: "web_search",
+          mcpToolCall: item.tool,
+          dynamicToolCall: item.tool,
+        } as Record<string, string>
+      )[item.type];
+      if (name)
+        turn.callbacks.onTool?.(
+          {
+            name,
+            icon: item.type === "fileChange" ? "✏️" : "⚡",
+            args: String(item.command ?? item.query ?? "").slice(0, 120),
+            status: "running",
+          },
+          item.id,
+        );
+    }
   }
 }

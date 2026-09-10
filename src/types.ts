@@ -37,6 +37,11 @@ export interface InboundFile {
   filename: string;
   mime: string;
   url?: string;
+  dataUri?: string;
+  fileData?: string;
+  fileName?: string;
+  mimeType?: string;
+  s3Key?: string;
 }
 
 export interface InboundMessagePayload {
@@ -67,6 +72,11 @@ export interface InboundMessagePayload {
   /** Turn state on a peer side-thread: `expecting_reply` | `more_coming` |
    *  `final`. Present alongside `peerConversationId`. */
   turnState?: string;
+  senderType?: "user" | "agent" | "system";
+  senderGuardrail?: string;
+  chatKind?: string;
+  senderUserId?: string;
+  senderRelationship?: string;
 }
 
 export interface CommandsUpdatedPayload {
@@ -123,6 +133,7 @@ export interface InboundClickPayload {
   optionId: number;
   callbackData: string;
   buttonText?: string;
+  customText?: string;
 }
 
 /** Option = button on a message (Telegram inline-keyboard equivalent). */

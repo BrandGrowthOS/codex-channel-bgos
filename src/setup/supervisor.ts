@@ -5,7 +5,8 @@
  * unit (Linux) that runs `node <cli.js> start` and keeps it alive. installService
  * writes and loads the unit; the renderers are unit-tested without touching disk.
  */
-import { join } from "node:path";
+import { posix } from "node:path";
+import { xml } from "./background-service.js";
 
 export const LAUNCHD_LABEL = "ai.brandgrowthos.codex-bgos";
 export const SYSTEMD_UNIT = "codex-bgos.service";
@@ -29,9 +30,9 @@ export interface SupervisorRenderOptions {
 }
 
 export function renderLaunchdPlist(opts: SupervisorRenderOptions): string {
-  const label = opts.label ?? LAUNCHD_LABEL;
-  const outLog = join(opts.home, "logs", "codex-bgos.log");
-  const errLog = join(opts.home, "logs", "codex-bgos.err");
+  const label = xml(opts.label ?? LAUNCHD_LABEL);
+  const outLog = xml(posix.join(opts.home, "logs", "codex-bgos.log"));
+  const errLog = xml(posix.join(opts.home, "logs", "codex-bgos.err"));
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -39,8 +40,8 @@ export function renderLaunchdPlist(opts: SupervisorRenderOptions): string {
   <key>Label</key><string>${label}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${opts.nodePath}</string>
-    <string>${opts.cliEntry}</string>
+    <string>${xml(opts.nodePath)}</string>
+    <string>${xml(opts.cliEntry)}</string>
     <string>start</string>
   </array>
   <key>EnvironmentVariables</key><dict>

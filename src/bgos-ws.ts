@@ -19,6 +19,7 @@ import {
 } from "./types.js";
 
 type EventMap = {
+  meeting_event: [Record<string, unknown>];
   inbound_message: [InboundMessagePayload];
   inbound_click: [InboundClickPayload];
   commands_updated: [CommandsUpdatedPayload];
@@ -142,16 +143,24 @@ export class BgosWs {
       this.emitter.emit("inbound_message", msg);
     });
 
+    for (const event of [
+      "meeting_message",
+      "meeting_turn_changed",
+      "meeting_state_resync",
+    ]) {
+      socket.on(event, (payload: unknown) => {
+        if (payload && typeof payload === "object")
+          this.emitter.emit("meeting_event", payload);
+      });
+    }
+
     socket.on("inbound_click", (payload: unknown) => {
       const click = this.normalizeInboundClick(payload);
       if (click) this.emitter.emit("inbound_click", click);
     });
 
     socket.on("commands_updated", (p: unknown) =>
-      this.emitter.emit(
-        "commands_updated",
-        p as CommandsUpdatedPayload,
-      ),
+      this.emitter.emit("commands_updated", p as CommandsUpdatedPayload),
     );
     socket.on("pair_ready", (p: unknown) =>
       this.emitter.emit("pair_ready", p as PairReadyPayload),
@@ -231,7 +240,8 @@ export class BgosWs {
       if (stormLimit > 0 && normalized.length > stormLimit) {
         // Storm guard: fast-forward the cursor, skip dispatch, surface it.
         let maxId = since;
-        for (const m of normalized) if (m.messageId > maxId) maxId = m.messageId;
+        for (const m of normalized)
+          if (m.messageId > maxId) maxId = m.messageId;
         saveLastId(maxId);
         this.emitter.emit("backfill_storm", normalized.length);
         return;
@@ -329,13 +339,44 @@ export class BgosWs {
       messageId,
       userId: String(r.userId ?? r.user_id ?? ""),
       text: String(r.text ?? ""),
-      files: Array.isArray(r.files) ? (r.files as InboundMessagePayload["files"]) : [],
-      messageType: (r.messageType ?? r.message_type ?? "standard") as
-        InboundMessagePayload["messageType"],
+      senderType:
+        peerConversationId || (r.senderType ?? r.sender_type) === "agent"
+          ? "agent"
+          : (r.senderType ?? r.sender_type) === "system"
+            ? "system"
+            : "user",
+      chatKind: String(
+        r.chat_kind ??
+          (r.groupContext as Record<string, unknown> | undefined)?.chatKind ??
+          "main",
+      ),
+      senderUserId: String(
+        r.sender_user_id ??
+          (r.sender as Record<string, unknown> | undefined)?.userId ??
+          r.userId ??
+          r.user_id ??
+          "",
+      ),
+      senderRelationship: String(
+        r.sender_relationship ??
+          (r.sender as Record<string, unknown> | undefined)?.relationship ??
+          "unknown",
+      ),
+      ...(typeof (r.senderGuardrail ?? r.sender_guardrail) === "string"
+        ? { senderGuardrail: String(r.senderGuardrail ?? r.sender_guardrail) }
+        : {}),
+      files: Array.isArray(r.files)
+        ? (r.files as InboundMessagePayload["files"])
+        : [],
+      messageType: (r.messageType ??
+        r.message_type ??
+        "standard") as InboundMessagePayload["messageType"],
       commandName: (r.commandName ?? r.command_name ?? undefined) as
-        string | undefined,
+        | string
+        | undefined,
       commandArgs: (r.commandArgs ?? r.command_args ?? undefined) as
-        string | undefined,
+        | string
+        | undefined,
       ...(peerConversationId !== undefined ? { peerConversationId } : {}),
       ...(typeof turnStateRaw === "string" && turnStateRaw
         ? { turnState: turnStateRaw }
@@ -366,6 +407,9 @@ export class BgosWs {
       userId: String(r.userId ?? r.user_id ?? ""),
       optionId: toInt(r.optionId ?? r.option_id),
       callbackData,
+      ...(typeof (r.customText ?? r.custom_text) === "string"
+        ? { customText: String(r.customText ?? r.custom_text) }
+        : {}),
       ...(typeof (r.buttonText ?? r.button_text) === "string"
         ? { buttonText: String(r.buttonText ?? r.button_text) }
         : {}),
