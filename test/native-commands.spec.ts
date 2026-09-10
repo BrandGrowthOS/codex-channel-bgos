@@ -109,6 +109,38 @@ describe("native controls", () => {
       expect.stringContaining("owner"),
     );
   });
+  it("pages a larger account catalog within six options and changes only the final selection", async () => {
+    const s = setup();
+    s.host.listModels.mockResolvedValue(
+      Array.from({ length: 8 }, (_, index) => ({
+        ...models[0],
+        model: `model${index + 1}`,
+        id: `model${index + 1}`,
+        displayName: `Model ${index + 1}`,
+      })),
+    );
+    for (const value of [
+      "__next_page",
+      "__previous_page",
+      "__next_page",
+      "model6",
+      "low",
+    ])
+      s.interactions.ask.mockResolvedValueOnce([
+        { picked_option_value: value },
+      ]);
+    await s.router.handle(s.args("model"));
+    expect(s.interactions.ask).toHaveBeenCalledTimes(5);
+    for (const call of s.interactions.ask.mock.calls) {
+      expect(call[1][0].options.length).toBeLessThanOrEqual(6);
+    }
+    expect(s.host.updateSettings).toHaveBeenCalledTimes(1);
+    expect(s.host.updateSettings).toHaveBeenCalledWith(
+      20,
+      expect.objectContaining({ model: "model6", effort: "low" }),
+    );
+    expect(s.run).not.toHaveBeenCalled();
+  });
   it("never interprets agent/system text as native control", async () => {
     const s = setup();
     for (const senderType of ["agent", "system"])
