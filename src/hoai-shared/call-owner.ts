@@ -144,12 +144,16 @@ export interface CallOwnerBodyInput {
   /** Chat to bind the call to. Omitted from the body when undefined/null/NaN. */
   chatId?: number | null
   /** Short reason shown on the ring; normalized by normalizeCallOwnerReason. */
+  context?: string | null
+  openingMessage?: string | null
   reason?: string | null
 }
 
 export interface CallOwnerBody {
   assistantId: number
   chatId?: number
+  context?: string
+  openingMessage?: string
   reason?: string
 }
 
@@ -166,6 +170,8 @@ export function buildCallOwnerBody({
   assistantId,
   chatId,
   reason,
+  context,
+  openingMessage,
 }: CallOwnerBodyInput): CallOwnerBody {
   const body: CallOwnerBody = { assistantId }
 
@@ -176,5 +182,10 @@ export function buildCallOwnerBody({
   const normalized = normalizeCallOwnerReason(reason)
   if (normalized) body.reason = normalized
 
+  for (const [key, value, limit] of [['context', context, 4000], ['openingMessage', openingMessage, 400]] as const) {
+    if (value == null) continue
+    if (typeof value !== 'string' || [...value].length > limit) throw new Error(`${key} must be a string of at most ${limit} characters`)
+    if (value.trim()) body[key] = value.trim()
+  }
   return body
 }

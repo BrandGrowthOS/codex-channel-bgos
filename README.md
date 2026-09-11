@@ -107,3 +107,7 @@ Release order: publish this connector version first, verify the npm package, the
 ## License
 
 Original code: MIT. Adapted `src/hoai-shared` code: Apache-2.0. See `LICENSE`, `NOTICE`, and `LICENSES/Apache-2.0.txt`.
+
+### OpenAI native call context
+
+With the updated HOAI app/backend and GPT-Live selected, native `call_owner` accepts optional `context` (4000 characters) and `opening_message` (400 characters). HOAI always includes the last 12 usable authorized chat messages, or all available if fewer. The opening suggests the first sentence after the owner answers. Keep private details in `context`, not the public `reason`. Long text is bounded to the voice budget. ElevenLabs keeps its existing settings and behavior.

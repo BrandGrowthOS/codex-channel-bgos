@@ -147,3 +147,11 @@ describe("typed HOAI boundary", () => {
     expect(api.agentRequest).not.toHaveBeenCalled();
   });
 });
+
+it("maps the Codex call tool fields to the shared outbound-call API without changing identity", async () => {
+  const api = { agentRequest: vi.fn(async () => ({ callId: "c1", status: "ringing" })) };
+  const tools = new HoaiTools(api as any, () => "canon");
+  const result: any = await tools.handleRequest("item/tool/call", { tool: "call_owner", arguments: { reason: "Build ready.", context: "Build 42 passed.", opening_message: "Your build is ready." } }, context());
+  expect(result.success).toBe(true);
+  expect(api.agentRequest).toHaveBeenCalledWith("POST", "voice/outbound-call", 9, { assistantId: 9, chatId: 17, reason: "Build ready.", context: "Build 42 passed.", openingMessage: "Your build is ready." });
+});
