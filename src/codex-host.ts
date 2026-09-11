@@ -14,6 +14,7 @@ import {
   type ThreadMap,
 } from "./thread-map.js";
 import { BGOS_AGENT_HINTS } from "./agent-hints.js";
+import { browserMcpConfigOverrides, resolveBrowserShim } from "./browser-mcp.js";
 import type { AuthResolutionOk } from "./auth-mode.js";
 import {
   SessionSettingsStore,
@@ -490,13 +491,17 @@ export class CodexHost {
         ? { model: settings.model ?? this.opts.model }
         : {}),
     };
+    const config: Record<string, unknown> = {
+      // The HOAI Agent Browser (the pane in the desktop app) as an MCP server
+      // on every thread, so it is the agent's default browser. See browser-mcp.ts.
+      ...browserMcpConfigOverrides(resolveBrowserShim()),
+    };
     if (this.authMode === "apikey")
-      Object.assign(params, {
-        config: {
-          "model_providers.openai.env_key": "CODEX_API_KEY",
-          "model_providers.openai.requires_openai_auth": false,
-        },
+      Object.assign(config, {
+        "model_providers.openai.env_key": "CODEX_API_KEY",
+        "model_providers.openai.requires_openai_auth": false,
       });
+    if (Object.keys(config).length > 0) Object.assign(params, { config });
     const canFork =
       parent &&
       (readOnly ||
