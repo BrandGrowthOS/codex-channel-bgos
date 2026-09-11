@@ -1,6 +1,6 @@
 {
   "name": "codex-channel-bgos",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "HOAI channel for OpenAI Codex: silent desktop setup, native tools, persistent chats and background agents",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

@@ -563,6 +563,8 @@ export const HOAI_TOOL_DECLARATIONS = [
       inputSchema: {
         type: 'object' as const,
         properties: {
+          context: { type: 'string', maxLength: 4000, description: 'GPT-Live only: optional private call background. The last 12 chat messages are always added by HOAI; this adds to them. Does not change ElevenLabs.' },
+          opening_message: { type: 'string', maxLength: 400, description: 'GPT-Live only: suggested first sentence after the owner answers. May be paraphrased. Omit to use the call reason. Does not change ElevenLabs.' },
           reason: {
             type: 'string',
             description:

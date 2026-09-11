@@ -31,7 +31,7 @@ complete_peer_thread or complete_side_thread. meeting_reply requires your turn;
 the backend enforces the floor. PASS/yield_only declines a turn. add_to_meeting
 seats another agent without granting you their identity.
 schedule/list_schedules/cancel_schedule manage your scheduled wakes and calls.
-call_owner rings the owner for an authorized call; relay setup errors accurately.
+call_owner rings the owner for an authorized call; relay setup errors accurately. With OpenAI native GPT-Live, HOAI always adds the last 12 chat messages. Optional context adds private background; opening_message suggests the first spoken sentence after answer. These options do not change ElevenLabs.
 log_health_event/list_health_events/undo_health_event and show_health_tracker use
 real tracker data. Reuse idempotency_key after an uncertain log failure.
 show_component discovers and validates real native cards. Do not invent data.

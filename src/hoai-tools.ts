@@ -444,6 +444,8 @@ export class HoaiTools {
             assistantId: context.assistantId,
             chatId,
             reason: args.reason,
+            context: args.context,
+            openingMessage: args.opening_message,
           }),
         );
       case "schedule":
