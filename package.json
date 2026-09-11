@@ -1,7 +1,7 @@
 {
   "name": "codex-channel-bgos",
-  "version": "0.2.1",
-  "description": "BGOS channel adapter for OpenAI Codex: pair, WS + REST client, Codex SDK host, outbound modalities, one-paste connect",
+  "version": "0.3.0",
+  "description": "HOAI channel for OpenAI Codex: silent desktop setup, native tools, persistent chats and background agents",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "type": "module",
@@ -26,22 +26,27 @@
     "brandgrowthos"
   ],
   "author": "BrandGrowthOS",
-  "license": "MIT",
+  "license": "MIT AND Apache-2.0",
   "dependencies": {
-    "@openai/codex-sdk": "^0.144.1",
+    "@openai/codex": "^0.154.0",
+    "@openai/codex-sdk": "^0.154.0",
     "axios": "^1.13.2",
+    "proper-lockfile": "^4.1.2",
     "qrcode": "^1.5.4",
     "socket.io-client": "^4.8.1",
     "zod": "^4.3.5"
   },
   "devDependencies": {
     "@types/node": "^22.10.5",
+    "@types/proper-lockfile": "^4.1.4",
     "@types/qrcode": "^1.5.6",
     "typescript": "^5.7.3",
     "vitest": "^2.1.8"
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "NOTICE",
+    "LICENSES"
   ]
 }

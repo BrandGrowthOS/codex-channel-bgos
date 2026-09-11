@@ -30,7 +30,7 @@
  */
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, resolve, sep } from "node:path";
+import { basename, isAbsolute, resolve, sep } from "node:path";
 
 /** Thrown when an outbound file path fails the allowlist. */
 export class MediaPathError extends Error {
@@ -62,6 +62,7 @@ const SENSITIVE_PREFIXES: readonly string[] = [
   resolve(homedir(), ".kube"),
   // The plugin's own pairing-token store.
   resolve(homedir(), ".codex-bgos", "secrets"),
+  resolve(homedir(), ".codex", "auth.json"),
 ];
 
 /**
@@ -77,7 +78,7 @@ function resolveMediaRoot(): string {
   if (raw) {
     return realpathOrResolve(raw);
   }
-  const cwd = process.cwd();
+  const cwd = process.env.CODEX_BGOS_WORKDIR ?? process.cwd();
   const mediaDir = resolve(cwd, "media");
   try {
     // If `<cwd>/media` exists, pin to it (narrower = safer).
@@ -104,6 +105,10 @@ function realpathOrResolve(p: string): string {
  *  already be absolute + normalized. Uses a separator-terminated compare
  *  so `/a/media` does not match `/a/media-evil`. */
 function isContained(parent: string, child: string): boolean {
+  if (process.platform === "win32") {
+    parent = parent.toLowerCase();
+    child = child.toLowerCase();
+  }
   if (child === parent) return true;
   const withSep = parent.endsWith(sep) ? parent : parent + sep;
   return child.startsWith(withSep);
@@ -127,8 +132,36 @@ export function resolveAllowedMediaPath(filePath: string): string {
     throw new MediaPathError("outbound file path contains a NUL byte");
   }
   const requested = isAbsolute(filePath)
-    ? filePath
-    : resolve(process.cwd(), filePath);
+    ? resolve(filePath)
+    : resolve(process.env.CODEX_BGOS_WORKDIR ?? process.cwd(), filePath);
+  const sensitive = (path: string): boolean => {
+    const base = basename(path).toLowerCase();
+    return (
+      SENSITIVE_PREFIXES.some((prefix) => isContained(resolve(prefix), path)) ||
+      /^(?:\.env(?:\..*)?|id_rsa|id_ed25519|service\.json)$/.test(base) ||
+      /[\\/]\.codex-bgos[\\/]agents[\\/][^\\/]+[\\/]secrets(?:[\\/]|$)/i.test(
+        path,
+      ) ||
+      isContained(
+        resolve(
+          process.env.CODEX_HOME ?? resolve(homedir(), ".codex"),
+          "auth.json",
+        ),
+        path,
+      ) ||
+      isContained(
+        resolve(
+          process.env.CODEX_BGOS_HOME ?? resolve(homedir(), ".codex-bgos"),
+          "secrets",
+        ),
+        path,
+      )
+    );
+  };
+  if (sensitive(requested))
+    throw new MediaPathError(
+      `refusing to send file from a sensitive location: ${requested}`,
+    );
 
   // realpath the target - this both proves the file exists AND collapses
   // any `..` segments and symlink hops to the true on-disk location, so a
@@ -142,6 +175,10 @@ export function resolveAllowedMediaPath(filePath: string): string {
       `outbound file not found or unreadable: ${filePath}`,
     );
   }
+  if (sensitive(real))
+    throw new MediaPathError(
+      `refusing to send file from a sensitive location: ${real}`,
+    );
 
   // Hard-deny sensitive locations regardless of root configuration. We
   // check BOTH the pre-resolution absolute path AND the realpath, because:

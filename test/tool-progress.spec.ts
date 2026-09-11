@@ -46,9 +46,7 @@ describe("ToolProgressOrchestrator (Codex)", () => {
       messageType: "tool_progress",
       toolProgress: {
         state: "running",
-        tools: [
-          { icon: "💻", name: "Bash", args: "uptime", status: "done" },
-        ],
+        tools: [{ icon: "💻", name: "Bash", args: "uptime", status: "done" }],
       },
     });
     expect(orch._internal.activeChats).toEqual([42]);
@@ -216,9 +214,7 @@ describe("ToolProgressOrchestrator (Codex)", () => {
     const posts = server.requests.filter(
       (r) => r.method === "POST" && r.url.startsWith("/api/v1/messages"),
     );
-    const icons = posts.map(
-      (p) => (p.body as any).toolProgress.tools[0].icon,
-    );
+    const icons = posts.map((p) => (p.body as any).toolProgress.tools[0].icon);
     expect(icons).toEqual(["💻", "📖", "🔎", "📂"]);
   });
 
@@ -234,5 +230,30 @@ describe("ToolProgressOrchestrator (Codex)", () => {
     });
     const body = server.requests.at(-1)!.body as any;
     expect(body.toolProgress.tools[0].icon).toBe("🌟");
+  });
+  it("updates one native item from running to failed without duplicating it", async () => {
+    server.stage("POST", "/api/v1/messages", 201, { id: 9900 });
+    server.stage("PATCH", "/api/v1/messages/9900", 200, {});
+    server.stage("PATCH", "/api/v1/messages/9900", 200, {});
+    const orch = new ToolProgressOrchestrator(makeApi(baseUrl), {
+      debounceMs: 0,
+    });
+    const item = {
+      assistantId: 1,
+      chatId: 110,
+      toolName: "shell",
+      itemId: "command-1",
+      args: "test",
+    };
+    await orch.sendToolStart({ ...item, status: "running" });
+    await orch.sendToolStart({ ...item, status: "error" });
+    await orch.finalizeTurn(110);
+    const posts = server.requests.filter((r) => r.method === "POST");
+    expect(posts).toHaveLength(1);
+    expect((posts[0].body as any).toolProgress.tools[0].status).toBe("running");
+    const final = server.requests.filter((r) => r.method === "PATCH").at(-1)!;
+    expect((final.body as any).toolProgress.tools).toEqual([
+      expect.objectContaining({ name: "shell", status: "error" }),
+    ]);
   });
 });

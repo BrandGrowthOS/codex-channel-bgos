@@ -68,18 +68,9 @@ export interface ReplyHandle {
     options?: MessageOption[],
     modal?: boolean,
   ) => Promise<{ id: number }>;
-  sendFile: (
-    filePath: string,
-    caption?: string,
-  ) => Promise<{ id: number }>;
-  sendImage: (
-    filePath: string,
-    caption?: string,
-  ) => Promise<{ id: number }>;
-  sendVideo: (
-    filePath: string,
-    caption?: string,
-  ) => Promise<{ id: number }>;
+  sendFile: (filePath: string, caption?: string) => Promise<{ id: number }>;
+  sendImage: (filePath: string, caption?: string) => Promise<{ id: number }>;
+  sendVideo: (filePath: string, caption?: string) => Promise<{ id: number }>;
   sendTyping: () => Promise<void>;
   /** Publish a local file path to BGOS as a `files[]` entry; useful when
    *  the agent emits structured tool output rather than a `MEDIA:` line.
@@ -157,6 +148,11 @@ export interface DispatchArgs {
   /** Turn state on the peer side-thread (`expecting_reply` | `more_coming`
    *  | `final`) when `peerConversationId` is set. */
   turnState?: string;
+  senderType?: "user" | "agent" | "system";
+  senderGuardrail?: string;
+  chatKind?: string;
+  senderUserId?: string;
+  senderRelationship?: string;
 }
 
 export type DispatchFn = (args: DispatchArgs) => Promise<void>;
@@ -207,7 +203,13 @@ export function buildReplyHandle(
   return {
     origin: "bgos",
     sendText: (text) =>
-      deps.outbound.sendText({ assistantId, chatId, text, replyVia, replyToId }),
+      deps.outbound.sendText({
+        assistantId,
+        chatId,
+        text,
+        replyVia,
+        replyToId,
+      }),
     sendButtons: (text, options) =>
       deps.outbound.sendButtons({
         assistantId,
@@ -232,7 +234,13 @@ export function buildReplyHandle(
         replyToId,
       }),
     sendAskUserInput: (prompt, options, modal) =>
-      deps.outbound.sendAskUserInput({ assistantId, chatId, prompt, options, modal }),
+      deps.outbound.sendAskUserInput({
+        assistantId,
+        chatId,
+        prompt,
+        options,
+        modal,
+      }),
     sendFile: (filePath, caption) =>
       deps.outbound.sendFile({
         assistantId,
@@ -265,7 +273,12 @@ export function buildReplyHandle(
       publishMediaPath(deps.outbound.api, filePath, opts),
     sendToolStart: async (toolName, args) => {
       if (!deps.toolProgress) return;
-      await deps.toolProgress.sendToolStart({ assistantId, chatId, toolName, args });
+      await deps.toolProgress.sendToolStart({
+        assistantId,
+        chatId,
+        toolName,
+        args,
+      });
     },
     finalizeTurn: async () => {
       if (!deps.toolProgress) return;
@@ -346,10 +359,9 @@ export function createInboundHandler(
     deps.onInbound?.();
 
     // Translate BGOS attachments to local file paths. Failures are
-    // surfaced as a single agent_error and the message is still
-    // dispatched without attachments - better degraded behavior than
-    // dropping the user's text entirely.
+    // disclosed to both the user and the model; the user's text is retained.
     const attachments: DispatchArgs["attachments"] = [];
+    const missingAttachments: string[] = [];
     for (const f of event.files ?? []) {
       try {
         const ingested = await ingestBgosAttachment(
@@ -357,11 +369,16 @@ export function createInboundHandler(
         );
         attachments.push({
           localPath: ingested.localPath,
-          fileName: (f.filename || "attachment") as string,
+          fileName: ((f as BgosInboundAttachment).fileName ||
+            f.filename ||
+            "attachment") as string,
           mimeType: ingested.mimeType,
           kind: ingested.kind,
         });
       } catch (err) {
+        missingAttachments.push(
+          (f as BgosInboundAttachment).fileName || f.filename || "attachment",
+        );
         // eslint-disable-next-line no-console
         console.warn(
           "[codex-channel-bgos] attachment ingest failed for " +
@@ -370,6 +387,16 @@ export function createInboundHandler(
             (err instanceof Error ? err.message : String(err)),
         );
       }
+    }
+    if (missingAttachments.length) {
+      await deps.outbound
+        .sendAgentError({
+          assistantId: event.assistantId,
+          chatId: event.chatId,
+          reason:
+            "Some attachments could not be downloaded. Please attach them again.",
+        })
+        .catch(() => {});
     }
 
     // a2a peer detection. If this inbound carries a peerConversationId it
@@ -435,7 +462,15 @@ export function createInboundHandler(
         chatId: event.chatId,
         messageId: event.messageId,
         userId: event.userId,
-        text: event.text,
+        senderType: event.senderType,
+        chatKind: event.chatKind,
+        senderUserId: event.senderUserId,
+        senderRelationship: event.senderRelationship,
+        senderGuardrail:
+          event.senderType === "agent" ? undefined : event.senderGuardrail,
+        text: missingAttachments.length
+          ? `${event.text}\n\n[Attachment delivery notice: the following files are unavailable. Do not infer their contents. File names: ${JSON.stringify(missingAttachments)}]`
+          : event.text,
         attachments,
         systemPrompt,
         replyHandle,

@@ -5,14 +5,12 @@ import {
   writeFileSync,
   symlinkSync,
   realpathSync,
+  mkdirSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import {
-  resolveAllowedMediaPath,
-  MediaPathError,
-} from "../src/media-guard.js";
+import { resolveAllowedMediaPath, MediaPathError } from "../src/media-guard.js";
 
 describe("media-guard.resolveAllowedMediaPath", () => {
   let root: string; // the allowed media root (realpath'd)
@@ -67,18 +65,32 @@ describe("media-guard.resolveAllowedMediaPath", () => {
   it("rejects a symlink whose target escapes the root", () => {
     const target = join(outside, "real-secret.txt");
     writeFileSync(target, "x");
-    const link = join(root, "innocent.txt");
-    symlinkSync(target, link);
+    const link = join(root, "innocent");
+    symlinkSync(
+      outside,
+      link,
+      process.platform === "win32" ? "junction" : "dir",
+    );
     // The link lives inside root, but realpath resolves to `outside`.
-    expect(() => resolveAllowedMediaPath(link)).toThrow(MediaPathError);
+    expect(() =>
+      resolveAllowedMediaPath(join(link, "real-secret.txt")),
+    ).toThrow(MediaPathError);
   });
 
   it("allows a symlink that stays inside the root", () => {
-    const target = join(root, "real.png");
+    const directory = join(root, "original");
+    mkdirSync(directory);
+    const target = join(directory, "real.png");
     writeFileSync(target, "x");
-    const link = join(root, "alias.png");
-    symlinkSync(target, link);
-    expect(resolveAllowedMediaPath(link)).toBe(realpathSync(target));
+    const link = join(root, "alias");
+    symlinkSync(
+      directory,
+      link,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    expect(resolveAllowedMediaPath(join(link, "real.png"))).toBe(
+      realpathSync(target),
+    );
   });
 
   it("rejects a non-existent file", () => {
@@ -92,9 +104,7 @@ describe("media-guard.resolveAllowedMediaPath", () => {
   });
 
   it("rejects a NUL-byte path", () => {
-    expect(() => resolveAllowedMediaPath("/tmp/a\0b.png")).toThrow(
-      /NUL byte/,
-    );
+    expect(() => resolveAllowedMediaPath("/tmp/a\0b.png")).toThrow(/NUL byte/);
   });
 
   it("does not treat a sibling dir sharing the root prefix as inside", () => {

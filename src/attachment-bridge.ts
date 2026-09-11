@@ -15,10 +15,7 @@
  * The fork is responsible for plugging these into Codex's photo/document/
  * voice handlers - this module only provides the wire-level shims.
  */
-import {
-  createWriteStream,
-  promises as fsp,
-} from "node:fs";
+import { createWriteStream, promises as fsp } from "node:fs";
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import { Readable, Transform } from "node:stream";
@@ -127,8 +124,7 @@ export async function ingestBgosAttachment(
   att: BgosInboundAttachment,
 ): Promise<{ localPath: string; kind: AttachmentKind; mimeType: string }> {
   const fileName = att.fileName || att.filename || "attachment";
-  const mimeType =
-    att.mimeType || att.mime || "application/octet-stream";
+  const mimeType = att.mimeType || att.mime || "application/octet-stream";
   const kind = inferKindFromMime(mimeType);
 
   // Build a unique temp path that preserves the original extension when
@@ -155,9 +151,7 @@ export async function ingestBgosAttachment(
     // byte cap so a hostile backend cannot fill the disk.
     const res = await fetchAttachmentGuarded(att.url);
     if (!res.ok) {
-      throw new Error(
-        `download failed: HTTP ${res.status} for ${fileName}`,
-      );
+      throw new Error(`download failed: HTTP ${res.status} for ${fileName}`);
     }
     if (!res.body) throw new Error(`download produced no body for ${fileName}`);
     // Reject an oversized declared length up front; the counting stream below
@@ -203,7 +197,9 @@ export async function ingestBgosAttachment(
         "backend should provide a presigned `url`",
     );
   }
-  throw new Error(`attachment ${fileName} has no fetch path (no url/dataUri/fileData/s3Key)`);
+  throw new Error(
+    `attachment ${fileName} has no fetch path (no url/dataUri/fileData/s3Key)`,
+  );
 }
 
 /**
@@ -232,10 +228,61 @@ export async function publishMediaPath(
   // differ after symlink resolution) unless the caller overrode it.
   const fileName = opts.fileName ?? filePath.split(/[\\/]/).pop() ?? "file";
   const mimeType = opts.mimeType ?? guessMimeType(fileName);
+  const limit = mimeType.startsWith("video/")
+    ? 100 * 1024 * 1024
+    : mimeType.startsWith("image/")
+      ? 10 * 1024 * 1024
+      : 25 * 1024 * 1024;
+  if (!stat.isFile() || size > limit)
+    throw new Error(
+      `Attachment must be a file no larger than ${limit / 1024 / 1024} MB.`,
+    );
 
   // Read once up front: we need the bytes for both the inline path AND the
   // dimension sniff (images only). Files here are bounded by the media-guard.
   const bytes = await fsp.readFile(safePath);
+  return publishMediaBytes(api, bytes, fileName, mimeType);
+}
+
+/** Remote media uses the same bounded, redirect-checked downloader as inbound files. */
+export async function publishMediaUrl(
+  api: BgosApi,
+  url: string,
+  opts: { fileName?: string; mimeType?: string } = {},
+): Promise<BgosOutboundFileRef> {
+  const name =
+    opts.fileName ?? new URL(url).pathname.split("/").pop() ?? "attachment";
+  const media = await ingestBgosAttachment({
+    url,
+    fileName: name,
+    mimeType: opts.mimeType ?? guessMimeType(name),
+  });
+  try {
+    return await publishMediaBytes(
+      api,
+      await fsp.readFile(media.localPath),
+      name,
+      media.mimeType,
+    );
+  } finally {
+    await fsp.unlink(media.localPath).catch(() => {});
+  }
+}
+
+async function publishMediaBytes(
+  api: BgosApi,
+  bytes: Buffer,
+  fileName: string,
+  mimeType: string,
+): Promise<BgosOutboundFileRef> {
+  const size = bytes.length;
+  const limit = mimeType.startsWith("video/")
+    ? 100 * 1024 * 1024
+    : mimeType.startsWith("image/")
+      ? 10 * 1024 * 1024
+      : 25 * 1024 * 1024;
+  if (size > limit)
+    throw new Error(`Attachment exceeds the ${limit / 1024 / 1024} MB limit.`);
   const flags = classifyMedia(mimeType);
   const dims = flags.isImage ? sniffImageDimensions(bytes) : {};
 
@@ -257,14 +304,13 @@ export async function publishMediaPath(
     size,
   });
   const putRes = await fetch(presigned.upload_url, {
+    signal: AbortSignal.timeout(120_000),
     method: "PUT",
     body: new Uint8Array(bytes),
     headers: { "Content-Type": mimeType },
   });
   if (!putRes.ok) {
-    throw new Error(
-      `S3 PUT failed: HTTP ${putRes.status} for ${fileName}`,
-    );
+    throw new Error(`S3 PUT failed: HTTP ${putRes.status} for ${fileName}`);
   }
   return {
     fileName,
@@ -310,6 +356,8 @@ function guessMimeType(fileName: string): string {
       return "application/pdf";
     case ".txt":
       return "text/plain";
+    case ".md":
+      return "text/markdown";
     case ".csv":
       return "text/csv";
     case ".json":

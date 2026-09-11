@@ -1,0 +1,9 @@
+﻿This package contains adapted HOAI tool declarations and request builders from
+BrandGrowthOS/bgos-claude-plugin, commit
+3ecbb58679febcc243f671e05788b521b065546e (version 0.38.15), licensed Apache-2.0.
+
+The adapted files live in src/hoai-shared/ (compiled as dist/hoai-shared/).
+Changes include typed transport integration, Codex-specific tool naming,
+and free-text-only native form fields in ask_user_input.
+The upstream Apache-2.0 license is included in LICENSES/Apache-2.0.txt.
+Other original codex-channel-bgos code is covered by the root MIT LICENSE.

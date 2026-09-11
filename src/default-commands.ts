@@ -1,20 +1,30 @@
 import type { CommandManifestEntry } from "./types.js";
+import { NATIVE_COMMAND_DESCRIPTIONS } from "./native-commands.js";
 
 /**
  * The Codex adapter's built-in user-invocable slash commands.
  *
  * These pre-populate BGOS's slash picker for a freshly bound assistant. They are
- * bridge-local: the daemon handles them and Codex never sees them (see
- * inbound/adapter). Names match `^[a-z0-9_]{1,32}$`, descriptions <=100 chars.
+ * handled by the daemon through native protocol methods, not interpreted as
+ * model prompts. Names follow HOAI's 64-character command contract; descriptions <=100 chars.
  * Order is the picker order.
  */
 const _DEFAULT_COMMANDS: ReadonlyArray<{
   name: string;
   description: string;
 }> = [
-  { name: "new", description: "Start a fresh conversation (resets the Codex thread)" },
+  {
+    name: "new",
+    description: "Start a fresh conversation (resets the Codex thread)",
+  },
   { name: "retry", description: "Re-run your last message" },
   { name: "status", description: "Show the Codex daemon health and auth mode" },
+  { name: "stop", description: "Stop the current response in this chat" },
+  { name: "compact", description: "Compact this chat's Codex context" },
+  ...NATIVE_COMMAND_DESCRIPTIONS.map(([name, description]) => ({
+    name,
+    description,
+  })),
 ] as const;
 
 /**

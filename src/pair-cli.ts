@@ -41,6 +41,7 @@ export interface PairCliOptions {
   deviceLabel?: string;
   agentCatalog?: AgentCatalogEntry[];
   secretsDir?: string;
+  assistantId?: number;
 }
 
 function defaultSecretsDir(): string {
@@ -85,6 +86,9 @@ export async function pairBgos(opts: PairCliOptions): Promise<PairResult> {
     // 'openclaw' and the pairing surfaces in the wrong card.
     integration: "codex",
     daemonVersion: getPackageVersion(),
+    ...(opts.assistantId != null
+      ? { intended_assistant_id: opts.assistantId }
+      : {}),
   });
 
   const secretsDir = opts.secretsDir ?? defaultSecretsDir();
@@ -138,7 +142,9 @@ export async function pairBgosWithToken(
 
 const DEFAULT_BASE_URL = "https://api.brandgrowthos.ai";
 
-function parseAgentCatalog(raw: string | undefined): AgentCatalogEntry[] | undefined {
+function parseAgentCatalog(
+  raw: string | undefined,
+): AgentCatalogEntry[] | undefined {
   if (!raw) return undefined;
   const entries = raw
     .split(",")
@@ -188,7 +194,10 @@ async function main(): Promise<void> {
         process.stderr.write("No token provided on stdin.\n");
         process.exit(2);
       }
-      const { pairing, tokenFile } = await pairBgosWithToken({ baseUrl, token });
+      const { pairing, tokenFile } = await pairBgosWithToken({
+        baseUrl,
+        token,
+      });
       process.stdout.write(`Token accepted. Secret written to ${tokenFile}\n`);
       process.stdout.write(
         `pairing_id=${pairing.pairing_id} user_id=${pairing.user_id}\n`,
@@ -200,7 +209,9 @@ async function main(): Promise<void> {
         process.stderr.write("Token rejected (401): invalid or revoked.\n");
         process.exit(2);
       }
-      process.stderr.write(`Token validation failed: ${e?.message ?? String(err)}\n`);
+      process.stderr.write(
+        `Token validation failed: ${e?.message ?? String(err)}\n`,
+      );
       process.exit(1);
     }
   }
@@ -228,7 +239,10 @@ async function main(): Promise<void> {
     );
     process.exit(0);
   } catch (err: unknown) {
-    const e = err as { response?: { status?: number; data?: unknown }; message?: string };
+    const e = err as {
+      response?: { status?: number; data?: unknown };
+      message?: string;
+    };
     const status = e?.response?.status;
     if (status === 400 || status === 404 || status === 410) {
       process.stderr.write(
