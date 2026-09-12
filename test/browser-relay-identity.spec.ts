@@ -17,13 +17,19 @@ import { CodexAdapter } from "../src/adapter.js";
 
 const TOKEN = "pair-test-0123456789abcdefghij";
 
-function adapterWith(owned: [number, string][], chats: [number, number][] = []) {
+function adapterWith(
+  owned: [number, string][],
+  chats: [number, number][] = [],
+  identityReady = true,
+) {
   const adapter = Object.create(CodexAdapter.prototype) as any;
   Object.assign(adapter, {
     cfg: { baseUrl: "https://api.brandgrowthos.test" },
     currentToken: TOKEN,
     assistantToRoute: new Map<number, string>(owned),
     chatToAssistant: new Map<number, number>(chats),
+    // The real adapter flips this after the first successful scope load.
+    identityReady,
   });
   return adapter;
 }
@@ -63,6 +69,14 @@ describe("the assistant a chat's browser calls are made as", () => {
       [[20, 99]],
     );
     expect(adapter.assistantForChat(20)).toBeNull();
+  });
+
+  it("still answers from a learned pair before the first scope load, when what we own is unknown rather than empty", () => {
+    const adapter = adapterWith([], [[20, 11]], false);
+    expect(adapter.assistantForChat(20)).toBe(11);
+    expect(adapter.browserRelay(20)!.assistantId).toBe(11);
+    // A chat no event ever named is still null: unknown is not a guess.
+    expect(adapter.assistantForChat(21)).toBeNull();
   });
 
   it("learns the pair from an event and refuses the ids that cannot be one", () => {

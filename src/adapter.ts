@@ -263,7 +263,13 @@ export class CodexAdapter {
   private getRouteForAssistant(assistantId: number): string | null {
     return this.assistantToRoute.get(assistantId) ?? null;
   }
-  /** Remember which agent a chat belongs to, from any event carrying both. */
+  /**
+   * Remember which agent a chat belongs to, from any event carrying both.
+   * Every path that can start a Codex thread calls this before the thread, so
+   * even the first browser call in a chat this process has not served yet can
+   * name the agent. `test/browser-relay-cold-start.spec.ts` pins that list and
+   * fails if a new thread-starting path appears without it.
+   */
   private noteChatAssistant(chatId: number, assistantId: number): void {
     if (!Number.isSafeInteger(chatId) || chatId <= 0) return;
     if (!Number.isSafeInteger(assistantId) || assistantId <= 0) return;
@@ -291,10 +297,17 @@ export class CodexAdapter {
    * owns exactly one assistant needs no event to know the answer; otherwise
    * we only answer for a chat we have actually served, and null (no relay env)
    * is the honest answer rather than guessing the wrong agent.
+   *
+   * The ownership check has one exception: before the first successful scope
+   * load `assistantToRoute` is empty because we do not KNOW what we own, not
+   * because we own nothing, and a pair learned from an event the backend
+   * routed to this pairing is better evidence than an unloaded map. Once the
+   * scope is in, a chat whose assistant we no longer own gets no relay.
    */
   private assistantForChat(chatId: number): number | null {
     const known = this.chatToAssistant.get(chatId);
-    if (known && this.getRouteForAssistant(known)) return known;
+    if (known && (!this.identityReady || this.getRouteForAssistant(known)))
+      return known;
     if (this.assistantToRoute.size === 1)
       return [...this.assistantToRoute.keys()][0];
     return null;
