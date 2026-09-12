@@ -14,6 +14,11 @@ import {
   type ThreadMap,
 } from "./thread-map.js";
 import { BGOS_AGENT_HINTS } from "./agent-hints.js";
+import {
+  browserMcpConfigOverrides,
+  resolveBrowserShim,
+  type BrowserRelayCredentials,
+} from "./browser-mcp.js";
 import type { AuthResolutionOk } from "./auth-mode.js";
 import {
   SessionSettingsStore,
@@ -35,6 +40,15 @@ export interface CodexHostOptions {
   model?: string;
   tools?: DynamicTool[];
   server?: AppServer;
+  /**
+   * This daemon's HOAI base URL, pairing token and the assistant this chat
+   * belongs to, so the Agent Browser shim can reach the owner's desktop app
+   * from another machine as the right agent. A function of the chat, not a
+   * value: a re-pair rotates the token and the next thread must get the live
+   * one, and each chat belongs to one of the assistants this daemon owns.
+   * Returning null (or omitting this) leaves the browser local-or-offline.
+   */
+  relay?: (chatId: number) => BrowserRelayCredentials | null;
 }
 export interface RunTurnCallbacks {
   signal?: AbortSignal;
@@ -490,13 +504,13 @@ export class CodexHost {
         ? { model: settings.model ?? this.opts.model }
         : {}),
     };
+    const config: Record<string, unknown> = this.browserConfig(chatId);
     if (this.authMode === "apikey")
-      Object.assign(params, {
-        config: {
-          "model_providers.openai.env_key": "CODEX_API_KEY",
-          "model_providers.openai.requires_openai_auth": false,
-        },
+      Object.assign(config, {
+        "model_providers.openai.env_key": "CODEX_API_KEY",
+        "model_providers.openai.requires_openai_auth": false,
       });
+    if (Object.keys(config).length > 0) Object.assign(params, { config });
     const canFork =
       parent &&
       (readOnly ||
@@ -583,6 +597,28 @@ export class CodexHost {
       nativeSettings(this.settings.get(chatId)),
     );
   }
+  /**
+   * The HOAI Agent Browser (the pane in the desktop app) as an MCP server on
+   * every thread, so it is the agent's default browser. See browser-mcp.ts.
+   * When relay credentials are available the shim also reaches the owner's app
+   * from another machine; the token and the chat's assistant id ride
+   * `mcp_servers.hoai_browser.env` and the token is never logged. A failing
+   * resolver must never cost us a thread, so it is swallowed and the browser
+   * stays local-or-offline.
+   */
+  private browserConfig(chatId: number): Record<string, unknown> {
+    let relay: BrowserRelayCredentials | null = null;
+    try {
+      relay = this.opts.relay?.(chatId) ?? null;
+    } catch {
+      relay = null;
+    }
+    return browserMcpConfigOverrides(
+      resolveBrowserShim(),
+      process.execPath,
+      relay,
+    );
+  }
   private async ensureThread(chatId: number): Promise<string> {
     await this.server.start();
     let threadId: string | undefined = this.map[String(chatId)];
@@ -600,11 +636,13 @@ export class CodexHost {
     };
     const selectedModel = this.settings.get(chatId).model ?? this.opts.model;
     if (selectedModel) params.model = selectedModel;
+    const config: Record<string, unknown> = this.browserConfig(chatId);
     if (this.authMode === "apikey")
-      params.config = {
+      Object.assign(config, {
         "model_providers.openai.env_key": "CODEX_API_KEY",
         "model_providers.openai.requires_openai_auth": false,
-      };
+      });
+    if (Object.keys(config).length > 0) params.config = config;
     if (!threadId || !this.loaded.has(threadId)) {
       let priorContext = "";
       if (

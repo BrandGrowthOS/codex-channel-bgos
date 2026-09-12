@@ -45,10 +45,19 @@ function fixture() {
     owned: () => [9],
     stateFile: join(home, "turns.json"),
     log: vi.fn(),
+    noteChat: vi.fn(),
   };
   return { deps, room, host, tools, lane: new MeetingLane(deps) };
 }
 describe("meeting floor and resync", () => {
+  // A meeting turn can be the first thread a chat ever gets, so the lane is
+  // what tells the adapter whose chat it is. Without it the Agent Browser
+  // relay cannot name the agent on a multi-agent daemon.
+  it("tells the adapter which agent the meeting chat belongs to", async () => {
+    const { lane, deps } = fixture();
+    await lane.handle({ meetingId: 3 });
+    expect(deps.noteChat).toHaveBeenCalledWith(17, 9);
+  });
   it("duplicate live and resync events produce one contribution, including after restart", async () => {
     const { lane, host, tools, deps } = fixture();
     await Promise.all([
