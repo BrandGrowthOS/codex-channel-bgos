@@ -21,6 +21,12 @@ const bundled = join(sep, "pkg", "vendor", "hoai-browser-mcp.mjs");
 const ENV_KEY = `mcp_servers.${HOAI_BROWSER_SERVER}.env`;
 // Shaped like a pairing token but meaningless: nothing here talks to HOAI.
 const TOKEN = "pair-test-0123456789abcdefghij";
+const ASSISTANT = 4242;
+const CREDS = {
+  backendUrl: "https://api.example.test",
+  pairingToken: TOKEN,
+  assistantId: ASSISTANT,
+};
 
 describe("resolveBrowserShim", () => {
   it("prefers the app-installed shim under ~/.hoai/bin", () => {
@@ -37,23 +43,34 @@ describe("resolveBrowserShim", () => {
 });
 
 describe("browserRelayEnv", () => {
-  it("needs both halves: either one missing means no relay env at all", () => {
+  it("needs all three parts: any one missing means no relay env at all", () => {
     expect(browserRelayEnv()).toEqual({});
     expect(browserRelayEnv(null)).toEqual({});
-    expect(
-      browserRelayEnv({ backendUrl: "https://api.example.test", pairingToken: "" }),
-    ).toEqual({});
-    expect(browserRelayEnv({ backendUrl: "  ", pairingToken: TOKEN })).toEqual({});
+    expect(browserRelayEnv({ ...CREDS, pairingToken: "" })).toEqual({});
+    expect(browserRelayEnv({ ...CREDS, backendUrl: "  " })).toEqual({});
   });
-  it("trims trailing slashes off the backend url and whitespace off both", () => {
+  // The backend's RelayMcpDto requires assistantId on BOTH lanes, so relay env
+  // without it is a 400 the shim can only report as "the owner's desktop app
+  // is not there". Sending nothing is the honest answer; this is the case that
+  // shipped broken and was caught in review.
+  it("refuses to hand over a relay lane it cannot authenticate: no assistant id, no env", () => {
+    expect(
+      browserRelayEnv({ backendUrl: CREDS.backendUrl, pairingToken: TOKEN } as never),
+    ).toEqual({});
+    for (const assistantId of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])
+      expect(browserRelayEnv({ ...CREDS, assistantId })).toEqual({});
+  });
+  it("trims trailing slashes off the backend url, whitespace off the token, and sends the id as a string", () => {
     expect(
       browserRelayEnv({
         backendUrl: "  https://api.example.test///  ",
         pairingToken: `  ${TOKEN}  `,
+        assistantId: ASSISTANT,
       }),
     ).toEqual({
       HOAI_RELAY_BACKEND_URL: "https://api.example.test",
       HOAI_RELAY_PAIRING_TOKEN: TOKEN,
+      HOAI_RELAY_ASSISTANT_ID: "4242",
     });
   });
 });
@@ -61,12 +78,7 @@ describe("browserRelayEnv", () => {
 describe("browserMcpConfigOverrides", () => {
   it("emits dotted mcp_servers overrides for the shim and nothing without one", () => {
     expect(browserMcpConfigOverrides(null)).toEqual({});
-    expect(
-      browserMcpConfigOverrides(null, "/usr/bin/node", {
-        backendUrl: "https://api.example.test",
-        pairingToken: TOKEN,
-      }),
-    ).toEqual({});
+    expect(browserMcpConfigOverrides(null, "/usr/bin/node", CREDS)).toEqual({});
     const o = browserMcpConfigOverrides(installed, "/usr/bin/node");
     expect(o[`mcp_servers.${HOAI_BROWSER_SERVER}.command`]).toBe("/usr/bin/node");
     expect(o[`mcp_servers.${HOAI_BROWSER_SERVER}.args`]).toEqual([installed]);
@@ -81,8 +93,14 @@ describe("browserMcpConfigOverrides", () => {
     ).not.toHaveProperty(ENV_KEY);
     expect(
       browserMcpConfigOverrides(installed, "/usr/bin/node", {
-        backendUrl: "https://api.example.test",
+        ...CREDS,
         pairingToken: "",
+      }),
+    ).not.toHaveProperty(ENV_KEY);
+    expect(
+      browserMcpConfigOverrides(installed, "/usr/bin/node", {
+        ...CREDS,
+        assistantId: 0,
       }),
     ).not.toHaveProperty(ENV_KEY);
   });
@@ -90,10 +108,12 @@ describe("browserMcpConfigOverrides", () => {
     const o = browserMcpConfigOverrides(installed, "/usr/bin/node", {
       backendUrl: "https://api.brandgrowthos.test/",
       pairingToken: TOKEN,
+      assistantId: ASSISTANT,
     });
     expect(o[ENV_KEY]).toEqual({
       HOAI_RELAY_BACKEND_URL: "https://api.brandgrowthos.test",
       HOAI_RELAY_PAIRING_TOKEN: TOKEN,
+      HOAI_RELAY_ASSISTANT_ID: "4242",
     });
     const env = o[ENV_KEY] as Record<string, string>;
     expect(Object.keys(env).filter((k) => env[k] === TOKEN)).toEqual([
@@ -148,10 +168,20 @@ describe("the relay env reaches every thread Codex starts", () => {
       auth: { ok: true, mode: "chatgpt", label: "test" },
       workdir,
       server: server as any,
-      relay: () => ({
-        backendUrl: "https://api.brandgrowthos.test/",
-        pairingToken: TOKEN,
-      }),
+      // Per chat, because the relayed call must name the agent: chat 7 is
+      // assistant 4242's, chat 8 belongs to another agent on this daemon.
+      relay: (chatId: number) =>
+        chatId === 8
+          ? {
+              backendUrl: "https://api.brandgrowthos.test/",
+              pairingToken: TOKEN,
+              assistantId: 99,
+            }
+          : {
+              backendUrl: "https://api.brandgrowthos.test/",
+              pairingToken: TOKEN,
+              assistantId: ASSISTANT,
+            },
     });
   });
   afterEach(() => {
@@ -171,6 +201,7 @@ describe("the relay env reaches every thread Codex starts", () => {
     expect(server.paramsFor("thread/start").config[ENV_KEY]).toEqual({
       HOAI_RELAY_BACKEND_URL: "https://api.brandgrowthos.test",
       HOAI_RELAY_PAIRING_TOKEN: TOKEN,
+      HOAI_RELAY_ASSISTANT_ID: "4242",
     });
     server.finish("thread-1", "hi");
     await turn;
@@ -186,12 +217,29 @@ describe("the relay env reaches every thread Codex starts", () => {
     expect(forked[ENV_KEY]).toEqual({
       HOAI_RELAY_BACKEND_URL: "https://api.brandgrowthos.test",
       HOAI_RELAY_PAIRING_TOKEN: TOKEN,
+      HOAI_RELAY_ASSISTANT_ID: "4242",
     });
     expect(forked[`mcp_servers.${HOAI_BROWSER_SERVER}.args`]).toEqual([
       bundledShimPath(),
     ]);
     server.finish("fork-2", "consulted");
     await consult;
+  });
+
+  it("names the chat's own agent, so a second chat carries a different assistant id", async () => {
+    const turn = host.runTurn(8, "hello");
+    await vi.waitFor(() =>
+      expect(server.request).toHaveBeenCalledWith(
+        "turn/start",
+        expect.objectContaining({ threadId: "thread-1" }),
+      ),
+    );
+    const started = server.request.mock.calls
+      .filter(([method]) => method === "thread/start")
+      .at(-1)![1] as any;
+    expect(started.config[ENV_KEY].HOAI_RELAY_ASSISTANT_ID).toBe("99");
+    server.finish("thread-1", "hi");
+    await turn;
   });
 
   it("survives a resolver that throws, and then carries no relay env", async () => {
@@ -276,6 +324,156 @@ function shimClient(env: Record<string, string>) {
   return { request, close: () => child.kill(), stderr: () => stderr };
 }
 
+/**
+ * A fake HOAI backend that enforces what the real one enforces: `RelayMcpDto`
+ * requires a positive integer `assistantId` on every relayed call, whichever
+ * auth header is used, and the global ValidationPipe answers 400 without it.
+ * This is the endpoint the shipped branch could not authenticate against.
+ */
+async function fakeRelayBackend() {
+  const seen: { assistantId: unknown; pairing: unknown; method?: string }[] = [];
+  let rpcSeq = 0;
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => (body += String(chunk)));
+    req.on("end", () => {
+      const json = (status: number, obj: unknown) => {
+        res.statusCode = status;
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify(obj));
+      };
+      const url = new URL(req.url ?? "/", "http://127.0.0.1");
+      if (url.pathname.endsWith("/browser/host"))
+        return json(200, { online: true, hostLabel: "Kc's MacBook Pro" });
+      if (!url.pathname.endsWith("/browser/mcp"))
+        return json(404, { message: "unknown route" });
+      const parsed = body ? JSON.parse(body) : {};
+      const message = parsed.message ?? {};
+      seen.push({
+        assistantId: parsed.assistantId ?? null,
+        pairing: req.headers["x-bgos-pairing"] ?? null,
+        method: message.method,
+      });
+      const assistantId = Number(parsed.assistantId);
+      if (!Number.isSafeInteger(assistantId) || assistantId <= 0)
+        return json(400, {
+          statusCode: 400,
+          message: ["assistantId must be a positive number"],
+          error: "Bad Request",
+        });
+      const rpcId = `r${++rpcSeq}`;
+      // A NestJS POST answers 201; the answer is the body's status.
+      if (message.id === undefined)
+        return json(201, { status: "done", rpcId, message: {} });
+      const result =
+        message.method === "initialize"
+          ? {
+              protocolVersion: "2025-06-18",
+              capabilities: { tools: {} },
+              serverInfo: { name: "hoai-agent-browser", version: "test" },
+              instructions: "Relay: this is your DEFAULT browser.",
+            }
+          : message.method === "tools/list"
+            ? {
+                tools: [
+                  { name: "hoai_browser_open_session", inputSchema: { type: "object" } },
+                  { name: "browser_navigate", inputSchema: { type: "object" } },
+                ],
+              }
+            : { content: [{ type: "text", text: "ok" }], isError: false };
+      json(201, {
+        status: "done",
+        rpcId,
+        message: { jsonrpc: "2.0", id: message.id, result },
+      });
+    });
+  });
+  const port = await new Promise<number>((resolve) =>
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      resolve(typeof address === "object" && address ? address.port : 0);
+    }),
+  );
+  return {
+    url: `http://127.0.0.1:${port}`,
+    seen,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
+
+describe("the vendored shim against a backend that enforces the assistant id", () => {
+  let temp: string, backend: Awaited<ReturnType<typeof fakeRelayBackend>>;
+  beforeEach(async () => {
+    temp = mkdtempSync(join(tmpdir(), "hoai-relay-"));
+    backend = await fakeRelayBackend();
+  });
+  afterEach(async () => {
+    await backend.close();
+    rmSync(temp, { recursive: true, force: true });
+  });
+
+  // End to end over the real chain: the env is whatever we actually put in
+  // `mcp_servers.hoai_browser.env`, so dropping a variable from
+  // browserRelayEnv fails here, not just in a unit assertion.
+  it("comes up in relay mode with the real tools when the env names the assistant", async () => {
+    const relayEnv = browserMcpConfigOverrides(bundledShimPath(), process.execPath, {
+      backendUrl: backend.url,
+      pairingToken: TOKEN,
+      assistantId: ASSISTANT,
+    })[ENV_KEY] as Record<string, string>;
+    const client = shimClient({
+      HOAI_HOME: temp, // no local door, so relay is the only way through
+      ...relayEnv,
+      HOAI_RELAY_PROBE_MS: "60000",
+    });
+    try {
+      const init = await client.request("initialize", {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "codex", version: "test" },
+      });
+      expect(init.result.instructions).toMatch(/Relay: this is your DEFAULT browser/);
+      const list = await client.request("tools/list");
+      expect(list.result.tools.map((t: { name: string }) => t.name)).toEqual([
+        "hoai_browser_open_session",
+        "browser_navigate",
+      ]);
+      expect(backend.seen.length).toBeGreaterThan(0);
+      expect(
+        backend.seen.every(
+          (call) => Number(call.assistantId) === ASSISTANT && call.pairing === TOKEN,
+        ),
+      ).toBe(true);
+      expect(client.stderr()).not.toContain(TOKEN);
+    } finally {
+      client.close();
+    }
+  }, 20_000);
+
+  it("is refused and falls back to offline when the env omits it (the shipped defect)", async () => {
+    const client = shimClient({
+      HOAI_HOME: temp,
+      HOAI_RELAY_BACKEND_URL: backend.url,
+      HOAI_RELAY_PAIRING_TOKEN: TOKEN,
+      HOAI_RELAY_PROBE_MS: "60000",
+    });
+    try {
+      await client.request("initialize", {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "codex", version: "test" },
+      });
+      const list = await client.request("tools/list");
+      expect(list.result.tools.map((t: { name: string }) => t.name)).toEqual([
+        "hoai_browser_status",
+      ]);
+      expect(backend.seen.some((call) => !call.assistantId)).toBe(true);
+    } finally {
+      client.close();
+    }
+  }, 20_000);
+});
+
 describe("the vendored shim, offline but with relay credentials", () => {
   let temp: string;
   beforeEach(() => {
@@ -292,6 +490,7 @@ describe("the vendored shim, offline but with relay credentials", () => {
       HOAI_HOME: temp,
       HOAI_RELAY_BACKEND_URL: `http://127.0.0.1:${port}`,
       HOAI_RELAY_PAIRING_TOKEN: TOKEN,
+      HOAI_RELAY_ASSISTANT_ID: String(ASSISTANT),
       HOAI_RELAY_PROBE_MS: "60000",
     });
     try {

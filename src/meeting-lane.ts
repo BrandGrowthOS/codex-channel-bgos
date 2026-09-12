@@ -18,6 +18,12 @@ export class MeetingLane {
       tools: HoaiTools;
       owned: () => number[];
       owner: () => string;
+      /**
+       * A meeting turn is the one path where a thread is started for a chat
+       * the adapter has not seen a normal inbound event for, so tell it which
+       * agent this chat belongs to: the Agent Browser relay needs the id.
+       */
+      noteChat?: (chatId: number, assistantId: number) => void;
       stateFile: string;
       log: (error: unknown) => void;
     },
@@ -84,6 +90,7 @@ export class MeetingLane {
       const chatId = Number(room.chatId);
       if (!Number.isSafeInteger(chatId) || chatId <= 0) continue;
       this.chatIds.set(chatId, meetingId);
+      this.deps.noteChat?.(chatId, assistantId);
       const transcript = await api.agentRequest(
         "GET",
         `meetings/${meetingId}/transcript`,

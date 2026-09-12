@@ -44,6 +44,7 @@ import {
 import { pendingUnknownStats } from "./pending-unknown-store.js";
 import { pickCapabilitiesText } from "./capabilities.js";
 import { CodexHost, type RunTurnResult } from "./codex-host.js";
+import type { BrowserRelayCredentials } from "./browser-mcp.js";
 import { HOAI_TOOLS, HoaiTools, type ToolContext } from "./hoai-tools.js";
 import { BGOS_AGENT_HINTS } from "./agent-hints.js";
 import { unescapeButton } from "./interactions.js";
@@ -115,6 +116,12 @@ export class CodexAdapter {
   private readonly replyQueues = new Map<number, Promise<void>>();
   private readonly generations = new Map<number, number>();
   private readonly assistantToRoute = new Map<number, string>();
+  /**
+   * Which assistant a chat belongs to, learned from the events that carry both
+   * ids. The Agent Browser relay needs it: the backend requires the assistant
+   * id on every relayed MCP call, and a thread only knows its chat.
+   */
+  private readonly chatToAssistant = new Map<number, number>();
   private readonly lastInput = new Map<number, Input>();
   private readonly lastNativeOptions = new Map<number, NativeRunOptions>();
   private readonly nativeCommands: NativeCommands;
@@ -163,11 +170,12 @@ export class CodexAdapter {
       tools: HOAI_TOOLS,
       // The Agent Browser shim reaches the owner's desktop app through HOAI
       // when it is not on this machine, using this daemon's own pairing. Read
-      // lazily so a re-pair (recover()) hands the next thread the live token.
-      relay: () => ({
-        backendUrl: this.cfg.baseUrl,
-        pairingToken: this.currentToken,
-      }),
+      // lazily so a re-pair (recover()) hands the next thread the live token,
+      // and per chat so the relayed call names the agent the owner sees in the
+      // rail. No known assistant means no relay env at all: the backend
+      // requires the id, so an anonymous relay call is a 400 and the shim
+      // would silently look offline. Local and offline still work.
+      relay: (chatId) => this.browserRelay(chatId),
     });
     this.tools = new HoaiTools(this.api, () => this.capabilityText);
     this.nativeCommands = new NativeCommands({
@@ -210,6 +218,8 @@ export class CodexAdapter {
       tools: this.tools,
       owned: () => [...this.assistantToRoute.keys()],
       owner: () => this.ownerId,
+      noteChat: (chatId, assistantId) =>
+        this.noteChatAssistant(chatId, assistantId),
       stateFile: join(
         process.env.CODEX_BGOS_HOME ?? join(homedir(), ".codex-bgos"),
         "meeting-turns.json",
@@ -252,6 +262,42 @@ export class CodexAdapter {
 
   private getRouteForAssistant(assistantId: number): string | null {
     return this.assistantToRoute.get(assistantId) ?? null;
+  }
+  /** Remember which agent a chat belongs to, from any event carrying both. */
+  private noteChatAssistant(chatId: number, assistantId: number): void {
+    if (!Number.isSafeInteger(chatId) || chatId <= 0) return;
+    if (!Number.isSafeInteger(assistantId) || assistantId <= 0) return;
+    this.chatToAssistant.set(chatId, assistantId);
+    // Bounded: one entry per chat this process has actually served, and the
+    // oldest go first. The map is a cache, never the source of truth.
+    if (this.chatToAssistant.size > 500)
+      this.chatToAssistant.delete(this.chatToAssistant.keys().next().value!);
+  }
+  /**
+   * What the Agent Browser shim needs to reach the owner's desktop app as this
+   * chat's agent, or null when we cannot name the agent (see relay above).
+   */
+  private browserRelay(chatId: number): BrowserRelayCredentials | null {
+    const assistantId = this.assistantForChat(chatId);
+    if (!assistantId) return null;
+    return {
+      backendUrl: this.cfg.baseUrl,
+      pairingToken: this.currentToken,
+      assistantId,
+    };
+  }
+  /**
+   * The agent a chat belongs to, for the Agent Browser relay. A daemon that
+   * owns exactly one assistant needs no event to know the answer; otherwise
+   * we only answer for a chat we have actually served, and null (no relay env)
+   * is the honest answer rather than guessing the wrong agent.
+   */
+  private assistantForChat(chatId: number): number | null {
+    const known = this.chatToAssistant.get(chatId);
+    if (known && this.getRouteForAssistant(known)) return known;
+    if (this.assistantToRoute.size === 1)
+      return [...this.assistantToRoute.keys()][0];
+    return null;
   }
 
   // -------------------------------------------------------------------
@@ -543,6 +589,7 @@ export class CodexAdapter {
     source?: Partial<DispatchArgs>,
     nativeOptions: NativeRunOptions = {},
   ): Promise<void> {
+    this.noteChatAssistant(chatId, assistantId);
     const generation = this.generations.get(chatId) ?? 0;
     const previous = this.replyQueues.get(chatId) ?? Promise.resolve();
     const run = previous
@@ -806,6 +853,7 @@ export class CodexAdapter {
       (frame.op !== "dispatch" && this.rpcSeen.has(frame.rpcId))
     )
       return;
+    this.noteChatAssistant(chatId, assistantId);
     this.rpcSeen.add(frame.rpcId);
     if (this.rpcSeen.size > 1000)
       this.rpcSeen.delete(this.rpcSeen.values().next().value!);
@@ -940,6 +988,7 @@ export class CodexAdapter {
           try {
             const targetChatId =
               await this.api.getOrCreatePrimaryChat(assistantId);
+            this.noteChatAssistant(targetChatId, assistantId);
             const context: ToolContext = {
               assistantId,
               chatId: targetChatId,

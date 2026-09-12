@@ -75,15 +75,19 @@ let initSeq = 0;
  * hands them to the shim (Codex through mcp_servers.hoai_browser.env, the
  * Claude Code plugin through its launcher); the shim never reads a plugin's
  * files. Two lanes: a pairing token (X-BGOS-Pairing) or, for legacy plugins,
- * an API key with the assistant id (X-API-Key plus assistantId in the body).
+ * an API key (X-API-Key). BOTH lanes name the assistant in the body:
+ * HOAI_RELAY_ASSISTANT_ID is what the owner's rail shows as the agent that is
+ * browsing, and the backend's RelayMcpDto requires it whichever header is
+ * used (a pairing can back several assistants), so a pairing daemon that
+ * leaves it out is answered 400 and never reaches the desktop app.
  */
 function readRelayCredentials(env) {
   const url = String(env.HOAI_RELAY_BACKEND_URL || "").trim().replace(/\/+$/, "");
   if (!url) return null;
-  const pairing = String(env.HOAI_RELAY_PAIRING_TOKEN || "").trim();
-  if (pairing) return { backendUrl: url, headers: { "X-BGOS-Pairing": pairing }, assistantId: null };
-  const apiKey = String(env.HOAI_RELAY_API_KEY || "").trim();
   const assistantId = String(env.HOAI_RELAY_ASSISTANT_ID || "").trim();
+  const pairing = String(env.HOAI_RELAY_PAIRING_TOKEN || "").trim();
+  if (pairing) return { backendUrl: url, headers: { "X-BGOS-Pairing": pairing }, assistantId: assistantId || null };
+  const apiKey = String(env.HOAI_RELAY_API_KEY || "").trim();
   if (apiKey && assistantId) return { backendUrl: url, headers: { "X-API-Key": apiKey }, assistantId };
   return null;
 }
@@ -216,8 +220,17 @@ async function relaySend(message) {
   }
   if (r.status === 404) return { ok: false, code: "relay_unsupported", text: "This HOAI backend does not have the browser relay yet. Tell the owner to update Home of Agents." };
   for (;;) {
-    if (r.status === 200 && r.payload && r.payload.status === "done") return { ok: true, message: r.payload.message || {} };
-    if (r.status === 202 && r.payload && r.payload.status === "pending" && r.payload.rpcId) {
+    // The ANSWER is the body's `status`, not the HTTP code: a NestJS POST
+    // answers 201 by default, so a relayed message that worked comes back
+    // 201 { status: "done" } and one that went long comes back
+    // 201 { status: "pending" } (the plan's 200 / 202 are the shapes, not the
+    // codes). Reading the code instead threw every successful relay away as
+    // relay_error and told the agent the owner's desktop app was offline,
+    // which is the whole relay lane. Errors DO carry their status (409, 504,
+    // 429, 413, 403, 502, 404), so those still map by code below.
+    const ok2xx = r.status >= 200 && r.status < 300;
+    if (ok2xx && r.payload && r.payload.status === "done") return { ok: true, message: r.payload.message || {} };
+    if (ok2xx && r.payload && r.payload.status === "pending" && r.payload.rpcId) {
       if (Date.now() - startedAt > RELAY_TOTAL_MS) return { ok: false, code: "host_timeout", text: RELAY_ERROR_TEXT.host_timeout };
       await sleep(Math.max(250, Number(r.payload.pollAfterMs) || 2000));
       try {

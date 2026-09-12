@@ -9,6 +9,9 @@ function fixture(pendingMenu = false, running = false) {
     getRouteForAssistant: vi.fn((id) => (id === 10 ? "codex" : undefined)),
     refreshScopeRateLimited: vi.fn(async () => {}),
     rpcSeen: new Set(),
+    // handleControl records which agent a chat belongs to (the Agent Browser
+    // relay needs it), so the harness carries the same cache the real adapter has.
+    chatToAssistant: new Map<number, number>(),
     turnControllers: new Map(running ? [[20, new Set([controller])]] : []),
     generations: new Map(),
     nativeCommands: { cancel: vi.fn(() => pendingMenu) },
@@ -55,6 +58,11 @@ describe("native Stop control completion", () => {
       expect(adapter.outbound.sendText).toHaveBeenCalledTimes(1);
     },
   );
+  it("records which agent the chat belongs to, for the Agent Browser relay", async () => {
+    const { adapter, frame } = fixture();
+    await adapter.handleControl(frame);
+    expect(adapter.chatToAssistant.get(20)).toBe(10);
+  });
   it("does not stop or acknowledge a different assistant's chat", async () => {
     const { adapter, frame } = fixture(true);
     await adapter.handleControl({ ...frame, assistantId: "99" });
