@@ -54,6 +54,14 @@ function sourceFiles(dir: string): string[] {
   });
 }
 
+/**
+ * A call into the host's thread-starting API. The shape is deliberately loose:
+ * `.runTurn(`, `.runTurn?.(`, `.runDetached ?. (` all reach the same API, and a
+ * pattern that only knows the plain form is one a new path slips past without
+ * anyone meaning to (the reviewer's probe was `host?.runTurn?.(1)`).
+ */
+const THREAD_START_CALL = /\.(runTurn|runDetached)\s*\??\.?\s*\(/;
+
 /** The nearest class-member declaration above a line, prettier-formatted. */
 function enclosingMethod(lines: string[], index: number): string {
   const decl =
@@ -63,6 +71,22 @@ function enclosingMethod(lines: string[], index: number): string {
     if (hit) return hit[1];
   }
   return "<top level>";
+}
+
+/**
+ * Every thread-starting call in one file's source, keyed `<file>#<method>` with
+ * a count. Taking a source string rather than a path is what lets the case
+ * below feed it a mutation without writing to `src/`.
+ */
+function threadStarters(name: string, source: string): Map<string, number> {
+  const found = new Map<string, number>();
+  const lines = source.split("\n");
+  lines.forEach((line, index) => {
+    if (!THREAD_START_CALL.test(line)) return;
+    const key = `${name}#${enclosingMethod(lines, index)}`;
+    found.set(key, (found.get(key) ?? 0) + 1);
+  });
+  return found;
 }
 
 function adapterFixture(overrides: Record<string, unknown> = {}) {
@@ -152,18 +176,40 @@ describe("the paths that can start a thread all name the agent first", () => {
       const name = relative(SRC, file).split(/[\\/]/).join("/");
       // The host is where these methods are DEFINED, not a caller.
       if (name === "codex-host.ts") continue;
-      const lines = readFileSync(file, "utf8").split("\n");
-      lines.forEach((line, index) => {
-        if (!/\.(runTurn|runDetached)\s*\(/.test(line)) return;
-        const key = `${name}#${enclosingMethod(lines, index)}`;
-        found.set(key, (found.get(key) ?? 0) + 1);
-      });
+      for (const [key, count] of threadStarters(
+        name,
+        readFileSync(file, "utf8"),
+      ))
+        found.set(key, (found.get(key) ?? 0) + count);
     }
     // Fails on a new path: record the chat's assistant there, then list it.
     expect([...found.keys()].sort()).toEqual(
       Object.keys(THREAD_STARTERS).sort(),
     );
     expect(found.get("adapter.ts#handleControl")).toBe(2);
+  });
+
+  it("the scan catches an optional call, not only the plain one", () => {
+    // The middle line is verbatim the probe a reviewer used to walk a new
+    // thread-starting path straight past the first version of this guard.
+    const mutated = [
+      "export class Sneaky {",
+      "  sneak(): void {",
+      "    void (this as any).host?.runTurn?.(1);",
+      "  }",
+      "  detach(chatId: number): void {",
+      "    void this.host?.runDetached?.(chatId);",
+      "  }",
+      "  plain(chatId: number): void {",
+      "    void this.host.runTurn(chatId);",
+      "  }",
+      "}",
+    ].join("\n");
+    expect([...threadStarters("sneaky.ts", mutated).keys()].sort()).toEqual([
+      "sneaky.ts#detach",
+      "sneaky.ts#plain",
+      "sneaky.ts#sneak",
+    ]);
   });
 
   it("a normal turn: the pair is known by the time the turn runs", async () => {
@@ -236,7 +282,11 @@ describe("the paths that can start a thread all name the agent first", () => {
       owned: () => [11],
       stateFile: join(mkdtempSync(join(tmpdir(), "hoai-cold-")), "turns.json"),
       log: vi.fn(),
-      // Exactly how the adapter wires the lane in its constructor.
+      // A COPY of how the adapter wires the lane, so this case proves the lane
+      // calls the dep and nothing more. That the adapter actually passes it is
+      // a separate claim, pinned on the real constructor by
+      // test/browser-relay-meeting-wiring.spec.ts (and now a type error too:
+      // the lane's `noteChat` dep is required).
       noteChat: (chatId: number, assistantId: number) =>
         adapter.noteChatAssistant(chatId, assistantId),
     });
