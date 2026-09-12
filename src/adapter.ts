@@ -157,7 +157,18 @@ export class CodexAdapter {
     this.commandsSync = new CommandsSync(this.api);
     this.toolProgress = new ToolProgressOrchestrator(this.api);
     this.missionLane = new MissionLane(this.api);
-    this.host = new CodexHost({ auth, model: opts.model, tools: HOAI_TOOLS });
+    this.host = new CodexHost({
+      auth,
+      model: opts.model,
+      tools: HOAI_TOOLS,
+      // The Agent Browser shim reaches the owner's desktop app through HOAI
+      // when it is not on this machine, using this daemon's own pairing. Read
+      // lazily so a re-pair (recover()) hands the next thread the live token.
+      relay: () => ({
+        backendUrl: this.cfg.baseUrl,
+        pairingToken: this.currentToken,
+      }),
+    });
     this.tools = new HoaiTools(this.api, () => this.capabilityText);
     this.nativeCommands = new NativeCommands({
       host: this.host,
