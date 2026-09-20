@@ -50,10 +50,26 @@ export interface CodexHostOptions {
    */
   relay?: (chatId: number) => BrowserRelayCredentials | null;
 }
+/**
+ * One entry of the app server's `turn/plan/updated` notification, exactly as
+ * it arrives: the wire statuses are snake_case and three valued. `onTodoList`
+ * collapses them to `completed: boolean` for the mission lane, so anything
+ * that needs the step in flight (the Steps lane) reads this copy instead.
+ */
+export interface PlanItem {
+  step: string;
+  status: string;
+}
+export interface PlanSignal {
+  turnId: string | null;
+  plan: PlanItem[];
+}
 export interface RunTurnCallbacks {
   signal?: AbortSignal;
   onTool?: (card: ToolCard, id: string) => void | Promise<void>;
   onTodoList?: (signal: TodoListSignal) => void | Promise<void>;
+  /** Raw plan snapshot for the live Steps lane. Never touches the mission. */
+  onPlan?: (signal: PlanSignal) => void | Promise<void>;
   onTick?: () => void;
   onRequest?: (method: string, params: RpcObject) => Promise<unknown>;
   onUsage?: (usage: RpcObject) => void;
@@ -831,7 +847,8 @@ export class CodexHost {
     if (method === "thread/tokenUsage/updated")
       turn.callbacks.onUsage?.(params.tokenUsage);
     if (method === "turn/plan/updated") {
-      const items = (params.plan ?? []).map((p: RpcObject) => ({
+      const raw = (params.plan ?? []) as RpcObject[];
+      const items = raw.map((p: RpcObject) => ({
         text: String(p.step),
         completed: p.status === "completed",
       }));
@@ -841,6 +858,22 @@ export class CodexHost {
             turn.callbacks.onTodoList?.({
               eventType: "item.updated",
               item: { type: "todo_list", id: params.turnId ?? "plan", items },
+            }),
+          )
+          .catch(() => {}),
+      );
+      // Second reader of the same notification, with the statuses intact. It
+      // is pushed into the same drain so a final steps write settles before
+      // the turn resolves and the adapter clears the list.
+      turn.pending.push(
+        Promise.resolve()
+          .then(() =>
+            turn.callbacks.onPlan?.({
+              turnId: params.turnId ?? null,
+              plan: raw.map((p: RpcObject) => ({
+                step: String(p.step),
+                status: String(p.status ?? ""),
+              })),
             }),
           )
           .catch(() => {}),
