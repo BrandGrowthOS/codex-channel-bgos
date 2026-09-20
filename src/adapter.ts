@@ -23,6 +23,7 @@ import { CommandsSync } from "./commands-sync.js";
 import { CommandUpgrade } from "./command-upgrade.js";
 import { ToolProgressOrchestrator } from "./tool-progress.js";
 import { MissionLane } from "./mission-lane.js";
+import { StepsLane, stepsChatKindAdmits } from "./steps-lane.js";
 import { MeetingLane } from "./meeting-lane.js";
 import { TaskJournal, type TaskResult } from "./task-journal.js";
 import { HeartbeatController } from "./heartbeat.js";
@@ -98,6 +99,8 @@ export class CodexAdapter {
   readonly commandsSync: CommandsSync;
   readonly toolProgress: ToolProgressOrchestrator;
   readonly missionLane: MissionLane;
+  /** The live Steps list for the reply in flight. Never touches a mission. */
+  readonly stepsLane: StepsLane;
 
   private readonly cfg: PluginConfig;
   private readonly ws: BgosWs;
@@ -164,6 +167,7 @@ export class CodexAdapter {
     this.commandsSync = new CommandsSync(this.api);
     this.toolProgress = new ToolProgressOrchestrator(this.api);
     this.missionLane = new MissionLane(this.api);
+    this.stepsLane = new StepsLane(this.api);
     this.host = new CodexHost({
       auth,
       model: opts.model,
@@ -441,6 +445,7 @@ export class CodexAdapter {
     this.ws.disconnect();
     this.toolProgress.dispose();
     await this.missionLane.dispose();
+    await this.stepsLane?.dispose();
     try {
       await this.commandsSync.flushAll();
     } catch {
@@ -655,6 +660,10 @@ export class CodexAdapter {
         sentViaTool = true;
       },
     };
+    // Steps live in a DM only: a room, a meeting or an a2a side thread is
+    // refused by the backend's write gate, so the lane must never be handed
+    // one. An absent kind is a DM (the REST inbound backfill carries none).
+    const stepsAdmitted = stepsChatKindAdmits(source?.chatKind);
     const missionTurn = this.missionLane.beginTurn({
       assistantId,
       chatId,
@@ -718,6 +727,17 @@ export class CodexAdapter {
             turnToken: missionTurn,
             ...signal,
           }),
+        // The same plan, statuses intact, as the owner's live Steps. A
+        // sibling of the mission lane, never a caller of it.
+        onPlan: stepsAdmitted
+          ? (signal) =>
+              this.stepsLane?.handlePlan({
+                assistantId,
+                chatId,
+                turnId: signal.turnId,
+                plan: signal.plan,
+              })
+          : undefined,
       });
       if (controller.signal.aborted) {
         // Stop already acknowledges in chat. Native interruption may resolve
@@ -728,6 +748,7 @@ export class CodexAdapter {
           turnToken: missionTurn,
           error: "Stopped by you.",
         });
+        if (stepsAdmitted) await this.stepsLane?.finalizeTurn(chatId);
         await replyHandle.finalizeTurn().catch(() => {});
         return;
       }
@@ -737,6 +758,7 @@ export class CodexAdapter {
         turnToken: missionTurn,
         error: err instanceof Error ? err.message : String(err),
       });
+      if (stepsAdmitted) await this.stepsLane?.finalizeTurn(chatId);
       if (controller.signal.aborted) {
         await progressWork;
         await replyHandle.finalizeTurn().catch(() => {});
@@ -759,6 +781,7 @@ export class CodexAdapter {
       finalText: result.finalAgentMessageText,
       error: missionError,
     });
+    if (stepsAdmitted) await this.stepsLane?.finalizeTurn(chatId);
     // eslint-disable-next-line no-console
     console.log(`${LOG} codex turn done`, {
       chatId,

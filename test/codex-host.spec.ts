@@ -224,6 +224,52 @@ describe("native Codex host contracts", () => {
     await result;
     expect(done).toBe(true);
   });
+  it("hands the raw three state plan to onPlan and drains it before the turn resolves", async () => {
+    let release: () => void = () => {};
+    const written = new Promise<void>((r) => {
+      release = r;
+    });
+    const seen: unknown[] = [];
+    let done = false;
+    const result = host
+      .runTurn(1, "plan", {
+        onPlan: (signal) => {
+          seen.push(signal);
+          return written;
+        },
+      })
+      .then(() => {
+        done = true;
+      });
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.emit("notification", "turn/plan/updated", {
+      threadId: "thread-1",
+      turnId: "turn-thread-1",
+      plan: [
+        { step: "Read the spec", status: "completed" },
+        { step: "Write the lane", status: "in_progress" },
+        { step: "Run the suite", status: "pending" },
+      ],
+    });
+    server.finish("thread-1", "Done");
+    // A macrotask tick drains every microtask, so `done` can only still be
+    // false if the plan callback itself is holding the turn open.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(done).toBe(false);
+    release();
+    await result;
+    expect(seen).toEqual([
+      {
+        turnId: "turn-thread-1",
+        plan: [
+          { step: "Read the spec", status: "completed" },
+          { step: "Write the lane", status: "in_progress" },
+          { step: "Run the suite", status: "pending" },
+        ],
+      },
+    ]);
+    expect(done).toBe(true);
+  });
   it("refuses approval requests with no active requesting turn", async () => {
     expect(
       await server.onRequest("item/commandExecution/requestApproval", {

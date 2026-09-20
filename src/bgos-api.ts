@@ -63,6 +63,20 @@ export interface CreateMissionInput {
   firstFeedText?: string;
 }
 
+/** One row of a live Steps snapshot, as the backend's ReplaceStepsDto reads it. */
+export interface StepInput {
+  text: string;
+  status: "pending" | "running" | "done" | "waiting";
+  /** 1 based index of the step this one waits for. Codex never sends it. */
+  waitsFor?: number;
+}
+
+export interface ReplaceStepsBody {
+  /** The turn these steps belong to, omitted when the host did not name one. */
+  turnId?: string;
+  steps: StepInput[];
+}
+
 export interface PatchMissionProgressInput {
   progress?: MissionProgress;
   feedEntry?: { kind: MissionFeedKind; text: string };
@@ -242,6 +256,26 @@ export class BgosApi {
     await this.http.put(`integrations/assistants/${assistantId}/commands`, {
       commands,
     });
+  }
+
+  /**
+   * Replace the live Steps snapshot for one of this pairing's chats: the
+   * agent's own to do list for the reply it is working on. Sent whole on
+   * every write, an empty list clears it. Additive route: an older backend
+   * answers 404, and callers must treat any failure as non-fatal (a step
+   * list may never break a turn). It can never touch the chat's mission.
+   */
+  async replaceSteps(
+    assistantId: number,
+    chatId: number,
+    body: ReplaceStepsBody,
+    options?: { timeout?: number },
+  ): Promise<void> {
+    await this.http.put(
+      `integrations/assistants/${assistantId}/chats/${chatId}/steps`,
+      body,
+      options,
+    );
   }
 
   async mergeCommands(
