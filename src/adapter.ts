@@ -22,6 +22,7 @@ import { BgosOutbound } from "./outbound.js";
 import { CommandsSync } from "./commands-sync.js";
 import { CommandUpgrade } from "./command-upgrade.js";
 import { ToolProgressOrchestrator } from "./tool-progress.js";
+import { MissionControlLane } from "./mission-control.js";
 import { MissionLane } from "./mission-lane.js";
 import { StepsLane, stepsChatKindAdmits } from "./steps-lane.js";
 import { MeetingLane } from "./meeting-lane.js";
@@ -52,6 +53,7 @@ import {
 import type { BrowserRelayCredentials } from "./browser-mcp.js";
 import { HOAI_TOOLS, HoaiTools, type ToolContext } from "./hoai-tools.js";
 import { BGOS_AGENT_HINTS } from "./agent-hints.js";
+import { DECLARED_CAPABILITIES } from "./declared-capabilities.js";
 import { unescapeButton } from "./interactions.js";
 import type { VoiceRpcFrame } from "./voice-rpc.js";
 import { VoiceRpcHandler } from "./hoai-shared/voice-rpc.js";
@@ -103,6 +105,8 @@ export class CodexAdapter {
   readonly commandsSync: CommandsSync;
   readonly toolProgress: ToolProgressOrchestrator;
   readonly missionLane: MissionLane;
+  /** The owner's mission decisions, relayed to the model in band. */
+  readonly missionControl: MissionControlLane;
   /** The live Steps list for the reply in flight. Never touches a mission. */
   readonly stepsLane: StepsLane;
 
@@ -170,7 +174,22 @@ export class CodexAdapter {
     this.outbound = new BgosOutbound(this.api);
     this.commandsSync = new CommandsSync(this.api);
     this.toolProgress = new ToolProgressOrchestrator(this.api);
-    this.missionLane = new MissionLane(this.api);
+    this.missionLane = new MissionLane(this.api, {
+      // A backend older than stage 5 sends no `cleared_by`, so the control
+      // lane needs its own record of what this daemon wrote to tell its own
+      // turn end completion apart from the owner marking a mission done.
+      onSelfWrite: (missionId) => this.missionControl.noteSelfWrite(missionId),
+    });
+    this.missionControl = new MissionControlLane({
+      host: { steer: (chatId, text) => this.host.steer(chatId, text) },
+      missionLane: this.missionLane,
+      chatsForAssistant: (assistantId) =>
+        [...this.chatToAssistant.entries()]
+          .filter(([, owner]) => owner === assistantId)
+          .map(([chatId]) => chatId),
+      isOwned: (assistantId) => this.ownsAssistantForMission(assistantId),
+      log: (message) => console.warn(`${LOG} ${message}`),
+    });
     this.stepsLane = new StepsLane(this.api);
     this.host = new CodexHost({
       auth,
@@ -192,7 +211,14 @@ export class CodexAdapter {
         if (assistantId) void this.postActivityMarker(assistantId, chatId, marker);
       },
     });
-    this.tools = new HoaiTools(this.api, () => this.capabilityText);
+    // The third argument is not optional in practice: every mission the
+    // typed tools write is stamped here, so a backend that sends no
+    // `cleared_by` cannot make the agent's own last tick come back looking
+    // like its owner marking the mission done.
+    this.tools = new HoaiTools(this.api, () => this.capabilityText, {
+      starting: (missionId) => this.missionControl.noteSelfWrite(missionId),
+      leftOpen: (missionId) => this.missionControl.dropSelfWrite(missionId),
+    });
     this.nativeCommands = new NativeCommands({
       host: this.host,
       interactions: this.tools.interactions,
@@ -247,6 +273,7 @@ export class CodexAdapter {
     this.heartbeat = new HeartbeatController({
       version: getPackageVersion(),
       authMode: auth.mode,
+      capabilities: DECLARED_CAPABILITIES,
       postHeartbeat: (body) => this.api.postHeartbeat(body),
     });
 
@@ -328,6 +355,19 @@ export class CodexAdapter {
     return null;
   }
 
+  /**
+   * Whether a mission frame for this assistant is ours to act on.
+   *
+   * Same cold scope exception as above, and for the same reason: before the
+   * first successful scope load assistantToRoute is empty because we do not
+   * KNOW what we own, not because we own nothing, and a frame the backend
+   * routed to this pairing is better evidence than an unloaded map.
+   */
+  private ownsAssistantForMission(assistantId: number): boolean {
+    if (!this.identityReady) return true;
+    return this.getRouteForAssistant(assistantId) !== null;
+  }
+
   // -------------------------------------------------------------------
   // Lifecycle
   // -------------------------------------------------------------------
@@ -355,6 +395,9 @@ export class CodexAdapter {
     });
     this.ws.on("voice_rpc", (frame) => {
       void this.handleControl(frame);
+    });
+    this.ws.on("mission_event", (frame) => {
+      void this.missionControl.handle(frame);
     });
     this.ws.on("meeting_event", (event) => {
       void (async () => {
@@ -455,6 +498,7 @@ export class CodexAdapter {
     this.heartbeat.stop();
     this.ws.disconnect();
     this.toolProgress.dispose();
+    this.missionControl.dispose();
     await this.missionLane.dispose();
     await this.stepsLane?.dispose();
     try {
@@ -680,12 +724,18 @@ export class CodexAdapter {
       chatId,
       prompt: promptTextFromInput(input),
     });
+    // AFTER beginTurn, never before: beginTurn's prompt feeds titleFromPrompt,
+    // which takes the first line, so a bulletin prefixed earlier would title
+    // every derived mission "HOAI mission update: ...". And here rather than
+    // at compose time, so the note is never baked into `lastInput` and
+    // replayed on every /retry.
+    const turnInput = this.missionControl.applyBulletin(chatId, input);
 
     let progressWork = Promise.resolve();
     const seenTools = new Set<string>();
     let result: RunTurnResult;
     try {
-      result = await this.host.runTurn(chatId, input, {
+      result = await this.host.runTurn(chatId, turnInput, {
         ...nativeOptions,
         signal: controller.signal,
         onRequest: (method, params) =>

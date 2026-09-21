@@ -3,6 +3,12 @@ import { EventEmitter } from "node:events";
 
 import type { BgosApi } from "./bgos-api.js";
 import { loadLastId, saveLastId } from "./last-id-store.js";
+import {
+  MISSION_EVENT_TYPES,
+  missionEventKey,
+  normalizeMissionEvent,
+  type MissionEventFrame,
+} from "./mission-events.js";
 import { normalizeSkillsRpc, type SkillsRpcFrame } from "./skills-handler.js";
 import { normalizeVoiceRpc, type VoiceRpcFrame } from "./voice-rpc.js";
 import {
@@ -30,6 +36,8 @@ type EventMap = {
   callback_result: [CallbackResultPayload];
   voice_rpc: [VoiceRpcFrame];
   skills_rpc: [SkillsRpcFrame];
+  /** One mission lifecycle frame, already normalized and deduped. */
+  mission_event: [MissionEventFrame];
   error: [Error];
   /** Socket (re)connected / disconnected, drives heartbeat wsConnected. */
   connect: [];
@@ -70,6 +78,14 @@ export class BgosWs {
   private wsConnectedSince: string | null = null;
   private backfillInFlight: Promise<void> | null = null;
   private readonly typingThrottle = new Map<number, number>();
+  /**
+   * The last 200 mission event keys this socket accepted, oldest evicted
+   * first, in the shape of CodexAdapter.rpcSeen. Cleared on disconnect: the
+   * cost of a false accept after a reconnect is one duplicate bulletin, while
+   * the cost of a false reject is the model working on a dead mission, which
+   * is the exact bug this listener exists to fix.
+   */
+  private readonly missionSeen = new Set<string>();
 
   constructor(
     private cfg: PluginConfig,
@@ -126,6 +142,7 @@ export class BgosWs {
     });
     socket.on("disconnect", () => {
       this.wsConnectedSince = null;
+      this.missionSeen.clear();
       this.emitter.emit("disconnect");
     });
     // Manager-level reconnect (the Socket does not emit `reconnect` in
@@ -194,6 +211,19 @@ export class BgosWs {
       const frame = normalizeSkillsRpc(p);
       if (frame) this.emitter.emit("skills_rpc", frame);
     });
+    // Mission lifecycle (mission program stage 5). Eight frames, one handler
+    // shape. This listener advances NO cursor (loadLastId / saveLastId is the
+    // inbound MESSAGE cursor and a mission event is not a message) and never
+    // triggers a backfill: there is no mission replay route, so a missed
+    // event is recovered by the lane's next getActiveMission.
+    for (const type of MISSION_EVENT_TYPES) {
+      socket.on(type, (payload: unknown) => {
+        const frame = normalizeMissionEvent(type, payload);
+        if (!frame) return;
+        if (!this.acceptMissionEvent(frame)) return;
+        this.emitter.emit("mission_event", frame);
+      });
+    }
 
     socket.on("connect_error", (err: Error) => {
       this.reconnectAttempts++;
@@ -201,6 +231,23 @@ export class BgosWs {
     });
 
     this.socket = socket;
+  }
+
+  /**
+   * True the first time this socket sees one logical mission event.
+   *
+   * The gateway stamps the envelope ONCE and emits it to an array of rooms, so
+   * the copy that arrives through pairing:<id> and the copy that arrives
+   * through assistant:<id> carry the identical key. Exact, not heuristic.
+   */
+  private acceptMissionEvent(frame: MissionEventFrame): boolean {
+    const key = missionEventKey(frame);
+    if (this.missionSeen.has(key)) return false;
+    this.missionSeen.add(key);
+    if (this.missionSeen.size > 200) {
+      this.missionSeen.delete(this.missionSeen.values().next().value!);
+    }
+    return true;
   }
 
   /**

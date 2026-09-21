@@ -135,3 +135,42 @@ describe("BgosApi.getCapabilities", () => {
     await expect(makeApi(baseUrl).getCapabilities("codex")).rejects.toBeTruthy();
   });
 });
+
+/**
+ * Stage 5: the bundled hint and the served Codex sentence must tell ONE truth,
+ * and the truth is the host's. A Codex agent has no chat id input on
+ * create_mission and no active mission read tool of its own, so any wording
+ * that tells it to send or to ask for a chat id is an instruction it cannot
+ * follow. These assertions pin the bundled fallback against the served text.
+ */
+describe("BUNDLED_CAPABILITIES mission paragraph", () => {
+  // The served Codex delta's mission sentence, word for word. The leading
+  // bullet marker and the hint file's line wrapping are the only differences.
+  const SERVED_TRUTH = [
+    "Missions belong to a chat now: the host stamps the chat of the turn on every mission you create and reads that chat's own mission for you, so you never send and never ask for a chat id.",
+    "When your owner sets your mission aside or marks it done you receive a plain in band note before your next turn telling you to stop; treat it as an instruction and stop working on that mission at once.",
+    "Told it is paused, stop working on it until you are told it resumed.",
+  ];
+  const flat = BUNDLED_CAPABILITIES.replace(/\s+/g, " ");
+
+  it.each(SERVED_TRUTH)("says, word for word: %s", (sentence) => {
+    expect(flat).toContain(sentence);
+  });
+
+  it("never tells the agent that it carries the chat itself", () => {
+    expect(flat).not.toContain("the host sends that chat for you");
+    expect(flat).not.toContain("which chat a mission is in");
+  });
+
+  it("does not describe the steer mechanism to the model", () => {
+    expect(flat).not.toContain("interrupt a turn");
+  });
+
+  it("keeps the no pause control line, because Codex still cannot enforce one", () => {
+    expect(flat).toContain("This channel has no pause control of its own yet");
+  });
+
+  it("carries no em dash and no en dash", () => {
+    expect(BUNDLED_CAPABILITIES).not.toMatch(/[\u2013\u2014]/);
+  });
+});

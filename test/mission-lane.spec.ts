@@ -125,7 +125,9 @@ describe("MissionLane (Codex todo_list)", () => {
     });
 
     expect(server.requests.map((r) => `${r.method} ${r.url}`)).toEqual([
-      "GET /api/v1/integrations/assistants/7/missions/active",
+      // Per chat scope (stage 5): the active read names the chat, so two chats
+      // of one agent cannot be handed each other's mission.
+      "GET /api/v1/integrations/assistants/7/missions/active?chatId=42",
       "POST /api/v1/integrations/assistants/7/missions",
     ]);
     expect(server.requests[1]!.headers["x-bgos-pairing"]).toBe(
@@ -133,6 +135,7 @@ describe("MissionLane (Codex todo_list)", () => {
     );
     expect(server.requests[1]!.body).toEqual({
       title: promptTitle.slice(0, 200),
+      chatId: 42,
       progress: { current: 1, total: 3, label: "steps" },
       origin: "derived",
       firstFeedText: "Planned 3 steps",
@@ -1111,5 +1114,284 @@ describe("MissionLane (Codex todo_list)", () => {
     expect(
       server.requests.some((r) => r.url.endsWith("/missions/105/complete")),
     ).toBe(false);
+  });
+});
+
+describe("MissionLane per chat scope and owner controls (stage 5)", () => {
+  let server: MockBgosServer;
+  let baseUrl: string;
+  const lanes: MissionLane[] = [];
+
+  beforeEach(async () => {
+    server = new MockBgosServer();
+    baseUrl = await server.start();
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    const current = lanes.splice(0);
+    try {
+      await Promise.all(current.map((lane) => lane.dispose()));
+    } finally {
+      await server.stop();
+    }
+  });
+
+  function makeLane(debounceMs = 0): MissionLane {
+    const lane = new MissionLane(makeApi(baseUrl), { debounceMs });
+    lanes.push(lane);
+    return lane;
+  }
+
+  const steps = [
+    { text: "One", completed: false },
+    { text: "Two", completed: false },
+    { text: "Three", completed: false },
+  ];
+
+  function stageCreate(
+    assistantId: number,
+    missionId: number,
+    body: Record<string, unknown> = {},
+  ) {
+    server.stage(
+      "GET",
+      `/api/v1/integrations/assistants/${assistantId}/missions/active`,
+      200,
+      { mission: null },
+    );
+    server.stage(
+      "POST",
+      `/api/v1/integrations/assistants/${assistantId}/missions`,
+      201,
+      {
+        ok: true,
+        mission: {
+          id: missionId,
+          assistantId,
+          title: "Plan",
+          status: "active",
+          origin: "derived",
+          progress: { current: 0, total: 3, label: "steps" },
+          ...body,
+        },
+      },
+    );
+  }
+
+  async function attach(lane: MissionLane, chatId: number, prompt: string) {
+    const turn = startTurn(lane, { assistantId: 7, chatId, prompt });
+    await turn.handleTodoList({
+      chatId,
+      eventType: "item.started",
+      item: todo(steps, `todo-${chatId}`),
+    });
+    return turn;
+  }
+
+  function progressPatches(missionId: number) {
+    return server.requests.filter(
+      (r) => r.method === "PATCH" && r.url.endsWith(`/missions/${missionId}/progress`),
+    );
+  }
+
+  it("sends the chat on the create body and on the active read", async () => {
+    stageCreate(7, 301, { chatId: 42 });
+    const lane = makeLane();
+    await attach(lane, 42, "First plan");
+
+    const active = server.requests.find((r) => r.method === "GET")!;
+    expect(active.url).toContain("chatId=42");
+    const create = server.requests.find((r) => r.method === "POST")!;
+    expect(create.body).toMatchObject({ chatId: 42, title: "First plan" });
+  });
+
+  it("keeps a second chat's tracking when the backend echoes a chatId", async () => {
+    stageCreate(7, 301, { chatId: 42 });
+    const lane = makeLane();
+    const first = await attach(lane, 42, "Chat A plan");
+
+    stageCreate(7, 302, { chatId: 43 });
+    await attach(lane, 43, "Chat B plan");
+
+    server.stage("PATCH", "/api/v1/integrations/assistants/7/missions/301/progress", 200, {
+      ok: true,
+    });
+    await first.handleTodoList({
+      chatId: 42,
+      eventType: "item.updated",
+      item: todo([{ text: "One", completed: true }, ...steps.slice(1)], "todo-42"),
+    });
+    expect(progressPatches(301)).toHaveLength(1);
+  });
+
+  it("still evicts the other chat when the backend echoes no chatId", async () => {
+    stageCreate(7, 301);
+    const lane = makeLane();
+    const first = await attach(lane, 42, "Chat A plan");
+
+    stageCreate(7, 302);
+    await attach(lane, 43, "Chat B plan");
+
+    server.stage("PATCH", "/api/v1/integrations/assistants/7/missions/301/progress", 200, {
+      ok: true,
+    });
+    await first.handleTodoList({
+      chatId: 42,
+      eventType: "item.updated",
+      item: todo([{ text: "One", completed: true }, ...steps.slice(1)], "todo-42"),
+    });
+    expect(progressPatches(301)).toHaveLength(0);
+  });
+
+  it("refuses to adopt an open mission that belongs to another chat", async () => {
+    stageCreate(7, 301, { chatId: 42 });
+    const lane = makeLane();
+    // The mission stays tracked: this chat created it and still holds it, so
+    // every OTHER adopt condition is satisfied and only the chat can refuse.
+    await attach(lane, 42, "Chat A plan");
+
+    server.stage("GET", "/api/v1/integrations/assistants/7/missions/active", 200, {
+      mission: {
+        id: 301,
+        assistantId: 7,
+        chatId: 99,
+        title: "Plan",
+        status: "active",
+        origin: "derived",
+        progress: { current: 0, total: 3, label: "steps" },
+      },
+    });
+    server.stage("POST", "/api/v1/integrations/assistants/7/missions", 201, {
+      ok: true,
+      mission: { id: 303, assistantId: 7, chatId: 42, title: "Plan", status: "active", origin: "derived", progress: null },
+    });
+    await attach(lane, 42, "Chat A second plan");
+
+    const creates = server.requests.filter(
+      (r) => r.method === "POST" && r.url.endsWith("/missions"),
+    );
+    expect(creates).toHaveLength(2);
+    expect(creates[1]!.body).toMatchObject({ title: "Chat A second plan", chatId: 42 });
+  });
+
+  it("stamps a self write BEFORE its own complete goes out, so a racing frame is still ours", async () => {
+    // The gateway emits mission_completed from inside the request that closes
+    // the mission, so the frame can reach this daemon before the PATCH
+    // response does. Stamped after the response, that frame would be read as
+    // the OWNER marking the mission done and the model would be told a lie.
+    // How many requests the server had already seen at each stamp.
+    const stampedAfter: number[] = [];
+    const lane = new MissionLane(makeApi(baseUrl), {
+      debounceMs: 0,
+      onSelfWrite: (missionId) => {
+        expect(missionId).toBe(401);
+        stampedAfter.push(server.requests.length);
+      },
+    });
+    lanes.push(lane);
+    server.stage("GET", "/api/v1/integrations/assistants/7/missions/active", 200, {
+      mission: null,
+    });
+    server.stage("POST", "/api/v1/integrations/assistants/7/missions", 201, {
+      ok: true,
+      mission: { id: 401, assistantId: 7, chatId: 42, title: "Plan", status: "active", origin: "derived", progress: null },
+    });
+    server.stage("PATCH", "/api/v1/integrations/assistants/7/missions/401/complete", 200, {
+      ok: true,
+      mission: { id: 401 },
+    });
+
+    const turn = startTurn(lane, { assistantId: 7, chatId: 42, prompt: "Chat A plan" });
+    await turn.handleTodoList({
+      chatId: 42,
+      eventType: "item.started",
+      item: todo(steps, "todo-42"),
+    });
+    await turn.finalizeTurn({ chatId: 42, finalText: "Done." });
+
+    const completeIndex = server.requests.findIndex((r) =>
+      r.url.endsWith("/missions/401/complete"),
+    );
+    expect(completeIndex).toBeGreaterThanOrEqual(0);
+    // ONE stamp, for the close and nothing else. It was taken while the
+    // server had not yet seen the complete, which is the whole point: the
+    // frame that races the response finds the stamp already there.
+    expect(stampedAfter).toHaveLength(1);
+    expect(stampedAfter[0]).toBe(completeIndex);
+  });
+
+  it("does NOT stamp its own create, because that stamp could only arrive late", async () => {
+    // The id exists only once the response is back, while the gateway emits
+    // mission_created from inside that request. A stamp taken after it is an
+    // orphan: it answers for no frame of its own and then waits to be eaten
+    // by the owner's next Set aside of the same mission. It would buy
+    // nothing even if it won the race, because mission_created carries
+    // createdByAssistant and the control lane already skips on that.
+    const stamped: number[] = [];
+    const lane = new MissionLane(makeApi(baseUrl), {
+      debounceMs: 0,
+      onSelfWrite: (missionId) => stamped.push(missionId),
+    });
+    lanes.push(lane);
+    stageCreate(7, 501, { chatId: 42 });
+    await attach(lane, 42, "Chat A plan");
+    expect(stamped).toEqual([]);
+  });
+
+  it("noteClosed during a turn means no complete and no fail at the end", async () => {
+    stageCreate(7, 301, { chatId: 42 });
+    const lane = makeLane();
+    const turn = await attach(lane, 42, "Chat A plan");
+
+    lane.noteClosed(301);
+    await turn.finalizeTurn({ chatId: 42, finalText: "All done." });
+
+    expect(server.requests.some((r) => r.url.endsWith("/missions/301/complete"))).toBe(false);
+    expect(server.requests.some((r) => r.url.endsWith("/missions/301/fail"))).toBe(false);
+  });
+
+  it("notePaused holds progress and leaves the mission open at turn end", async () => {
+    stageCreate(7, 301, { chatId: 42 });
+    const lane = makeLane();
+    const turn = await attach(lane, 42, "Chat A plan");
+
+    lane.notePaused(301);
+    server.stage("PATCH", "/api/v1/integrations/assistants/7/missions/301/progress", 200, {
+      ok: true,
+    });
+    await turn.handleTodoList({
+      chatId: 42,
+      eventType: "item.updated",
+      item: todo([{ text: "One", completed: true }, ...steps.slice(1)], "todo-42"),
+    });
+    expect(progressPatches(301)).toHaveLength(0);
+
+    await turn.finalizeTurn({ chatId: 42, finalText: "Stopped here." });
+    expect(server.requests.some((r) => r.url.endsWith("/missions/301/complete"))).toBe(false);
+    expect(server.requests.some((r) => r.url.endsWith("/missions/301/fail"))).toBe(false);
+  });
+
+  it("noteResumed flushes the snapshot the pause held back", async () => {
+    stageCreate(7, 301, { chatId: 42 });
+    const lane = makeLane();
+    const turn = await attach(lane, 42, "Chat A plan");
+
+    lane.notePaused(301);
+    server.stage("PATCH", "/api/v1/integrations/assistants/7/missions/301/progress", 200, {
+      ok: true,
+    });
+    await turn.handleTodoList({
+      chatId: 42,
+      eventType: "item.updated",
+      item: todo([{ text: "One", completed: true }, ...steps.slice(1)], "todo-42"),
+    });
+    expect(progressPatches(301)).toHaveLength(0);
+
+    lane.noteResumed(301);
+    await vi.waitFor(() => expect(progressPatches(301)).toHaveLength(1));
+    expect(progressPatches(301)[0]!.body).toMatchObject({
+      progress: { current: 1, total: 3 },
+    });
   });
 });

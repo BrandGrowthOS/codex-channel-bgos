@@ -17,14 +17,22 @@
  *   PATCH assistants/:assistantId/missions/:missionId/tick      { goalId, evidence? }
  *   PATCH assistants/:assistantId/missions/:missionId/complete  { summary? }
  *
- * Create body: { title, miniGoals: [{ name, doneWhen }] }.
+ * Create body: { title, miniGoals: [{ name, doneWhen }], chatId? }.
  * Complete body: { summary? }, where summary is at most 500 chars. The backend
  * accepts 2..12 goals (the trained flow targets 4 to 10), assigns goal ids
- * 1..n, enforces ONE active mission per assistant (creating a new one
- * abandons the previous active mission), auto-completes on the last tick,
- * and treats a tick of an already-done goal as an idempotent no-op. All
- * write responses embed the full mission snapshot as { ok, mission }; the
- * active read returns { mission | null }.
+ * 1..n, auto-completes on the last tick, and treats a tick of an already-done
+ * goal as an idempotent no-op. All write responses embed the full mission
+ * snapshot as { ok, mission }; the active read returns { mission | null }.
+ *
+ * DIVERGENCE from the pinned commit above, deliberate (mission program stage
+ * 5): a mission belongs to ONE CHAT. Each CHAT holds at most one open
+ * mission, so creating one in a chat sets aside that chat's own open mission
+ * and leaves every other chat alone. `chatId` on the create body names the
+ * chat and `?chatId=` on the active read asks for that chat's open mission;
+ * omitting the chat still means the agent's MAIN chat, so every request built
+ * here is byte identical to the older ones when no chat is named. The Codex
+ * daemon never asks the model for a chat: the host stamps the chat of the
+ * turn.
  *
  * Validation failures return { ok: false, error } rather than throwing, so
  * the thin server wiring can relay a clear, actionable message to the agent
@@ -65,7 +73,8 @@ export interface MissionCompleteBody {
 export interface MissionSnapshot {
   id: number
   title: string
-  status: 'active' | 'completed' | 'abandoned'
+  /** The five statuses the wire carries. `paused` and `failed` were missing. */
+  status: 'active' | 'paused' | 'completed' | 'abandoned' | 'failed'
   miniGoals: Array<{
     id: number
     name: string
@@ -223,9 +232,14 @@ export function buildMissionCreatePath(assistantId: unknown): MissionPathResult 
   return { ok: true, path: `assistants/${assistantId}/missions` }
 }
 
-export function buildMissionActivePath(assistantId: unknown): MissionPathResult {
+export function buildMissionActivePath(
+  assistantId: unknown,
+  chatId?: unknown,
+): MissionPathResult {
   if (!isPositiveIntLike(assistantId)) return { ok: false, error: BAD_ASSISTANT }
-  return { ok: true, path: `assistants/${assistantId}/missions/active` }
+  const base = `assistants/${assistantId}/missions/active`
+  if (!isPositiveIntLike(chatId)) return { ok: true, path: base }
+  return { ok: true, path: `${base}?chatId=${Number(chatId)}` }
 }
 
 export function buildMissionTickPath(assistantId: unknown, missionId: unknown): MissionPathResult {

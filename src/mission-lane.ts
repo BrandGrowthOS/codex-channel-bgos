@@ -41,6 +41,14 @@ interface TurnState {
 
 export interface MissionLaneOptions {
   debounceMs?: number;
+  /**
+   * Called just BEFORE this lane closes a mission itself (complete, fail).
+   * The mission control lane stamps it so a backend older than stage 5,
+   * which sends no `cleared_by`, cannot make the daemon's own turn end
+   * completion look like the owner marking the mission done. A create is not
+   * stamped: see attachMission for why.
+   */
+  onSelfWrite?: (missionId: number) => void;
 }
 
 export interface BeginMissionTurnParams {
@@ -70,10 +78,44 @@ export class MissionLane {
   private readonly turnByChat = new Map<number, TurnState>();
   private readonly storedByChat = new Map<number, StoredMission>();
   private readonly createdMissionIds = new Set<number>();
+  /** Missions the owner paused. This lane stops writing to them. */
+  private readonly pausedMissions = new Set<number>();
+  private readonly onSelfWrite: (missionId: number) => void;
 
   constructor(api: BgosApi, options: MissionLaneOptions = {}) {
     this.api = api;
     this.debounceMs = options.debounceMs ?? 600;
+    this.onSelfWrite = options.onSelfWrite ?? (() => {});
+  }
+
+  /**
+   * The owner paused this mission. Hold every progress PATCH and do NOT close
+   * it at turn end: a turn that ends during a pause must leave the mission
+   * paused rather than silently completing it over the owner's decision. This
+   * is the whole of Codex's honest pause behaviour in this stage.
+   */
+  notePaused(missionId: number): void {
+    if (!Number.isSafeInteger(missionId) || missionId <= 0) return;
+    this.pausedMissions.add(missionId);
+  }
+
+  /** The owner resumed it. Writing may continue, starting with what was held. */
+  noteResumed(missionId: number): void {
+    if (!this.pausedMissions.delete(missionId)) return;
+    for (const [chatId, state] of this.turnByChat) {
+      if (state.missionId !== missionId || state.pendingSnapshot === null) continue;
+      void this.flush(chatId, state);
+    }
+  }
+
+  /**
+   * The mission is gone (completed, abandoned or failed elsewhere). Forget it,
+   * so finalizeTurn falls into its unmanaged branch and issues no /complete
+   * and no /fail against a mission the server already closed.
+   */
+  noteClosed(missionId: number): void {
+    this.pausedMissions.delete(missionId);
+    this.forgetMission(missionId);
   }
 
   /** Start one Codex turn and remember the prompt used for its mission title. */
@@ -172,6 +214,14 @@ export class MissionLane {
       state.pendingFlush = null;
     }
 
+    // Paused by the owner: hold whatever is pending, close nothing, and let
+    // the turn end. Flushing here would also spin the loop below, because a
+    // paused drain deliberately leaves pendingSnapshot in place.
+    if (state.missionId !== null && this.pausedMissions.has(state.missionId)) {
+      this.turnByChat.delete(params.chatId);
+      return;
+    }
+
     do {
       await this.flush(params.chatId, state);
     } while (
@@ -197,6 +247,11 @@ export class MissionLane {
       for (let attempt = 0; attempt < 2; attempt += 1) {
         if (this.turnByChat.get(params.chatId) !== state) break;
         try {
+          // Stamp BEFORE the write: the gateway emits the mission event from
+          // inside the request that closes the mission, so the frame can beat
+          // the response back. Stamped after, a racing frame would be read as
+          // the OWNER closing the mission and the model would be told a lie.
+          this.onSelfWrite(missionId);
           if (failed) {
             await this.api.failMission(state.assistantId, missionId, body);
           } else {
@@ -254,6 +309,7 @@ export class MissionLane {
     this.turnByChat.clear();
     this.storedByChat.clear();
     this.createdMissionIds.clear();
+    this.pausedMissions.clear();
 
     await Promise.all(
       Array.from(managed.values(), async ({ assistantId, missionId }) => {
@@ -287,7 +343,7 @@ export class MissionLane {
   ): Promise<void> {
     let active = null;
     try {
-      active = await this.api.getActiveMission(state.assistantId);
+      active = await this.api.getActiveMission(state.assistantId, { chatId });
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn(
@@ -307,12 +363,15 @@ export class MissionLane {
       active !== null &&
       (active.status === "active" || active.status === "paused") &&
       active.origin === "derived" &&
+      // A chat scoped backend can hand back a mission that belongs to another
+      // chat; adopting it would tick the wrong card.
+      (active.chatId === undefined || active.chatId === null || active.chatId === chatId) &&
       this.createdMissionIds.has(active.id) &&
       stored?.assistantId === state.assistantId &&
       stored?.missionId === active.id;
 
     if (canAdopt && active !== null) {
-      this.setMission(chatId, state, active.id, item.items);
+      this.setMission(chatId, state, active.id, item.items, active.chatId != null);
       return;
     }
 
@@ -325,6 +384,7 @@ export class MissionLane {
     try {
       const created = await this.api.createMission(state.assistantId, {
         title: titleFromPrompt(state.prompt),
+        chatId,
         progress,
         origin: "derived",
         firstFeedText: `Planned ${item.items.length} steps`,
@@ -332,9 +392,21 @@ export class MissionLane {
       if (!Number.isInteger(created?.id) || created.id <= 0) {
         throw new Error("mission create returned no valid id");
       }
+      // NO self write stamp here, deliberately. The id only exists once the
+      // response is back, while the gateway emits mission_created from inside
+      // that request, so a stamp taken here normally arrives too late to
+      // answer for its own frame and then sits there waiting to be eaten by
+      // the OWNER's next Set aside of the same mission. It would buy nothing
+      // even when it won the race: mission_created carries
+      // createdByAssistant, which every backend has always sent and which the
+      // control lane already skips on.
       if (this.turnByChat.get(chatId) === state) {
         this.createdMissionIds.add(created.id);
-        this.setMission(chatId, state, created.id, item.items);
+        // Self configuring: a backend that echoes the chat is chat scoped, so
+        // a create in chat B does NOT abandon chat A's mission and the local
+        // eviction would be a lie. A backend that echoes none still enforces
+        // one open mission per assistant, so the eviction stays load bearing.
+        this.setMission(chatId, state, created.id, item.items, created.chatId != null);
       }
     } catch (err) {
       // eslint-disable-next-line no-console
@@ -349,16 +421,19 @@ export class MissionLane {
     state: TurnState,
     missionId: number,
     items: TodoStep[],
+    chatScopedBackend: boolean,
   ): void {
-    for (const [otherChatId, other] of this.turnByChat) {
-      if (other === state || other.assistantId !== state.assistantId) continue;
-      this.detachState(other);
-      this.turnByChat.delete(otherChatId);
-      this.storedByChat.delete(otherChatId);
-    }
-    for (const [storedChatId, stored] of this.storedByChat) {
-      if (storedChatId !== chatId && stored.assistantId === state.assistantId) {
-        this.storedByChat.delete(storedChatId);
+    if (!chatScopedBackend) {
+      for (const [otherChatId, other] of this.turnByChat) {
+        if (other === state || other.assistantId !== state.assistantId) continue;
+        this.detachState(other);
+        this.turnByChat.delete(otherChatId);
+        this.storedByChat.delete(otherChatId);
+      }
+      for (const [storedChatId, stored] of this.storedByChat) {
+        if (storedChatId !== chatId && stored.assistantId === state.assistantId) {
+          this.storedByChat.delete(storedChatId);
+        }
       }
     }
     const snapshot = copyItems(items);
@@ -424,6 +499,7 @@ export class MissionLane {
       return;
     }
     if (state.missionId === null || state.pendingSnapshot === null) return;
+    if (this.pausedMissions.has(state.missionId)) return;
 
     const operation = this.drainProgress(chatId, state).finally(() => {
       state.flushInFlight = null;
@@ -439,6 +515,8 @@ export class MissionLane {
       state.pendingSnapshot !== null
     ) {
       const missionId = state.missionId;
+      // Hold the snapshot rather than dropping it: resume flushes it.
+      if (this.pausedMissions.has(missionId)) return;
       const snapshot = state.pendingSnapshot;
       const workedText = state.pendingWorkedText;
       state.pendingSnapshot = null;

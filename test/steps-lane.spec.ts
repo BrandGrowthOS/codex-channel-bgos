@@ -309,6 +309,7 @@ describe("the adapter's steps wiring", () => {
         beginTurn: vi.fn(() => 1),
         finalizeTurn: vi.fn(async () => {}),
       },
+      missionControl: { applyBulletin: (_chatId: number, input: unknown) => input },
       stepsLane,
       toolProgress: { sendToolStart: vi.fn(async () => {}) },
       outbound: { sendAgentError: vi.fn(async () => {}) },

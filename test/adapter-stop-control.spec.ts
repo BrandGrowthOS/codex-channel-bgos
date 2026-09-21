@@ -83,6 +83,10 @@ describe("native Stop control completion", () => {
         beginTurn: vi.fn(() => 1),
         finalizeTurn: vi.fn(async () => {}),
       };
+      // The turn asks the mission control lane whether the owner changed a
+      // mission since the last turn. Nothing queued here, so the input passes
+      // through untouched.
+      adapter.missionControl = { applyBulletin: (_chatId: number, input: unknown) => input };
       adapter.outbound.sendAgentError = vi.fn();
       adapter.host.runTurn = vi.fn(async () => {
         for (const controller of adapter.turnControllers.get(20))
@@ -111,6 +115,7 @@ describe("native Stop control completion", () => {
       beginTurn: vi.fn(() => 1),
       finalizeTurn: vi.fn(async () => {}),
     };
+    adapter.missionControl = { applyBulletin: (_chatId: number, input: unknown) => input };
     adapter.outbound.sendAgentError = vi.fn(async () => {});
     adapter.host.runTurn = vi.fn(async () => ({
       error: "Connection lost",
