@@ -834,6 +834,12 @@ export class CodexAdapter {
                 ...(card.linesRemoved !== undefined
                   ? { linesRemoved: card.linesRemoved }
                   : {}),
+                // The stage 8 three, which only a CHILD AGENT's row carries.
+                ...(card.id !== undefined ? { id: card.id } : {}),
+                ...(card.startedAt !== undefined
+                  ? { startedAt: card.startedAt }
+                  : {}),
+                ...(card.result !== undefined ? { result: card.result } : {}),
               }),
             )
             .catch(() => {});
@@ -942,6 +948,9 @@ export class CodexAdapter {
    * out from when a message was created.
    */
   private noteTurnClock(chatId: number, result: RunTurnResult): void {
+    // A card that is staying open has no finish yet, and the minutes this
+    // turn took are not the minutes the card will end up showing.
+    if (result.helpersStillRunning) return;
     const startedAtMs = result.turnStartedAtMs;
     const finishedAtMs = result.turnFinishedAtMs;
     if (typeof startedAtMs !== "number" || typeof finishedAtMs !== "number")
@@ -966,8 +975,21 @@ export class CodexAdapter {
     sentViaTool: boolean;
   }): Promise<void> {
     const { assistantId, chatId, replyHandle, result, sentViaTool } = params;
+    /**
+     * A helper this turn spawned is still working, so the card stays open:
+     * the last patch it got said `running` and no later one closes it. A
+     * finished card folds, and a helper ticking behind a fold helps nobody.
+     *
+     * The limit, named rather than papered over: this daemon gets no further
+     * notification for a thread whose turn has ended, so a card left open
+     * this way carries the helper's last reported state until the model's
+     * next turn mentions that child again. Folding over a working helper, or
+     * marking a row done that nobody checked, are the two worse answers.
+     */
+    const helpersStillRunning = result.helpersStillRunning === true;
     if (result.error && !result.replyText.trim()) {
-      await replyHandle.finalizeTurn().catch(() => {});
+      if (!helpersStillRunning)
+        await replyHandle.finalizeTurn().catch(() => {});
       await this.outbound
         .sendAgentError({ assistantId, chatId, reason: result.error })
         .catch(() => {});
@@ -1006,7 +1028,7 @@ export class CodexAdapter {
       await replyHandle.sendFile(path).catch(() => {});
     }
 
-    await replyHandle.finalizeTurn().catch(() => {});
+    if (!helpersStillRunning) await replyHandle.finalizeTurn().catch(() => {});
     if (result.error)
       await this.outbound
         .sendAgentError({ assistantId, chatId, reason: result.error })
@@ -1092,6 +1114,12 @@ export class CodexAdapter {
                 ...(card.linesRemoved !== undefined
                   ? { linesRemoved: card.linesRemoved }
                   : {}),
+                // The stage 8 three, which only a CHILD AGENT's row carries.
+                ...(card.id !== undefined ? { id: card.id } : {}),
+                ...(card.startedAt !== undefined
+                  ? { startedAt: card.startedAt }
+                  : {}),
+                ...(card.result !== undefined ? { result: card.result } : {}),
               }),
             )
             .catch(() => {});

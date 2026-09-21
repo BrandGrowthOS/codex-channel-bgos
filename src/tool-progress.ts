@@ -48,6 +48,25 @@ export interface ToolProgressEntry {
   linesAdded?: number;
   /** Lines this edit removed. Absent when nothing was measured. */
   linesRemoved?: number;
+  /**
+   * Stage 8 adds the last three, and they are what a CHILD AGENT's row needs.
+   *
+   * `id` is this sender's own stable identity for the row. The app uses it as
+   * the row's key and as the key of the row's own open state, so a row keeps
+   * its place while the array around it changes. On a child row it is the
+   * child's thread id, which is the id this card already merges the row by.
+   *
+   * `startedAt` is ISO 8601 and is THIS ROW's own start. It is not half of a
+   * pair: a finished row reports `durationMs` instead, and the card's own
+   * clock above is a separate thing that travels both ends or neither.
+   *
+   * `result` is what a child agent finally said, one short line of at most
+   * 240 characters, masked by the sender before it was cut and masked again
+   * by the platform before it is stored. It is never command output.
+   */
+  id?: string;
+  startedAt?: string;
+  result?: string;
 }
 
 /**
@@ -91,6 +110,13 @@ interface CardClock {
  * is what actually rides every PATCH and every WS frame to every viewer.
  */
 const CARD_OUTPUT_BUDGET = 8192;
+
+/** Characters of a row id the wire carries. Mirrors the platform's cap. */
+const ROW_ID_MAX = 64;
+/** Characters of a row start the wire carries. An ISO instant is 24. */
+const ROW_START_MAX = 40;
+/** Characters of a child's last message one row carries. The platform caps it too. */
+const ROW_RESULT_MAX = 240;
 
 /** Rows kept when the cap bites, plus the one row that says what was dropped. */
 const ROW_CAP = 50;
@@ -173,6 +199,12 @@ export class ToolProgressOrchestrator {
     exitCode?: number;
     linesAdded?: number;
     linesRemoved?: number;
+    /** This sender's stable identity for the row (a child's thread id). */
+    id?: string;
+    /** ISO 8601, THIS ROW's own start. Never the card's clock. */
+    startedAt?: string;
+    /** A child agent's last message, already masked and cut by the sender. */
+    result?: string;
   }): Promise<void> {
     const { assistantId, chatId, toolName, args } = params;
     // Every clip here goes through clipText: a bare slice can cut a surrogate
@@ -224,6 +256,21 @@ export class ToolProgressOrchestrator {
       if (added !== null) entry.linesAdded = added;
       if (removed !== null) entry.linesRemoved = removed;
     }
+    // The stage 8 three, each re clipped to what the platform declares, for
+    // the same reason `output` is: the wire refuses the WHOLE patch over a
+    // cap, and the cost of a refusal is the card for the rest of the turn.
+    if (params.id !== undefined && params.id.length > 0)
+      entry.id = clipText(params.id, ROW_ID_MAX);
+    // NOT clipped: a cut ISO instant is not an ISO instant, and the platform
+    // validates the shape as well as the length. Too long is no start at all.
+    if (
+      params.startedAt !== undefined &&
+      params.startedAt.length > 0 &&
+      params.startedAt.length <= ROW_START_MAX
+    )
+      entry.startedAt = params.startedAt;
+    if (params.result !== undefined && params.result.length > 0)
+      entry.result = clipText(params.result, ROW_RESULT_MAX);
 
     const existing = this.cardByChat.get(chatId);
     if (existing) {
@@ -472,8 +519,14 @@ function spendOutputBudget(state: ChatState): void {
   }
 }
 
-/** One epoch millisecond reading as an ISO 8601 instant, or null. */
-function isoInstant(ms: unknown): string | null {
+/**
+ * One epoch millisecond reading as an ISO 8601 instant, or null.
+ *
+ * Exported since stage 8: a ROW's own start travels as an ISO string too, and
+ * the mapper that builds a child agent row converts it with this rather than
+ * with a second date helper of its own. One format per concept on this wire.
+ */
+export function isoInstant(ms: unknown): string | null {
   if (typeof ms !== "number" || !Number.isFinite(ms)) return null;
   const at = new Date(ms);
   return Number.isNaN(at.getTime()) ? null : at.toISOString();
@@ -516,15 +569,25 @@ function earlierRow(dropped: number): ToolProgressEntry {
   };
 }
 
+/**
+ * The card's one line of text, and it counts the agent's OWN tools only.
+ *
+ * A helper is not a tool. A turn that used three tools and asked four
+ * helpers to work is a turn that used three tools, and "Used 7 tools" with
+ * four child names in the preview is wrong in plain English. The app's
+ * folded head has always counted it this way; this is the sender's text
+ * saying the same thing.
+ */
 function buildSummary(tools: ToolProgressEntry[], done: boolean): string {
-  if (tools.length === 0) {
+  const counted = tools.filter((t) => t.kind !== "subagent");
+  if (counted.length === 0) {
     return done ? "No tools used" : "Working…";
   }
-  const names = tools.slice(0, 4).map((t) => t.name);
-  const tail = tools.length > 4 ? `, +${tools.length - 4} more` : "";
+  const names = counted.slice(0, 4).map((t) => t.name);
+  const tail = counted.length > 4 ? `, +${counted.length - 4} more` : "";
   if (done) {
-    const noun = tools.length === 1 ? "tool" : "tools";
-    return `Used ${tools.length} ${noun} · ${names.join(", ")}${tail}`;
+    const noun = counted.length === 1 ? "tool" : "tools";
+    return `Used ${counted.length} ${noun} · ${names.join(", ")}${tail}`;
   }
   return `Working… · ${names.join(", ")}${tail}`;
 }

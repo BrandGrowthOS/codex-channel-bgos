@@ -35,7 +35,8 @@ import { homedir } from "node:os";
 import { buildComponentEventMessage } from "./hoai-shared/renderables.js";
 import { clipText } from "./clip-text.js";
 import { buildOutputTail } from "./output-tail.js";
-import { lineCountForWire } from "./tool-progress.js";
+import { redactOutput } from "./redact-output.js";
+import { isoInstant, lineCountForWire } from "./tool-progress.js";
 import type { ToolCard } from "./event-mapper.js";
 import type { OutboundMessagePayload } from "./types.js";
 
@@ -56,6 +57,26 @@ export interface ActivityCard extends ToolCard {
   linesAdded?: number;
   /** Lines this edit removed. Absent when nothing was measured. */
   linesRemoved?: number;
+  /**
+   * Stage 8 row fields, every one optional and every one drawn only where
+   * the runtime reported it.
+   *
+   * `id` is this sender's stable identity for the row, which the app uses as
+   * the row's key and as the key of its own open state. On a child agent row
+   * it is the child's THREAD id, which is also the id the card merges the row
+   * by, so the two can never disagree.
+   *
+   * `startedAt` is ISO 8601 and is THIS ROW's own start, not half of a pair:
+   * a finished row reports `durationMs` instead, and this field never goes
+   * near the card's own clock, which is both ends or neither.
+   *
+   * `result` is what a child agent finally said, one short line, masked over
+   * the whole string and only then cut to its FIRST 240 characters. It is
+   * never command output, which is `output` and which a child row never has.
+   */
+  id?: string;
+  startedAt?: string;
+  result?: string;
 }
 
 export interface ActivityRow {
@@ -89,6 +110,12 @@ const PATH_MAX = 200;
 const DETAIL_MAX = 120;
 const NAME_MAX = 64;
 const WHAT_MAX = 80;
+/** Characters of a child's last message one row carries. The platform caps it too. */
+const RESULT_MAX = 240;
+/** Characters of a row id the wire accepts. A thread id is far inside it. */
+const ID_MAX = 64;
+/** Characters of a row start the wire accepts. An ISO instant is 24. */
+const START_MAX = 40;
 
 const TOOL_ICON: Record<string, string> = {
   commandExecution: "⚡",
@@ -427,6 +454,22 @@ function editCard(
   return card;
 }
 
+/**
+ * The one word the owner reads for one worker state, or "" for a state this
+ * plugin has never heard of.
+ *
+ * One table, read twice: the folded header counts these words and a child's
+ * own row falls back to its word when the runtime gave it no message. Two
+ * tables would drift the first time a status was added to the protocol, and
+ * the card would then say "1 starting" in its header above a row that said
+ * something else.
+ */
+export function workerWord(status: unknown): string {
+  const wanted = String(status ?? "");
+  for (const [state, word] of WORKER_WORDS) if (state === wanted) return word;
+  return "";
+}
+
 /** Human summary of the live worker states, worst first ("1 running, 1 done"). */
 export function summarizeWorkerStates(states: unknown): string {
   if (!isRecord(states)) return "";
@@ -437,9 +480,9 @@ export function summarizeWorkerStates(states: unknown): string {
     counts.set(status, (counts.get(status) ?? 0) + 1);
   }
   const parts: string[] = [];
-  for (const [status, word] of WORKER_WORDS) {
+  for (const [status] of WORKER_WORDS) {
     const n = counts.get(status);
-    if (n) parts.push(`${n} ${word}`);
+    if (n) parts.push(`${n} ${workerWord(status)}`);
   }
   return clip(parts.join(", "), DETAIL_MAX);
 }
@@ -452,6 +495,141 @@ function liveWorkers(states: unknown): number {
     if (LIVE_WORKER_STATES.has(status)) live += 1;
   }
   return live;
+}
+
+/** A child agent's own state, as the row's three words read it. */
+const CHILD_STATUS: Record<string, ActivityCard["status"]> = {
+  pendingInit: "running",
+  running: "running",
+  completed: "done",
+  interrupted: "error",
+  errored: "error",
+  shutdown: "error",
+  notFound: "error",
+};
+
+/**
+ * This notification's own receipt, in epoch milliseconds, or null.
+ *
+ * `item/started` carries `startedAtMs` and `item/completed` carries
+ * `completedAtMs`, and the host remembers the first so a completion arrives
+ * holding both. The receipt of THIS notification is therefore the completion
+ * stamp on a completion and the start stamp otherwise. Never `Date.now()`:
+ * a child's elapsed must be measured against what the runtime reported, not
+ * against whenever this process got round to mapping the item.
+ */
+function receiptMs(ctx: ItemContext | undefined, phase: ItemPhase): number | null {
+  const raw =
+    phase === "completed"
+      ? (ctx?.completedAtMs ?? ctx?.startedAtMs)
+      : ctx?.startedAtMs;
+  return typeof raw === "number" && Number.isFinite(raw) ? Math.round(raw) : null;
+}
+
+/** The first line of a multi line string, clipped. Empty for nothing. */
+function firstLine(raw: unknown, max: number): string {
+  if (typeof raw !== "string") return "";
+  return clip(raw.split(/\r?\n/, 1)[0] ?? "", max);
+}
+
+/**
+ * One row per CHILD AGENT named by a `collabAgentToolCall`.
+ *
+ * `entryFromItem` keeps its single row contract and keeps drawing the collab
+ * call itself; this draws the children underneath it, because a function that
+ * sometimes returns one row and sometimes seven is a function every one of
+ * its thirty callers and tests has to re read.
+ *
+ * Four rules, and each one is a defect that passes a shallow reading:
+ *
+ *  1. The row is keyed on the CHILD's THREAD id, which is what the
+ *     `subAgentActivity` branch keys on too, so the two sources merge into
+ *     one row per child. The collab item's own id is not the key: the spawn
+ *     call, the wait call and the close call are three items about one child.
+ *  2. The status is the CHILD's, from its entry in `agentsStates`, and
+ *     never the item's own, which is the status of the spawn CALL and
+ *     completes in milliseconds while the child runs for minutes.
+ *  3. The start is this plugin's first sight of that child, kept in the
+ *     caller's map keyed on the child thread, so a later item about the same
+ *     child does not reset it and the elapsed never jumps backwards.
+ *  4. The message is masked over the WHOLE string before any cut, once,
+ *     and the cut keeps the FIRST 240 characters: a child answers at the
+ *     start of its last message, so a tail would show an end with no
+ *     beginning. Masking after a cut hands the rules half a token.
+ *
+ * `names` is the child's readable name (its nickname, else its role) as the
+ * host read it off the child's own thread; there is no name anywhere on the
+ * parent's item. A child nobody has named yet says `helper` and no more.
+ * Because the card merges a row by writing the new row over the old one, a
+ * host that wants an earlier name to survive must keep that name in this map.
+ *
+ * A child row carries no `output`, no path and no counts: it is not a command
+ * row, and the app draws it with no chevron and nothing to open.
+ */
+export function childRowsFromCollabItem(
+  item: Rec,
+  phase: ItemPhase,
+  ctx?: ItemContext,
+  names?: ReadonlyMap<string, string>,
+  firstSeen?: Map<string, number>,
+): ActivityRow[] {
+  if (!isRecord(item)) return [];
+  if (String(item.type ?? "") !== "collabAgentToolCall") return [];
+  const states = item.agentsStates;
+  if (!isRecord(states)) return [];
+
+  const receipt = receiptMs(ctx, phase);
+  const args = firstLine(item.prompt, ARGS_MAX);
+  const rows: ActivityRow[] = [];
+
+  for (const [child, value] of Object.entries(states)) {
+    if (!child || !isRecord(value)) continue;
+    const state = String(value.status ?? "");
+    // A status this plugin has never heard of reads as running: the entry
+    // exists, so the child exists, and nothing in it says the child ended.
+    const status = CHILD_STATUS[state] ?? "running";
+
+    if (receipt !== null && firstSeen && !firstSeen.has(child))
+      firstSeen.set(child, receipt);
+    const began = firstSeen?.get(child) ?? null;
+
+    const card: ActivityCard = {
+      icon: SUBAGENT_ICON,
+      name: clip(names?.get(child), NAME_MAX) || "helper",
+      status,
+      kind: "subagent",
+    };
+    // Only when it is the SAME string the row is keyed by: an id the wire
+    // would refuse is no identity at all, and a clipped one could collide.
+    if (child.length <= ID_MAX) card.id = child;
+    if (args) card.args = args;
+    const startedAt = began === null ? null : isoInstant(began);
+    if (startedAt !== null && startedAt.length <= START_MAX)
+      card.startedAt = startedAt;
+
+    // ONE mask, over the whole message, before either cut. Both cuts read the
+    // same masked string, so there is no second masking path to forget.
+    const masked =
+      typeof value.message === "string" && value.message.length > 0
+        ? redactOutput(value.message)
+        : "";
+    if (status === "running") {
+      // The honest qualifier this protocol can give: the child's own status
+      // line, and its state word when it gave no line at all.
+      const qualifier = clip(masked, DETAIL_MAX) || workerWord(state);
+      if (qualifier) card.detail = qualifier;
+    } else {
+      const result = clip(masked, RESULT_MAX);
+      if (result) card.result = result;
+      if (began !== null && receipt !== null) {
+        const span = Math.round(receipt - began);
+        if (span > 0) card.durationMs = span;
+      }
+    }
+
+    rows.push({ card, itemId: child });
+  }
+  return rows;
 }
 
 /**

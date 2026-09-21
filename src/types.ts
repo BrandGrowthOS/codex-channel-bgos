@@ -254,6 +254,16 @@ export interface OutboundMessagePayload {
       exitCode?: number;
       linesAdded?: number;
       linesRemoved?: number;
+      /**
+       * Stage 8 row fields. `id` is the sender's own stable identity for the
+       * row (a child agent's thread id), `startedAt` is ISO 8601 and is THIS
+       * ROW's own start rather than half of the card's clock above, and
+       * `result` is what a child agent finally said, masked and cut to 240
+       * characters by the sender and masked and cut again by the platform.
+       */
+      id?: string;
+      startedAt?: string;
+      result?: string;
     }>;
   };
   files?: Array<{

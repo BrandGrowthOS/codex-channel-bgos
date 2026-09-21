@@ -7,6 +7,7 @@ import { homedir } from "node:os";
 import { AppServer, codexEnvironment, type RpcObject } from "./app-server.js";
 import { type TodoListSignal } from "./event-mapper.js";
 import {
+  childRowsFromCollabItem,
   entryFromItem,
   markerFromNotification,
   rowFromProgressNotification,
@@ -15,6 +16,7 @@ import {
   type ActivityMarker,
   type ActivityRow,
   type ItemContext,
+  type ItemPhase,
   type KnownRow,
   type MarkerSignal,
 } from "./activity-markers.js";
@@ -153,6 +155,17 @@ export interface RunTurnResult {
    */
   turnStartedAtMs?: number | null;
   turnFinishedAtMs?: number | null;
+  /**
+   * A helper this turn spawned was still working when the turn ended.
+   *
+   * The adapter reads it and leaves the card open with no clock on it,
+   * because a finished card folds and a helper ticking behind a fold helps
+   * nobody. Absent and false both mean the ordinary close. It is only ever
+   * set on a NORMAL exit: a turn the owner stopped, or one that failed,
+   * closes its card exactly as it does today, since nothing will come back
+   * to settle a child of a turn that was cut short.
+   */
+  helpersStillRunning?: boolean;
 }
 interface ActiveTurn {
   id?: string;
@@ -171,6 +184,27 @@ interface ActiveTurn {
   rowStartedAt: Map<string, number>;
   /** The newest collab tool call's worker states, read at turn end. */
   lastCollab?: unknown;
+  /**
+   * This host's FIRST sight of each child agent, keyed on the CHILD's own
+   * thread id and never on the collab item's, because the spawn call, the
+   * wait call and the close call are three items about one child: keyed on
+   * the item, a child's elapsed time would jump backwards on every later
+   * call. Epoch milliseconds, always the runtime's own receipt.
+   */
+  childFirstSeen: Map<string, number>;
+  /**
+   * The last state each child reported, keyed on the child's own thread, so
+   * the turn's end knows which helpers are still working and what their last
+   * message said. The collab item only carries the states of the agents ONE
+   * call touched, which is why this accumulates across the turn.
+   */
+  childState: Map<string, { status: string; message: string }>;
+  /**
+   * A name a `subAgentActivity` row already put on a child's row, keyed the
+   * same way. The child rows are written over it, so without this a child
+   * the runtime never nicknamed would lose the name it was first drawn with.
+   */
+  childBaseName: Map<string, string>;
   finish: (result: RunTurnResult) => void;
   /**
    * Present only on an ADOPTED turn: drop its bookkeeping without delivering
@@ -204,6 +238,52 @@ function turnClock(reported: unknown): {
     turnStartedAtMs: started * 1000,
     turnFinishedAtMs: finished * 1000,
   };
+}
+
+/**
+ * How long this host waits for a child thread's metadata.
+ *
+ * Short on purpose and much shorter than the protocol default: the read is
+ * a nicety (a readable name, and one last look at a helper at the turn's
+ * end), and a slow one must never hold up the owner's answer.
+ */
+const CHILD_READ_TIMEOUT_MS = 5_000;
+
+/**
+ * The child's readable name off its own thread: its nickname, else its role.
+ *
+ * The parent's stream carries no name for a child anywhere, so this metadata
+ * read is the only place one exists. Empty means the runtime has not named
+ * it, and an unnamed child is drawn as a helper rather than as a guess.
+ */
+export function childReadableName(thread: unknown): string {
+  if (!thread || typeof thread !== "object") return "";
+  const read = thread as { agentNickname?: unknown; agentRole?: unknown };
+  const nickname =
+    typeof read.agentNickname === "string" ? read.agentNickname.trim() : "";
+  if (nickname) return nickname;
+  return typeof read.agentRole === "string" ? read.agentRole.trim() : "";
+}
+
+/**
+ * Has this child finished, as its own thread reports it, and how?
+ *
+ * Read once at the parent's turn end, for a helper the collab items left
+ * running. A thread that is idle has nothing in flight, and the parent that
+ * was the only sender of its work has just stopped, so idle is the end of
+ * the work it was spawned for; a system error is the other end. `active` is
+ * a child still working, and `notLoaded`, a missing status or a refused read
+ * expose NOTHING, which leaves the row running and the card running rather
+ * than marking a row done that nobody checked.
+ */
+export function childEndStateFromThread(thread: unknown): string | null {
+  if (!thread || typeof thread !== "object") return null;
+  const status = (thread as { status?: unknown }).status;
+  if (!status || typeof status !== "object") return null;
+  const type = String((status as { type?: unknown }).type ?? "");
+  if (type === "idle") return "completed";
+  if (type === "systemError") return "errored";
+  return null;
 }
 
 export function appServerInput(input: Input): RpcObject[] {
@@ -270,6 +350,20 @@ export class CodexHost {
    * absolute path that names their account on their own disk.
    */
   private readonly cwdByThread = new Map<string, string>();
+  /**
+   * The readable name of a CHILD agent, keyed on the child's own thread id
+   * and held as the in flight promise, so the metadata read happens exactly
+   * once per child for the life of this process. A nickname and a role never
+   * change, and two collab items about one child would otherwise open two
+   * reads for one answer.
+   */
+  private readonly childNames = new Map<string, Promise<string>>();
+  /**
+   * The same answers once they have landed, for the paths that cannot wait.
+   * A row's identity and a child's first sight are recorded at the moment
+   * the state arrived, never after a network read.
+   */
+  private readonly childNameKnown = new Map<string, string>();
   constructor(private opts: CodexHostOptions) {
     this.authMode = opts.auth.mode;
     this.workdir = resolve(
@@ -955,6 +1049,9 @@ export class CodexHost {
         pending: [],
         rowIdentity: new Map(),
         rowStartedAt: new Map(),
+        childFirstSeen: new Map(),
+        childState: new Map(),
+        childBaseName: new Map(),
         finish: (result) => {
           if (finished) return;
           finished = true;
@@ -1054,25 +1151,40 @@ export class CodexHost {
         const marker = turnContinuesAtEnd(turn.lastCollab);
         if (marker) this.deliverMarker(turn, marker);
       }
-      turn.finish(
-        this.result(
-          params.threadId,
-          turn,
-          status === "completed",
-          status === "completed"
-            ? null
-            : friendlyCodexError(
-                params.turn.error?.message ??
-                  (status === "interrupted"
-                    ? "Stopped by you."
-                    : "Codex could not finish the turn."),
-              ),
-          // The clock rides a failed turn too: the runtime counted the same
-          // minutes whether or not the work landed, and the gate capture of a
-          // 401 turn carried all three fields.
-          params.turn,
-        ),
-      );
+      const error =
+        status === "completed"
+          ? null
+          : friendlyCodexError(
+              params.turn.error?.message ??
+                (status === "interrupted"
+                  ? "Stopped by you."
+                  : "Codex could not finish the turn."),
+            );
+      // One last look at every helper the collab items left running, and the
+      // answer to whether any of them is still working. Only on a NORMAL
+      // exit: a turn the owner stopped, or one that failed, closes its card
+      // exactly as it does today, because nothing will come back to settle a
+      // child of a turn that was cut short.
+      const settling =
+        status === "completed"
+          ? this.settleChildRows(turn, params.turn)
+          : Promise.resolve(false);
+      void settling
+        .catch(() => false)
+        .then((stillWorking) => {
+          const outcome = this.result(
+            params.threadId,
+            turn,
+            status === "completed",
+            error,
+            // The clock rides a failed turn too: the runtime counted the same
+            // minutes whether or not the work landed, and the gate capture of a
+            // 401 turn carried all three fields.
+            params.turn,
+          );
+          if (stillWorking) outcome.helpersStillRunning = true;
+          turn.finish(outcome);
+        });
     }
     if (method === "item/completed" && params.item?.type === "agentMessage")
       turn.messages.set(params.item.id, params.item.text);
@@ -1122,14 +1234,16 @@ export class CodexHost {
       const itemKey = typeof item.id === "string" ? item.id : "";
       if (started && itemKey && typeof params.startedAtMs === "number")
         turn.rowStartedAt.set(itemKey, params.startedAtMs);
-      const row = entryFromItem(item, started ? "started" : "completed", {
+      const phase: ItemPhase = started ? "started" : "completed";
+      const ctx: ItemContext = {
         ...this.itemContext(String(params.threadId ?? "")),
         startedAtMs: itemKey ? turn.rowStartedAt.get(itemKey) : undefined,
         completedAtMs:
           !started && typeof params.completedAtMs === "number"
             ? params.completedAtMs
             : undefined,
-      });
+      };
+      const row = entryFromItem(item, phase, ctx);
       if (!started && itemKey) turn.rowStartedAt.delete(itemKey);
       if (row) {
         turn.rowIdentity.set(row.itemId, {
@@ -1138,7 +1252,21 @@ export class CodexHost {
           status: row.card.status,
         });
         this.deliverRow(turn, row);
+        // A subAgentActivity names the row off the child's agent path, and
+        // the child rows below are written OVER that row. Without this, a
+        // child the runtime never nicknamed would lose the name it already
+        // carried and be redrawn as the literal.
+        if (
+          item.type === "subAgentActivity" &&
+          typeof item.agentPath === "string" &&
+          item.agentPath.length > 0
+        )
+          turn.childBaseName.set(row.itemId, row.card.name);
       }
+      // The collab call keeps its own row above; these are the children
+      // underneath it, one per agent state, each on the child's own thread.
+      if (item.type === "collabAgentToolCall")
+        this.deliverChildRows(turn, item, phase, ctx);
     }
     if (
       method === "item/fileChange/patchUpdated" ||
@@ -1154,13 +1282,217 @@ export class CodexHost {
     }
   }
 
-  /** One row to the card, inside the turn's drain. */
-  private deliverRow(turn: ActiveTurn, row: ActivityRow): void {
-    turn.pending.push(
-      Promise.resolve(turn.callbacks.onTool?.(row.card, row.itemId)).catch(
-        () => {},
-      ),
+  /**
+   * One row to the card, inside the turn's drain.
+   *
+   * It returns the same promise it queues, because a caller that builds a
+   * row asynchronously (a child agent's row waits on the child's name) has
+   * to AWAIT the delivery itself: the drain is read once, when the turn
+   * finishes, so a push that happens after that moment is never waited for.
+   */
+  private deliverRow(turn: ActiveTurn, row: ActivityRow): Promise<void> {
+    const work = Promise.resolve(
+      turn.callbacks.onTool?.(row.card, row.itemId),
+    ).catch(() => {});
+    turn.pending.push(work);
+    return work;
+  }
+
+  /**
+   * One row per CHILD AGENT a collab tool call reports, under the call's own
+   * row, each keyed on the child's own thread so the two sources this plugin
+   * has for a child collapse into ONE row.
+   */
+  private deliverChildRows(
+    turn: ActiveTurn,
+    item: RpcObject,
+    phase: ItemPhase,
+    ctx: ItemContext,
+  ): void {
+    const states = item.agentsStates;
+    if (!states || typeof states !== "object") return;
+    const children = Object.keys(states as RpcObject).filter(
+      (id) => id.length > 0,
     );
+    if (children.length === 0) return;
+    // Recorded SYNCHRONOUSLY, before the name read below: the turn's end
+    // reads this map, and it can arrive while that read is still in flight.
+    for (const child of children) {
+      const state = (states as RpcObject)[child];
+      if (!state || typeof state !== "object") continue;
+      turn.childState.set(child, {
+        status: String(state.status ?? ""),
+        message: typeof state.message === "string" ? state.message : "",
+      });
+    }
+    // Built once with what is already in hand, for its two SYNCHRONOUS side
+    // effects: each row's identity, so a refinement landing while the name
+    // read below is still in flight finds a settled child settled; and each
+    // child's first sight, so its elapsed time never depends on how long
+    // that read took. The rows themselves are thrown away and built again
+    // below, once every name is in, so the row the owner sees is named right
+    // the first time it is drawn.
+    for (const row of childRowsFromCollabItem(
+      item,
+      phase,
+      ctx,
+      this.namesKnownNow(turn, children),
+      turn.childFirstSeen,
+    ))
+      turn.rowIdentity.set(row.itemId, {
+        name: row.card.name,
+        icon: row.card.icon,
+        status: row.card.status,
+      });
+    turn.pending.push(
+      this.namesForChildren(turn, children)
+        .then(async (names) => {
+          for (const row of childRowsFromCollabItem(
+            item,
+            phase,
+            ctx,
+            names,
+            turn.childFirstSeen,
+          )) {
+            turn.rowIdentity.set(row.itemId, {
+              name: row.card.name,
+              icon: row.card.icon,
+              status: row.card.status,
+            });
+            await this.deliverRow(turn, row);
+          }
+        })
+        .catch(() => {}),
+    );
+  }
+
+  /** Only the names already in hand. This one never waits for a read. */
+  private namesKnownNow(
+    turn: ActiveTurn,
+    children: readonly string[],
+  ): Map<string, string> {
+    const names = new Map<string, string>();
+    for (const child of children) {
+      const named =
+        this.childNameKnown.get(child) || turn.childBaseName.get(child);
+      if (named) names.set(child, named);
+    }
+    return names;
+  }
+
+  /** The readable name for each of these children, however it is known. */
+  private async namesForChildren(
+    turn: ActiveTurn,
+    children: readonly string[],
+  ): Promise<Map<string, string>> {
+    const names = new Map<string, string>();
+    await Promise.all(
+      children.map(async (child) => {
+        // The nickname or role off the child's OWN thread wins, and a name a
+        // subAgentActivity row already drew is the fallback, so a name only
+        // ever improves.
+        const named =
+          (await this.nameForChild(child)) || turn.childBaseName.get(child);
+        if (named) names.set(child, named);
+      }),
+    );
+    return names;
+  }
+
+  /** The child's name, read once per thread and then held for the process. */
+  private nameForChild(threadId: string): Promise<string> {
+    const known = this.childNames.get(threadId);
+    if (known) return known;
+    const lookup = this.readChildThread(threadId)
+      .then((thread) => childReadableName(thread))
+      .catch(() => "")
+      .then((name) => {
+        this.childNameKnown.set(threadId, name);
+        return name;
+      });
+    this.childNames.set(threadId, lookup);
+    return lookup;
+  }
+
+  /**
+   * A child thread's metadata, and nothing else.
+   *
+   * `thread/read` and NEVER `thread/resume`: the read is what the runtime's
+   * own client falls back to and it attaches no subscription, while a resume
+   * does, and a subscription to a thread this daemon has no chat for would
+   * pull every one of that thread's items into a process with nowhere to put
+   * them.
+   */
+  private readChildThread(threadId: string): Promise<unknown> {
+    return this.server
+      .request(
+        "thread/read",
+        { threadId, includeTurns: false },
+        CHILD_READ_TIMEOUT_MS,
+      )
+      .then((result: RpcObject) => result?.thread);
+  }
+
+  /**
+   * The turn ended: give every helper the collab items left running one last
+   * chance to settle, and answer whether any is still working.
+   *
+   * The honest limit this cannot fix, and the spec names it: once a turn has
+   * ended, no further notification arrives for that thread, so a child this
+   * read cannot settle stays on the card with its last reported state until
+   * the model's next turn mentions it again.
+   */
+  private async settleChildRows(
+    turn: ActiveTurn,
+    reported: RpcObject | undefined,
+  ): Promise<boolean> {
+    // Everything this turn already queued lands first: the child rows are
+    // built inside a queued job, and reading the maps they fill before those
+    // have run would settle a child this host has not even drawn yet.
+    await Promise.allSettled([...turn.pending]);
+    const live = [...turn.childState.entries()].filter(
+      // The shipped table, read through the marker that already answers
+      // "is a worker alive at the end". A second list of live states here
+      // would drift from the one the "Work continues" line counts.
+      ([child, state]) =>
+        turnContinuesAtEnd({ [child]: { status: state.status } }) !== null,
+    );
+    if (live.length === 0) return false;
+    const finishedAtMs = turnClock(reported).turnFinishedAtMs;
+    let stillWorking = false;
+    for (const [child, state] of live) {
+      const ended = await this.readChildThread(child)
+        .then((thread) => childEndStateFromThread(thread))
+        .catch(() => null);
+      if (!ended) {
+        stillWorking = true;
+        continue;
+      }
+      turn.childState.set(child, { status: ended, message: state.message });
+      const names = await this.namesForChildren(turn, [child]);
+      // Through the SAME mapper the live rows come from, on a state this
+      // host now knows to be terminal: one masking path, one cut, one place
+      // a child row's shape is decided.
+      const settled = childRowsFromCollabItem(
+        {
+          type: "collabAgentToolCall",
+          agentsStates: { [child]: { status: ended, message: state.message } },
+        },
+        "completed",
+        { completedAtMs: finishedAtMs },
+        names,
+        turn.childFirstSeen,
+      );
+      for (const row of settled) {
+        turn.rowIdentity.set(row.itemId, {
+          name: row.card.name,
+          icon: row.card.icon,
+          status: row.card.status,
+        });
+        await this.deliverRow(turn, row);
+      }
+    }
+    return stillWorking;
   }
 
   /** What the mapper needs about the thread an item arrived on. */
@@ -1262,6 +1594,9 @@ export class CodexHost {
       pending: [],
       rowIdentity: new Map(),
       rowStartedAt: new Map(),
+      childFirstSeen: new Map(),
+      childState: new Map(),
+      childBaseName: new Map(),
       finish: (result) => {
         if (!forget()) return;
         void Promise.allSettled(turn.pending)

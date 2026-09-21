@@ -75,6 +75,17 @@ the diff for you, and it reports this turn's own start and finish from
 turn/completed. You fill none of these fields. Do not paste command output into
 your answer, do not restate an exit code or a line count in prose, and do not end
 a turn with a summary of the work, because the folded card already carries one.
+When you spawn a collab agent, this host draws each child as its own row on
+your tool card, keyed on the child's own thread, and fills that row from the
+collab item and the agent states it carries: the child's nickname or role as
+the name, the child's own status as the state, its elapsed time from this
+host's first sight of it, and its status message as the qualifier while it
+runs and as the result when it ends. This protocol never tells the host which
+tool a child is using, so the row shows that status line instead of a tool
+name, and it carries no token count and no way to stop one child. You fill
+none of these fields. Do not narrate your helpers' progress in prose and do
+not repeat a helper's message in your answer, because the card already
+carries it.
 /new, /retry, /status, /stop, /compact, /model, /effort,
 /plan, /code, /permissions, /personality, /fast, /usage, /skills, /mcp, /review,
 /diff, /resume, /fork, /ps, /steer, /goal and /help are native bridge controls, also
