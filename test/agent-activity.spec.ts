@@ -367,6 +367,12 @@ describe("the Codex host's activity events", () => {
     await task;
 
     expect(cards.map((c) => c.itemId)).toEqual(["col1", "t9"]);
+    // The call row is a tool the agent called, and the child is the only
+    // helper: a call row sent as a helper made the block's header count the
+    // spawn call, so one child read "2 helpers, 1 done".
+    expect(cards[0]!.card.kind).toBeUndefined();
+    expect(cards[0]!.card.args).toBe("Check the migration");
+    expect(cards.filter((c) => c.card.kind === "subagent")).toHaveLength(1);
     expect(cards[1]!.card).toMatchObject({
       kind: "subagent",
       // Nothing has named this child: the fake answers no thread metadata.

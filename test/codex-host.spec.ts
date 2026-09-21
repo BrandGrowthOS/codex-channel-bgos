@@ -406,6 +406,8 @@ describe("the Codex goal lane's half of the host", () => {
   let delivered: RunTurnResult[];
   let cards: Array<{ name: string; status: string }>;
   let holdGoal: boolean;
+  /** A row write left in flight, which is what every row write really is. */
+  let toolHold: Promise<void> | null;
   const liveGoal = (threadId: string, patch: Record<string, unknown> = {}) => ({
     threadId,
     objective: "a file named done.txt exists in this folder containing the word done",
@@ -425,6 +427,7 @@ describe("the Codex goal lane's half of the host", () => {
     delivered = [];
     cards = [];
     holdGoal = false;
+    toolHold = null;
     server = new Server();
     host = new CodexHost({
       auth: { ok: true, mode: "chatgpt", label: "test" },
@@ -441,6 +444,9 @@ describe("the Codex goal lane's half of the host", () => {
           callbacks: {
             onTool: (card) => {
               cards.push({ name: card.name, status: card.status });
+              // Every row is an HTTP POST or PATCH to BGOS, so a write still
+              // in flight when the turn ends is the ordinary case.
+              return toolHold ?? undefined;
             },
           },
           deliver: (result) => {
@@ -608,6 +614,128 @@ describe("the Codex goal lane's half of the host", () => {
     expect(delivered[0].replyText).toBe("done.txt now says done.");
     expect(delivered[0].turnCompleted).toBe(true);
     expect(delivered[0].threadId).toBe(threadId);
+  });
+
+  /**
+   * The thread is given up at `turn/completed`, before anything is awaited.
+   *
+   * The turn's end waits for this turn's queued row writes and then for one
+   * thread read per live helper, and the runtime starts its next
+   * continuation turn inside that window: goal turns are all continuation
+   * turns and the runtime drives them back to back. A thread this host still
+   * holds cannot be adopted, so that turn's rows, markers and reply would
+   * reach nobody, and its messages would land on the turn that already ended
+   * and be delivered as the owner's answer.
+   *
+   * MUTATION: settle first and release the thread inside the `.then` and
+   * both halves go red, the adoption and the reply text.
+   */
+  it("adopts a continuation that starts while the finished turn is still settling", async () => {
+    const threadId = await bindThread(15);
+    let release!: () => void;
+    toolHold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.emit("notification", "turn/started", {
+      threadId,
+      turn: { id: "turn-first", status: "inProgress" },
+    });
+    server.emit("notification", "item/started", {
+      threadId,
+      item: { id: "c1", type: "commandExecution", command: "yarn test" },
+    });
+    server.emit("notification", "item/completed", {
+      threadId,
+      item: { id: "m1", type: "agentMessage", text: "the first turn's answer" },
+    });
+    server.emit("notification", "turn/completed", {
+      threadId,
+      turn: { status: "completed" },
+    });
+    // A macrotask drains every microtask: the turn is still open only
+    // because its row write has not landed.
+    await new Promise((r) => setTimeout(r, 0));
+    server.emit("notification", "turn/started", {
+      threadId,
+      turn: { id: "turn-continuation", status: "inProgress" },
+    });
+    expect(adopted).toEqual([15, 15]);
+    server.emit("notification", "item/completed", {
+      threadId,
+      item: { id: "m2", type: "agentMessage", text: "the continuation's text" },
+    });
+
+    release();
+    await vi.waitFor(() => expect(delivered).toHaveLength(1));
+    // The answer of the turn that ended, and not the text of the turn that
+    // started after it.
+    expect(delivered[0].replyText).toBe("the first turn's answer");
+
+    // And the continuation still holds the thread: the finished turn gives
+    // the thread up, it does not take away the one that replaced it.
+    server.emit("notification", "turn/completed", {
+      threadId,
+      turn: { status: "completed" },
+    });
+    await vi.waitFor(() => expect(delivered).toHaveLength(2));
+    expect(delivered[1].replyText).toBe("the continuation's text");
+  });
+
+  /**
+   * The same window, with the OWNER's own turn as the one settling, which is
+   * the shape a goal chat is in most of the time: the owner asks something,
+   * the runtime answers and carries straight on with the goal.
+   *
+   * MUTATION: delete the thread's entry unconditionally when a turn finishes
+   * and this goes red, because the owner's turn then takes away the
+   * continuation that replaced it and nothing that turn says is ever
+   * delivered.
+   */
+  it("keeps the continuation that replaced the owner's own settling turn", async () => {
+    const threadId = await bindThread(16);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const owner = host.runTurn(16, "and another thing", {
+      onTool: () => held,
+    });
+    await vi.waitFor(() =>
+      expect(
+        server.request.mock.calls.filter((c) => c[0] === "turn/start").length,
+      ).toBe(2),
+    );
+    server.emit("notification", "item/started", {
+      threadId,
+      item: { id: "c2", type: "commandExecution", command: "yarn test" },
+    });
+    server.emit("notification", "item/completed", {
+      threadId,
+      item: { id: "m3", type: "agentMessage", text: "the owner's answer" },
+    });
+    server.emit("notification", "turn/completed", {
+      threadId,
+      turn: { status: "completed" },
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    server.emit("notification", "turn/started", {
+      threadId,
+      turn: { id: "turn-continuation", status: "inProgress" },
+    });
+    expect(adopted).toEqual([16]);
+
+    release();
+    expect((await owner).replyText).toBe("the owner's answer");
+    server.emit("notification", "item/completed", {
+      threadId,
+      item: { id: "m4", type: "agentMessage", text: "the continuation's text" },
+    });
+    server.emit("notification", "turn/completed", {
+      threadId,
+      turn: { status: "completed" },
+    });
+    await vi.waitFor(() => expect(delivered).toHaveLength(1));
+    expect(delivered[0].replyText).toBe("the continuation's text");
   });
 
   it("forks an invisible consult without asking for a deferred goal continuation", async () => {
@@ -828,6 +956,47 @@ describe("a child agent's name and its last look at the turn's end", () => {
     expect(last.card.durationMs).toBe(15000);
     // A settled row says what the child ended with, not what it was doing.
     expect(last.card.detail).toBeUndefined();
+  });
+
+  /**
+   * The "Work continues" line is computed AFTER the turn's last read.
+   *
+   * Computed before it, a turn whose only live helper was settled by that
+   * read still posted "1 subagent is still working" moments before the card
+   * closed, which is a line about a helper that had already finished.
+   *
+   * MUTATION: compute the marker before the settle and this goes red.
+   */
+  it("never says work continues about a helper the turn's last read settled", async () => {
+    server.threads["t9"] = { status: { type: "idle" } };
+    const markers: Array<{ kind: string }> = [];
+    const task = host.runTurn(17, "delegate", {
+      onTool: () => {},
+      onActivityMarker: (marker) => {
+        markers.push(marker);
+      },
+    });
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.emit("notification", "item/started", {
+      threadId: "thread-1",
+      turnId: "turn-thread-1",
+      startedAtMs: 1789932968000,
+      item: {
+        id: "col1",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "inProgress",
+        agentsStates: { t9: { status: "running" } },
+      },
+    });
+    server.emit("notification", "turn/completed", {
+      threadId: "thread-1",
+      turn: { status: "completed" },
+    });
+    const result = await task;
+
+    expect(result.helpersStillRunning).toBeUndefined();
+    expect(markers).toEqual([]);
   });
 
   it("leaves a helper running when its own thread exposes nothing", async () => {

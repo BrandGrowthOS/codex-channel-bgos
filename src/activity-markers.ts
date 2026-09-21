@@ -679,6 +679,14 @@ export function entryFromItem(
 
   if (!id) return null;
 
+  // The delegate call is a TOOL the agent called, and never a helper. The
+  // children have their own rows now, keyed on their own threads, and the
+  // app builds the helpers block out of every row whose kind is subagent:
+  // sent as a helper, this row was counted as one, so a turn with a single
+  // child read "2 helpers", and because the spawn CALL settles in
+  // milliseconds while its child works for minutes, it read "2 helpers,
+  // 1 done" over one running child. A spawn, a wait and a close about the
+  // same child are three items, which read "4 helpers, 3 done".
   if (type === "collabAgentToolCall") {
     const receivers = Array.isArray(item.receiverThreadIds)
       ? item.receiverThreadIds.length
@@ -687,10 +695,15 @@ export function entryFromItem(
       icon: SUBAGENT_ICON,
       name: clip(item.tool, NAME_MAX) || "delegate",
       status,
-      kind: "subagent",
     };
-    if (receivers > 0)
-      card.args = `${receivers} ${receivers === 1 ? "worker" : "workers"}`;
+    // What was delegated, in the words the agent used. The worker count is
+    // the fallback, because a wait and a close carry no prompt.
+    const args =
+      firstLine(item.prompt, ARGS_MAX) ||
+      (receivers > 0
+        ? `${receivers} ${receivers === 1 ? "worker" : "workers"}`
+        : "");
+    if (args) card.args = args;
     const summary = summarizeWorkerStates(item.agentsStates);
     if (summary) card.detail = summary;
     return { card: withDuration(card, item, ctx), itemId: id };

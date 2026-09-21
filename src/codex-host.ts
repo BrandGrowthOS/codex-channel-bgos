@@ -182,8 +182,6 @@ interface ActiveTurn {
   rowIdentity: Map<string, KnownRow>;
   /** `startedAtMs` per item id, so a completed item can carry a duration. */
   rowStartedAt: Map<string, number>;
-  /** The newest collab tool call's worker states, read at turn end. */
-  lastCollab?: unknown;
   /**
    * This host's FIRST sight of each child agent, keyed on the CHILD's own
    * thread id and never on the collab item's, because the spawn call, the
@@ -238,6 +236,24 @@ function turnClock(reported: unknown): {
     turnStartedAtMs: started * 1000,
     turnFinishedAtMs: finished * 1000,
   };
+}
+
+/**
+ * Every child this turn has seen, in the shape the marker table reads.
+ *
+ * The turn's own accumulating map and never the last collab item's states:
+ * one call carries only the children IT touched, so a turn that spawned one
+ * child early and another late would be judged on the late one alone. It is
+ * also the map the turn's last read writes into, so the "Work continues"
+ * line and the rows the owner is looking at agree about who is working.
+ */
+function workerStatesOf(
+  childState: ReadonlyMap<string, { status: string }>,
+): Record<string, { status: string }> {
+  const states: Record<string, { status: string }> = {};
+  for (const [child, state] of childState)
+    states[child] = { status: state.status };
+  return states;
 }
 
 /**
@@ -1058,7 +1074,11 @@ export class CodexHost {
           clearInterval(tick);
           clearTimeout(watchdog);
           callbacks.signal?.removeEventListener("abort", abort);
-          this.active.delete(id);
+          // Only if this turn is still the registered one: the thread is
+          // given up at `turn/completed`, so by now a continuation turn may
+          // already hold it, and deleting the map entry would drop THAT
+          // turn's bookkeeping instead of this one's.
+          if (this.active.get(id) === turn) this.active.delete(id);
           // A final plan update must finish before the adapter closes its mission.
           void Promise.allSettled(turn.pending).then(() => resolveTurn(result));
         },
@@ -1146,11 +1166,6 @@ export class CodexHost {
     if (method === "turn/started") turn.id = params.turn.id;
     if (method === "turn/completed") {
       const status = params.turn.status;
-      // Only a normal exit: a stopped or failed turn is not "work continues".
-      if (status === "completed") {
-        const marker = turnContinuesAtEnd(turn.lastCollab);
-        if (marker) this.deliverMarker(turn, marker);
-      }
       const error =
         status === "completed"
           ? null
@@ -1160,6 +1175,25 @@ export class CodexHost {
                   ? "Stopped by you."
                   : "Codex could not finish the turn."),
             );
+      // The outcome is read HERE, off the turn that just ended, and the
+      // thread is given up HERE too, before anything below is awaited. The
+      // settle waits for this turn's queued row writes and then for one
+      // thread read per live helper, and the runtime starts its next
+      // continuation turn inside that window: a thread this host still holds
+      // cannot be adopted, so that turn's rows, markers and reply would reach
+      // nobody, and its messages would land on the turn that already ended
+      // and be delivered as the owner's answer.
+      const outcome = this.result(
+        params.threadId,
+        turn,
+        status === "completed",
+        error,
+        // The clock rides a failed turn too: the runtime counted the same
+        // minutes whether or not the work landed, and the gate capture of a
+        // 401 turn carried all three fields.
+        params.turn,
+      );
+      this.releaseThread(String(params.threadId ?? ""), turn);
       // One last look at every helper the collab items left running, and the
       // answer to whether any of them is still working. Only on a NORMAL
       // exit: a turn the owner stopped, or one that failed, closes its card
@@ -1172,17 +1206,16 @@ export class CodexHost {
       void settling
         .catch(() => false)
         .then((stillWorking) => {
-          const outcome = this.result(
-            params.threadId,
-            turn,
-            status === "completed",
-            error,
-            // The clock rides a failed turn too: the runtime counted the same
-            // minutes whether or not the work landed, and the gate capture of a
-            // 401 turn carried all three fields.
-            params.turn,
-          );
           if (stillWorking) outcome.helpersStillRunning = true;
+          // AFTER the settle, and only on a normal exit: computed before it,
+          // a turn whose one live helper that read had just settled still
+          // said "1 subagent is still working" a moment before the card
+          // closed. The states are the ones the settle wrote, so the line and
+          // the card agree about who is still working.
+          if (status === "completed") {
+            const marker = turnContinuesAtEnd(workerStatesOf(turn.childState));
+            if (marker) this.deliverMarker(turn, marker);
+          }
           turn.finish(outcome);
         });
     }
@@ -1225,8 +1258,6 @@ export class CodexHost {
     }
     if (method === "item/started" || method === "item/completed") {
       const item = params.item ?? {};
-      // The newest worker states, kept for the turn-continues read at the end.
-      if (item.type === "collabAgentToolCall") turn.lastCollab = item.agentsStates;
       // The thread's working directory, as its own items report it.
       if (typeof item.cwd === "string" && item.cwd.length > 0)
         this.cwdByThread.set(String(params.threadId ?? ""), item.cwd);
@@ -1431,6 +1462,19 @@ export class CodexHost {
         CHILD_READ_TIMEOUT_MS,
       )
       .then((result: RpcObject) => result?.thread);
+  }
+
+  /**
+   * Give the thread up, without settling or delivering anything.
+   *
+   * Called the moment a turn completes, so the runtime's next continuation
+   * turn on the same thread can be adopted while this one is still settling
+   * its helpers. It never calls an adopted turn's own `release`, which
+   * forgets the turn outright: this turn still has a result to deliver.
+   * Identity checked, so a turn that already took the thread keeps it.
+   */
+  private releaseThread(threadId: string, turn: ActiveTurn): void {
+    if (this.active.get(threadId) === turn) this.active.delete(threadId);
   }
 
   /**

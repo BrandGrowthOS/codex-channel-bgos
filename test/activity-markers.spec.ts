@@ -165,10 +165,13 @@ describe("entryFromItem (the Codex item table)", () => {
         name: "spawnAgent",
         args: "2 workers",
         status: "running",
-        kind: "subagent",
         detail: "1 running, 1 done",
       },
     });
+    // A tool the agent called, never one of its helpers: the app builds the
+    // helpers block out of every row whose kind is subagent, and the children
+    // have their own rows.
+    expect(row!.card.kind).toBeUndefined();
 
     const settled = entryFromItem(
       {
@@ -182,6 +185,45 @@ describe("entryFromItem (the Codex item table)", () => {
     )!;
     expect(settled.card.status).toBe("done");
     expect(settled.card.detail).toBe("1 done");
+  });
+
+  /**
+   * The delegate call is a TOOL the agent called. Sent as a helper it was
+   * counted as one: the app derives the helpers block from every row whose
+   * kind is subagent, so one child read "2 helpers", and the spawn call
+   * settles in milliseconds while its child works for minutes, so it read
+   * "2 helpers, 1 done" over a single running child. A spawn, a wait and a
+   * close about one child read "4 helpers, 3 done".
+   *
+   * MUTATION: put `kind: "subagent"` back on the call row and this goes red.
+   */
+  it("counts a one child collab item as exactly one helper", () => {
+    const item = {
+      id: "col1",
+      type: "collabAgentToolCall",
+      tool: "spawnAgent",
+      status: "inProgress",
+      prompt: "Check the migration\nand report back",
+      receiverThreadIds: ["t9"],
+      agentsStates: { t9: { status: "running" } },
+    };
+    const rows = [
+      entryFromItem(item, "started")!,
+      ...childRowsFromCollabItem(
+        item,
+        "started",
+        { startedAtMs: 1_700_000_000_000 },
+        undefined,
+        new Map(),
+      ),
+    ];
+
+    expect(rows.filter((r) => r.card.kind === "subagent")).toHaveLength(1);
+    expect(rows[0]!.card.kind).toBeUndefined();
+    // The prompt's first line, which says what was delegated. The worker
+    // count stays the fallback for a wait or a close, which carry no prompt.
+    expect(rows[0]!.card.args).toBe("Check the migration");
+    expect(rows[1]!.card).toMatchObject({ kind: "subagent", id: "t9" });
   });
 
   it("maps the rest of the table, and nothing it does not know", () => {
