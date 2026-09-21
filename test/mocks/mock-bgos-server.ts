@@ -65,10 +65,22 @@ export class MockBgosServer {
     return `http://127.0.0.1:${port}`;
   }
 
-  stage(method: string, path: string, status: number, body: unknown): this {
+  /**
+   * `delayMs` holds the response back before answering, which is the only way
+   * to test a per-call `timeout` option: a constant like that is invisible to
+   * every test that answers instantly. Optional and last, so no existing
+   * staged call changes.
+   */
+  stage(
+    method: string,
+    path: string,
+    status: number,
+    body: unknown,
+    delayMs?: number,
+  ): this {
     const key = `${method} ${path}`;
     const existing = this.staged.get(key) ?? [];
-    existing.push({ status, body });
+    existing.push({ status, body, delayMs });
     this.staged.set(key, existing);
     return this;
   }

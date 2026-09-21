@@ -416,6 +416,46 @@ export class BgosApi {
   }
 
   /**
+   * How long this assistant's owner is willing to be waited for on ONE
+   * approval, in seconds, or null when we cannot tell.
+   *
+   * `GET /api/v1/assistants/:id` already answers a machine caller reading its
+   * own agent (pairing auth resolves the key owner), and already carries every
+   * per-agent field, so no new route is needed. Read right before a request is
+   * posted rather than cached at connect: approvals are rare, so one read per
+   * request is cheaper than any cache and a change the owner just made applies
+   * to the very next request.
+   *
+   * Deliberately total: ANY failure (an older backend that has no such field,
+   * a 401, a timeout, a non-owner read that answers 200 + null) returns null,
+   * and the caller then sends no `wait_seconds` and behaves exactly as this
+   * daemon did before the setting existed. A setting we could not read must
+   * never be able to break an approval. The 3 s timeout is short on purpose:
+   * this sits in front of a request a person is waiting on.
+   *
+   * The range mirrors the backend's own CHECK (60 to 1800). A value outside it
+   * is treated as unreadable rather than clamped here, because the server is
+   * the one that clamps and we do not want two opinions about the ceiling.
+   */
+  async getApprovalWaitSeconds(assistantId: number): Promise<number | null> {
+    try {
+      const r = await this.http.get(`assistants/${assistantId}`, {
+        timeout: 3_000,
+      });
+      const seconds = (r.data as { approvalWaitSeconds?: unknown } | null)
+        ?.approvalWaitSeconds;
+      return typeof seconds === "number" &&
+        Number.isInteger(seconds) &&
+        seconds >= 60 &&
+        seconds <= 1800
+        ? seconds
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Self-resolve (or create) this assistant's primary BGOS delivery chat -
    * the target for proactive / check-in sends when no `CODEX_BGOS_CHAT_ID`
    * env override is set (parity root cause D). Pairing-token auth only (the

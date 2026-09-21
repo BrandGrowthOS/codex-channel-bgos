@@ -1,7 +1,11 @@
 /** Human answers stay attached to the requesting turn; chat text can never grant an approval. */
 import { randomUUID } from "node:crypto";
 import type { BgosApi } from "./bgos-api.js";
-import type { InboundClickPayload } from "./types.js";
+import type {
+  ApprovalMeta,
+  BgosMessageEnvelope,
+  InboundClickPayload,
+} from "./types.js";
 import type { RpcObject } from "./app-server.js";
 
 export interface InteractionContext {
@@ -23,11 +27,17 @@ type Answer = {
   free_text?: string;
   skipped?: boolean;
   timed_out?: boolean;
+  /** The SERVER called the row dead; we did not run out of patience. Only
+   *  approve() looks at this, to tell the two endings apart. */
+  server_expired?: boolean;
 };
 interface Pending {
   context: InteractionContext;
   deadline: number;
   options: Map<string, string>;
+  /** True for an approval: the server's `expired` flag on the row ends this
+   *  wait. A question carries no such flag and is retired by its own clock. */
+  endOnServerExpiry: boolean;
   accept: (answer: Answer) => void;
 }
 export const AGENT_BUTTON_PREFIX = "u:";
@@ -39,7 +49,12 @@ export const unescapeButton = (value: string): string =>
 export class Interactions {
   private pending = new Map<number, Pending>();
   private pollRunning = false;
-  constructor(private api: Pick<BgosApi, "agentRequest" | "getMessages">) {}
+  constructor(
+    private api: Pick<
+      BgosApi,
+      "agentRequest" | "getMessages" | "getApprovalWaitSeconds"
+    >,
+  ) {}
 
   handleClick(click: InboundClickPayload): boolean {
     const pending = this.pending.get(click.messageId);
@@ -75,6 +90,7 @@ export class Interactions {
     context: InteractionContext,
     options: Map<string, string>,
     duration: number,
+    endOnServerExpiry = false,
   ): Promise<Answer> {
     return new Promise((resolve) => {
       const finish = (answer: Answer) => {
@@ -92,6 +108,7 @@ export class Interactions {
         context,
         deadline: Date.now() + duration,
         options,
+        endOnServerExpiry,
         accept: finish,
       });
       context.signal.addEventListener("abort", cancel, { once: true });
@@ -122,10 +139,30 @@ export class Interactions {
                 if (
                   !p ||
                   p.context.chatId !== ctx.chatId ||
-                  Date.now() >= p.deadline ||
-                  message.approvalMeta?.expired
+                  Date.now() >= p.deadline
                 )
                   continue;
+                // Read the flag through the declared row shape, not through the
+                // RpcObject index signature this loop otherwise runs on. The
+                // envelope says `approvalMeta.expired` exists; saying it in a
+                // type and then reading it as `any` means a rename or a typo
+                // here compiles clean and the daemon quietly falls through to
+                // its backstop on every single request.
+                const approvalMeta = (message as BgosMessageEnvelope["message"])
+                  .approvalMeta;
+                if (approvalMeta?.expired) {
+                  // The server has declared this request dead, which is also
+                  // the moment the card stops accepting a tap. Ending here is
+                  // what keeps the two sides in step; an answer stamped after
+                  // the flag cannot exist, so there is nothing left to wait for.
+                  if (p.endOnServerExpiry)
+                    p.accept({
+                      skipped: true,
+                      timed_out: true,
+                      server_expired: true,
+                    });
+                  continue;
+                }
                 if (!message.answeredAt || !message.answerPayload) continue;
                 const payload = message.answerPayload;
                 const option = (
@@ -339,6 +376,21 @@ export class Interactions {
       callbackData: `ea:${value}:${id}`,
       style: value === "deny" ? "danger" : "success",
     }));
+    // What the owner said they are willing to be waited for. Read now, per
+    // request, so a change made a minute ago applies to this one. Never throws:
+    // an unreadable setting just means the row carries no wait and the backend
+    // uses its generic 60 s, which is what every Codex approval used to get.
+    let waitSeconds: number | null = null;
+    try {
+      waitSeconds = await this.api.getApprovalWaitSeconds(context.assistantId);
+    } catch {
+      /* A setting we could not read must never be able to break an approval. */
+    }
+    // Look again. The check at the top of this method ran BEFORE the read, and
+    // the read is allowed up to 3 s: a Stop inside those 3 s would otherwise
+    // put a fresh, fully tappable request card in the owner's chat for a turn
+    // that is already dead. Cheaper to not ask than to ask and then retire it.
+    if (context.signal.aborted) return denied;
     const command = String(
       params.command ??
         params.reason ??
@@ -346,6 +398,19 @@ export class Interactions {
           ? JSON.stringify(params.permissions)
           : "Apply file changes"),
     );
+    // Typed, and assigned rather than spread, so the compiler actually checks
+    // the wire names. `agentRequest` takes an `unknown` body, so an object
+    // literal inlined below would let `waitSeconds` or `waitSecs` through and
+    // the backend would silently strip it: the row would keep the generic 60 s
+    // while this daemon waited ten minutes, which is the same two clocks
+    // problem the rest of this method exists to end.
+    const approvalMeta: ApprovalMeta = {
+      tool: command,
+      agent_route: `codex-${context.assistantId}`,
+      risk: "high",
+      request_id: id,
+    };
+    if (waitSeconds !== null) approvalMeta.wait_seconds = waitSeconds;
     const result = await this.api.agentRequest(
       "POST",
       "messages",
@@ -357,23 +422,65 @@ export class Interactions {
         text: params.reason ?? "Codex needs your approval to continue.",
         messageType: "approval_request",
         options,
-        approvalMeta: {
-          tool: command,
-          agent_route: `codex-${context.assistantId}`,
-          risk: "high",
-          request_id: id,
-        },
+        approvalMeta,
       },
     );
     if (!Number.isSafeInteger(Number(result.id)) || Number(result.id) < 1)
       return denied;
-    // Local deadline stays below the server's 60-second expiry. A late click never authorizes execution.
+    // TWO CLOCKS, AND ONLY ONE OF THEM DECIDES. The backend refuses a late tap
+    // by the row's `expired` FLAG, which its sweep sets every 30 s once the row
+    // is past its own deadline. This daemon used to give up at 55 s "below the
+    // server's 60-second expiry", so a tap in the gap between the two was
+    // accepted and stamped by the server while Codex had already been told
+    // decline: the owner pressed Allow and nothing happened. With a ten minute
+    // wait that gap would be the rule rather than a corner. So the server is
+    // the only judge now. We end on the owner's answer (the click path or the
+    // durable poll), or on the server's own flag, and keep a backstop only for
+    // a server that never flags the row at all, e.g. a sweep that is down.
+    //
+    // A daemon restart mid wait still loses this pending map and answers the
+    // app server fail closed (codex-host.ts onRequest); that is unchanged and
+    // deliberately not solved here.
     const answer = await this.wait(
       Number(result.id),
       context,
       new Map(options.map((o) => [o.callbackData, o.text])),
-      55_000,
+      ((waitSeconds ?? 60) + 90) * 1000,
+      true,
     );
+    if ((answer.timed_out && !answer.server_expired) || context.signal.aborted) {
+      // The two endings the SERVER has not judged: our own backstop, and Stop.
+      // In both the card is still tappable for a turn that has stopped
+      // listening, so take its buttons away, exactly as ask() does on the same
+      // two endings. Stop matters more now than it used to: the sweep will not
+      // flag this row until its own deadline, so an abort at ten seconds into a
+      // ten minute wait used to leave a live card for the rest of those ten
+      // minutes. The owner taps Allow, the backend stamps it, the card reads
+      // "You said yes, this once", and nothing ever runs.
+      // The server-expired ending is deliberately NOT here: the flag is already
+      // what makes the card refuse a tap, so a PATCH would add nothing.
+      // `expired` is server controlled and stripped from a PATCH, so options
+      // are the only honest way to say this from here. Best effort: a failed
+      // cleanup never changes the decline we already made.
+      // What this leaves behind, and it is not fixable from here: a row with no
+      // buttons and no `expired` flag still draws as a PENDING request, footer
+      // and all, until the server catches up. The app is the one that has to
+      // read a pending request with zero options as the settled "This request
+      // is no longer open" row; flagged for the app lane rather than papered
+      // over by faking a server verdict from a daemon.
+      await this.api
+        .agentRequest(
+          "PATCH",
+          `messages/${Number(result.id)}`,
+          context.assistantId,
+          {
+            options: [],
+          },
+        )
+        .catch(() => {
+          /* A failed UI cleanup never revives a request we stopped waiting on. */
+        });
+    }
     const choice = options.findIndex(
       (o) => o.callbackData === answer.picked_option_value,
     );

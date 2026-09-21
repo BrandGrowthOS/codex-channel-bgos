@@ -148,6 +148,20 @@ export interface ApprovalMeta {
   agent_route: string;
   risk: "low" | "medium" | "high";
   request_id: string;
+  /**
+   * How long this one request may wait for the owner, in seconds. The backend
+   * clamps whatever we ask for to its own ceiling (1800 s) and its expiry
+   * sweep reads the row's own value, so this is a request, not a promise.
+   * Absent means the backend's generic timeout (60 s), which is exactly what
+   * every Codex approval got before the owner had a wait of their own.
+   */
+  wait_seconds?: number;
+  /**
+   * Set by the SERVER's sweep once the row is past its deadline, and it is the
+   * only thing that makes a tap on the card refuse. The daemon reads it back
+   * off the row rather than running a clock of its own; see the two clocks
+   * note in interactions.ts approve().
+   */
   expired?: boolean;
 }
 
@@ -333,5 +347,12 @@ export interface BgosMessageEnvelope {
     text: string | null;
     messageType: string;
     createdAt: string;
+    /**
+     * Present on an `approval_request` row. `expired` is the server's verdict
+     * that the request is dead, and the durable poll in interactions.ts reads
+     * it here: it is why a daemon stops listening at the same moment the card
+     * stops accepting a tap, instead of a few minutes earlier.
+     */
+    approvalMeta?: ApprovalMeta;
   };
 }
