@@ -32,6 +32,7 @@ import {
   renderBulletin,
   type MissionBulletin,
 } from "./mission-bulletin.js";
+import type { GoalFrameContext } from "./goal-lane.js";
 import type { MissionEventFrame } from "./mission-events.js";
 
 /** A note older than this is stale news: the standing state arrives anyway. */
@@ -69,6 +70,46 @@ export interface MissionControlDeps {
     noteResumed(missionId: number): void;
     noteClosed(missionId: number): void;
   };
+  /**
+   * The native goal lane (stage 6), passed as functions the way `host` is so
+   * this lane stays free of Codex and of HTTP.
+   *
+   * This is where the owner's decisions stop being something the model is
+   * merely told and become something the runtime obeys: Pause really holds
+   * the loop, Set aside really clears the goal, and "Give it 10 more turns"
+   * really starts it again. Optional, because a daemon with no goal lane at
+   * all must behave exactly as stage 5 did.
+   */
+  goalLane?: {
+    armFromMission(input: {
+      assistantId: number;
+      chatId: number;
+      missionId: number;
+      objective: string;
+      turnCap: number | null;
+    }): Promise<void>;
+    noteUpdated(
+      input: {
+        missionId: number;
+        keepWorking?: boolean;
+        turnCap?: number | null;
+      },
+      frame?: GoalFrameContext | null,
+    ): Promise<void>;
+    notePaused(missionId: number, frame?: GoalFrameContext | null): Promise<void>;
+    noteResumed(missionId: number, frame?: GoalFrameContext | null): Promise<void>;
+    noteClosed(missionId: number, frame?: GoalFrameContext | null): Promise<void>;
+  };
+  /**
+   * Remember which agent a chat belongs to.
+   *
+   * Arming a goal starts that chat's thread, and the thread's config is where
+   * the agent is named, so the pair is recorded BEFORE the arm. A mission the
+   * owner started in the app is often the first thing this process hears
+   * about that chat, which is exactly when the answer would otherwise be null
+   * and every continuation turn the goal runs would be dropped.
+   */
+  noteChat(chatId: number, assistantId: number): void;
   /** Every chat of this assistant this process has actually served. */
   chatsForAssistant(assistantId: number): number[];
   /** Does this daemon own the assistant, with the cold scope exception. */
@@ -126,6 +167,7 @@ export class MissionControlLane {
       switch (frame.eventType) {
         case "mission_paused":
           this.deps.missionLane.notePaused(missionId);
+          await this.deps.goalLane?.notePaused(missionId, this.goalContext(frame));
           if (this.ownerAuthored(frame, selfWritten)) {
             this.queue(frame, missionPausedText({
               title: frame.mission.title,
@@ -135,17 +177,23 @@ export class MissionControlLane {
           return;
         case "mission_resumed":
           this.deps.missionLane.noteResumed(missionId);
+          await this.deps.goalLane?.noteResumed(missionId, this.goalContext(frame));
           if (this.ownerAuthored(frame, selfWritten)) {
             this.queue(frame, missionResumedText({ title: frame.mission.title }));
           }
           return;
         case "mission_completed":
           this.deps.missionLane.noteClosed(missionId);
+          // Before the telling, and whoever closed it: a mission that is over
+          // must not leave a runtime working toward it. A goal this lane
+          // closed itself is already forgotten, so this is a no op for it.
+          await this.deps.goalLane?.noteClosed(missionId, this.goalContext(frame));
           if (!this.ownerAuthored(frame, selfWritten)) return;
           await this.tellAndSteer(frame, missionDoneText({ title: frame.mission.title }));
           return;
         case "mission_abandoned":
           this.deps.missionLane.noteClosed(missionId);
+          await this.deps.goalLane?.noteClosed(missionId, this.goalContext(frame));
           // A replace is not a Set aside. The mission_created that follows it
           // already tells the model a new mission replaced the open one, so
           // saying "it no longer exists, wait for a new instruction" here
@@ -157,6 +205,7 @@ export class MissionControlLane {
         case "mission_failed":
           // Always the agent's own write. Forget it and say nothing.
           this.deps.missionLane.noteClosed(missionId);
+          await this.deps.goalLane?.noteClosed(missionId, this.goalContext(frame));
           return;
         case "mission_created":
           if (frame.mission.createdByAssistant === true) return;
@@ -165,9 +214,31 @@ export class MissionControlLane {
             title: frame.mission.title,
             doneWhen: frame.mission.doneWhen ?? null,
           }));
+          // Queued FIRST, then armed. Setting a goal starts a turn at once,
+          // and the note is read at the start of the next turn, so arming
+          // first would start the goal's own first turn before the model had
+          // been told its mission existed.
+          await this.armGoal(frame);
+          return;
+        case "mission_updated":
+          // Still never narrated: an edit changes the card the model re reads
+          // on its next mission call. What it can carry is the owner's answer
+          // to a stop, "Give it 10 more turns", which is Keep working and a
+          // raised cap and belongs to the goal lane alone.
+          await this.deps.goalLane?.noteUpdated(
+            {
+              missionId,
+              ...(frame.mission.keepWorking === undefined
+                ? {}
+                : { keepWorking: frame.mission.keepWorking }),
+              ...(frame.mission.turnCap === undefined
+                ? {}
+                : { turnCap: frame.mission.turnCap }),
+            },
+            this.goalContext(frame),
+          );
           return;
         case "mission_ticked":
-        case "mission_updated":
         default:
           return;
       }
@@ -197,6 +268,62 @@ export class MissionControlLane {
   dispose(): void {
     this.queues.clear();
     this.selfWrites.clear();
+  }
+
+  /**
+   * Arm the runtime's own goal for a mission the OWNER started with Keep
+   * working on. The condition is their own Done when, and the title only when
+   * they wrote none: a goal with no condition is a loop with no end.
+   *
+   * A failure here is logged and never thrown: the runtime may have goals
+   * turned off, and the mission is still a true record of the work either
+   * way, so the card and the note stand with or without the loop.
+   */
+  private async armGoal(frame: MissionEventFrame): Promise<void> {
+    const lane = this.deps.goalLane;
+    const context = this.goalContext(frame);
+    if (!lane || !context || !context.keepWorking) return;
+    // Before the arm, because the arm starts the thread. See the dep's note.
+    this.deps.noteChat(context.chatId, context.assistantId);
+    try {
+      await lane.armFromMission({
+        assistantId: context.assistantId,
+        chatId: context.chatId,
+        missionId: frame.mission.id,
+        objective: context.objective,
+        turnCap: context.turnCap,
+      });
+    } catch (err) {
+      this.deps.log?.(
+        `goal arm failed for mission ${frame.mission.id}: ` +
+          (err instanceof Error ? err.message : String(err)),
+      );
+    }
+  }
+
+  /**
+   * What this frame knows about the goal behind its mission, or null when it
+   * knows nothing usable.
+   *
+   * The lane's own state does not survive a daemon restart and the runtime's
+   * goal does, so a control that could name only a mission id reached nothing
+   * at all: the owner's Pause was a silent no op against a goal still
+   * running. Everything a control needs is on the frame already, so it is
+   * passed on and the lane decides what to do with it. The condition is the
+   * owner's own Done when, and the title only when they wrote none.
+   */
+  private goalContext(frame: MissionEventFrame): GoalFrameContext | null {
+    const chatId = frame.chatId ?? 0;
+    if (!Number.isSafeInteger(chatId) || chatId <= 0) return null;
+    const objective = (frame.mission.doneWhen ?? "").trim() || frame.mission.title;
+    if (!objective) return null;
+    return {
+      assistantId: frame.assistantId,
+      chatId,
+      objective,
+      turnCap: frame.mission.turnCap ?? null,
+      keepWorking: frame.mission.keepWorking === true,
+    };
   }
 
   private ownerAuthored(frame: MissionEventFrame, selfWritten: boolean): boolean {

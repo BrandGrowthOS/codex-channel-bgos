@@ -30,15 +30,34 @@ function setup() {
       { id: "saved", name: "Saved conversation" },
     ]),
     resumeSavedThread: vi.fn(async () => {}),
+    setGoal: vi.fn(async () => null),
+    getGoal: vi.fn(async () => ({
+      threadId: "thread-20",
+      objective: "the sign up page loads in under 2 seconds",
+      status: "active",
+      tokenBudget: null,
+      tokensUsed: 1234,
+      timeUsedSeconds: 1140,
+      createdAt: 1789932968,
+      updatedAt: 1789932999,
+    })),
+    clearGoal: vi.fn(async () => true),
   };
   const interactions = { ask: vi.fn() };
   const run = vi.fn();
+  const goalLane = {
+    setFromChat: vi.fn(async () => 101),
+    clearForChat: vi.fn(async () => true),
+    pauseForChat: vi.fn(async () => null),
+    resumeForChat: vi.fn(async () => null),
+  };
   const router = new NativeCommands({
     host: host as any,
     interactions: interactions as any,
     ownerId: () => "owner",
     status: () => "connected",
     run,
+    goalLane: goalLane as any,
   });
   const sendText = vi.fn(async () => ({ id: 1 }));
   const args = (name: string, text = "", extra = {}) =>
@@ -50,7 +69,7 @@ function setup() {
       replyHandle: { sendText },
       ...extra,
     }) as any;
-  return { host, interactions, run, router, args, sendText };
+  return { host, interactions, run, router, args, sendText, goalLane };
 }
 describe("native controls", () => {
   it("keeps literal paths and argument backslashes intact", () => {
@@ -224,5 +243,103 @@ describe("native controls", () => {
     expect(
       usageSummary({ rateLimits: { primary: { usedPercent: 120 } } }),
     ).toContain("0% remaining");
+  });
+});
+
+/**
+ * `/goal` (mission program stage 6).
+ *
+ * It was refused by this bridge until the daemon could really carry one out.
+ * Now it is a native control like /steer: the condition becomes a mission the
+ * owner can see AND a native thread goal the runtime works toward, and none
+ * of the five forms is ever passed to the model as a prompt.
+ */
+describe("the goal control", () => {
+  it("sets a goal through the lane, and never sends it to the model", async () => {
+    const s = setup();
+    await s.router.handle(
+      s.args("goal", "the sign up page loads in under 2 seconds"),
+    );
+    expect(s.goalLane.setFromChat).toHaveBeenCalledWith({
+      assistantId: 10,
+      chatId: 20,
+      objective: "the sign up page loads in under 2 seconds",
+    });
+    expect(s.run).not.toHaveBeenCalled();
+    expect(String(s.sendText.mock.calls[0]![0])).toContain("20 turns");
+  });
+
+  it("reads the goal back in the runtime's own words", async () => {
+    const s = setup();
+    await s.router.handle(s.args("goal"));
+    expect(s.host.getGoal).toHaveBeenCalledWith(20);
+    const said = String(s.sendText.mock.calls[0]![0]);
+    expect(said).toContain("the sign up page loads in under 2 seconds");
+    expect(said).toContain("active");
+    expect(said).toContain("19m");
+    expect(said).toContain("1,234");
+    expect(s.goalLane.setFromChat).not.toHaveBeenCalled();
+  });
+
+  it("says plainly when there is no goal to read", async () => {
+    const s = setup();
+    s.host.getGoal.mockResolvedValue(null as never);
+    await s.router.handle(s.args("goal"));
+    expect(String(s.sendText.mock.calls[0]![0])).toContain("No goal is set");
+  });
+
+  it("clears, holds and restarts the goal", async () => {
+    const s = setup();
+    await s.router.handle(s.args("goal", "clear"));
+    expect(s.goalLane.clearForChat).toHaveBeenCalledWith(20);
+    await s.router.handle(s.args("goal", "pause"));
+    expect(s.goalLane.pauseForChat).toHaveBeenCalledWith(20);
+    await s.router.handle(s.args("goal", "resume"));
+    expect(s.goalLane.resumeForChat).toHaveBeenCalledWith(20);
+    expect(s.goalLane.setFromChat).not.toHaveBeenCalled();
+  });
+
+  it("says so when there was no goal to clear", async () => {
+    const s = setup();
+    s.goalLane.clearForChat.mockResolvedValue(false as never);
+    await s.router.handle(s.args("goal", "clear"));
+    expect(String(s.sendText.mock.calls[0]![0])).toContain("no goal");
+  });
+
+  it("treats a condition that starts with a control word as a condition", async () => {
+    const s = setup();
+    await s.router.handle(s.args("goal", "clear the design backlog"));
+    expect(s.goalLane.setFromChat).toHaveBeenCalledWith(
+      expect.objectContaining({ objective: "clear the design backlog" }),
+    );
+    expect(s.goalLane.clearForChat).not.toHaveBeenCalled();
+  });
+
+  it("is refused for anyone but the owner, like every other native control", async () => {
+    const s = setup();
+    await s.router.handle(
+      s.args("goal", "do the thing", { userId: "someone-else" }),
+    );
+    expect(s.goalLane.setFromChat).not.toHaveBeenCalled();
+    expect(String(s.sendText.mock.calls[0]![0])).toContain(
+      "Only this agent's owner",
+    );
+  });
+
+  it("turns a refusal from the runtime into a sentence the owner can act on", async () => {
+    const s = setup();
+    s.goalLane.setFromChat.mockRejectedValue(
+      new Error("Codex could not set the goal: goals feature is disabled.") as never,
+    );
+    await s.router.handle(s.args("goal", "the tests pass"));
+    expect(String(s.sendText.mock.calls[0]![0])).toContain(
+      "goals feature is disabled",
+    );
+  });
+
+  it("is listed in /help, which is the same list the slash picker gets", async () => {
+    const s = setup();
+    await s.router.handle(s.args("help"));
+    expect(String(s.sendText.mock.calls[0]![0])).toContain("`/goal`");
   });
 });

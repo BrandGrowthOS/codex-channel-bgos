@@ -49,6 +49,15 @@ export interface MissionLaneOptions {
    * stamped: see attachMission for why.
    */
   onSelfWrite?: (missionId: number) => void;
+  /**
+   * Is this chat's work a native goal the goal lane already armed (stage 6).
+   *
+   * A goal mission is `origin: "derived"`, exactly like the ones this lane
+   * makes, so attachMission's self report guard does not step aside for it
+   * and the first plan of the goal's own first turn would create a SECOND
+   * mission for one piece of work. Fail closed: no answer means no goal.
+   */
+  goalOwnsChat?: (chatId: number) => boolean;
 }
 
 export interface BeginMissionTurnParams {
@@ -81,11 +90,13 @@ export class MissionLane {
   /** Missions the owner paused. This lane stops writing to them. */
   private readonly pausedMissions = new Set<number>();
   private readonly onSelfWrite: (missionId: number) => void;
+  private readonly goalOwnsChat: (chatId: number) => boolean;
 
   constructor(api: BgosApi, options: MissionLaneOptions = {}) {
     this.api = api;
     this.debounceMs = options.debounceMs ?? 600;
     this.onSelfWrite = options.onSelfWrite ?? (() => {});
+    this.goalOwnsChat = options.goalOwnsChat ?? (() => false);
   }
 
   /**
@@ -173,6 +184,11 @@ export class MissionLane {
 
     if (!state.firstTodoSeen) {
       state.firstTodoSeen = true;
+      // The native goal lane owns this chat and its mission already exists.
+      // Standing down here rather than inside attachMission also saves the
+      // active read, which is the one call that would otherwise happen on
+      // every first plan of every goal turn.
+      if (this.goalOwnsChat(params.chatId)) return;
       if (params.item.items.length < 3) return;
       await this.attachMission(params.chatId, state, params.item);
       return;

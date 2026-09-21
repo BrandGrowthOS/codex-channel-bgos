@@ -24,6 +24,7 @@ import { CommandUpgrade } from "./command-upgrade.js";
 import { ToolProgressOrchestrator } from "./tool-progress.js";
 import { MissionControlLane } from "./mission-control.js";
 import { MissionLane } from "./mission-lane.js";
+import { GoalLane } from "./goal-lane.js";
 import { StepsLane, stepsChatKindAdmits } from "./steps-lane.js";
 import { MeetingLane } from "./meeting-lane.js";
 import { TaskJournal, type TaskResult } from "./task-journal.js";
@@ -45,7 +46,8 @@ import {
 } from "./inbound-handler.js";
 import { pendingUnknownStats } from "./pending-unknown-store.js";
 import { pickCapabilitiesText } from "./capabilities.js";
-import { CodexHost, type RunTurnResult } from "./codex-host.js";
+import { CodexHost, type AdoptedTurn, type RunTurnResult } from "./codex-host.js";
+import type { RpcObject } from "./app-server.js";
 import {
   markerEventBody,
   type ActivityMarker,
@@ -105,6 +107,8 @@ export class CodexAdapter {
   readonly commandsSync: CommandsSync;
   readonly toolProgress: ToolProgressOrchestrator;
   readonly missionLane: MissionLane;
+  /** The owner's Keep working, carried out as the runtime's own thread goal. */
+  readonly goalLane: GoalLane;
   /** The owner's mission decisions, relayed to the model in band. */
   readonly missionControl: MissionControlLane;
   /** The live Steps list for the reply in flight. Never touches a mission. */
@@ -179,10 +183,40 @@ export class CodexAdapter {
       // lane needs its own record of what this daemon wrote to tell its own
       // turn end completion apart from the owner marking a mission done.
       onSelfWrite: (missionId) => this.missionControl.noteSelfWrite(missionId),
+      // A chat whose work is a native goal already has a mission. Without
+      // this the first plan of the goal's own first turn would create a
+      // SECOND derived mission for one piece of work.
+      goalOwnsChat: (chatId) => this.goalLane.owns(chatId),
+    });
+    this.goalLane = new GoalLane({
+      api: this.api,
+      host: {
+        setGoal: (chatId, objective, opts) =>
+          this.host.setGoal(chatId, objective, opts),
+        clearGoal: (chatId) => this.host.clearGoal(chatId),
+        // A goal lives on a thread, so a chat with none carries none. Asked
+        // before every frame driven control, so a control can never CREATE
+        // the thread it was only supposed to act on.
+        hasThread: (chatId) => this.host.hasThread(chatId),
+      },
+      // Same reason the plan lane stamps: this lane completes missions
+      // itself, and an unstamped completion comes back from a backend with no
+      // `cleared_by` looking like the owner marking the mission done.
+      onSelfWrite: (missionId) => this.missionControl.noteSelfWrite(missionId),
+      log: (message) => console.warn(`${LOG} ${message}`),
     });
     this.missionControl = new MissionControlLane({
       host: { steer: (chatId, text) => this.host.steer(chatId, text) },
       missionLane: this.missionLane,
+      // Pause, Resume, Set aside, Mark done and "Give it 10 more turns" reach
+      // the runtime's own goal here, not only the model.
+      goalLane: this.goalLane,
+      // Arming a goal starts the chat's thread, and the thread's config names
+      // the agent, so the pair is recorded before the arm. A mission started
+      // from the app is often the FIRST thing this process ever hears about
+      // that chat, which is exactly when the answer would otherwise be null.
+      noteChat: (chatId, assistantId) =>
+        this.noteChatAssistant(chatId, assistantId),
       chatsForAssistant: (assistantId) =>
         [...this.chatToAssistant.entries()]
           .filter(([, owner]) => owner === assistantId)
@@ -210,6 +244,11 @@ export class CodexAdapter {
         const assistantId = this.assistantForChat(chatId);
         if (assistantId) void this.postActivityMarker(assistantId, chatId, marker);
       },
+      // A goal update arrives between turns far more often than inside one,
+      // which is why the host routes it above its own turn guard.
+      onGoalUpdate: (chatId, goal) => this.goalLane.handleGoalUpdate(chatId, goal),
+      // And the continuation turn itself, which nobody here asked for.
+      onAdoptedTurn: (chatId) => this.adoptGoalTurn(chatId),
     });
     // The third argument is not optional in practice: every mission the
     // typed tools write is stamped here, so a backend that sends no
@@ -224,6 +263,10 @@ export class CodexAdapter {
       interactions: this.tools.interactions,
       ownerId: () => this.ownerId,
       status: () => this.statusLine(),
+      // `/goal` goes through the lane, never straight to the host: the
+      // mission has to exist and the lane has to be watching before the goal
+      // is set, because setting one starts a turn at once.
+      goalLane: this.goalLane,
       run: async (args, prompt, options = {}) => {
         const files = args.attachments.map((a) => ({
           path: a.localPath,
@@ -499,6 +542,10 @@ export class CodexAdapter {
     this.ws.disconnect();
     this.toolProgress.dispose();
     this.missionControl.dispose();
+    // Forgets every goal and closes NOTHING: a thread goal lives in the
+    // runtime's own store and keeps going without this daemon, so the mission
+    // behind it is still true when the daemon comes back.
+    this.goalLane.dispose();
     await this.missionLane.dispose();
     await this.stepsLane?.dispose();
     try {
@@ -570,6 +617,12 @@ export class CodexAdapter {
       await this.meetings.inbound(args.chatId, args.assistantId);
       return;
     }
+    // BEFORE the native command router, not after it. `/goal <condition>` is
+    // answered there and never reaches runAndReply, and the goal it sets is
+    // what starts this chat's thread: the thread's config is where the agent
+    // is named, so a pair recorded later is recorded too late and every
+    // continuation turn the goal runs is dropped for want of an agent.
+    this.noteChatAssistant(args.chatId, args.assistantId);
     // A cold/old HOAI command catalog must not turn native controls into model prompts.
     if (
       !args.command &&
@@ -740,24 +793,7 @@ export class CodexAdapter {
         signal: controller.signal,
         onRequest: (method, params) =>
           this.tools.handleRequest(method, params, context),
-        onUsage: (usage) => {
-          const window = Number(usage.modelContextWindow),
-            tokens = Number(usage.last?.inputTokens);
-          if (window > 0 && tokens >= 0)
-            void this.api
-              .agentRequest(
-                "PATCH",
-                `integrations/assistants/${assistantId}/status`,
-                assistantId,
-                {
-                  contextPct: Math.min(
-                    100,
-                    Math.max(0, Math.round((tokens / window) * 100)),
-                  ),
-                },
-              )
-              .catch(() => {});
-        },
+        onUsage: (usage) => this.reportContextPct(assistantId, usage),
         onTool: (card, itemId) => {
           if (!seenTools.has(itemId)) {
             seenTools.add(itemId);
@@ -870,6 +906,32 @@ export class CodexAdapter {
       ms: Date.now() - startedAt,
     });
 
+    await this.publishTurnResult({
+      assistantId,
+      chatId,
+      replyHandle,
+      result,
+      sentViaTool,
+    });
+  }
+
+  /**
+   * Put one finished turn into the chat: the status line, the buttons or the
+   * questions, the text, the files, and the error when there is one.
+   *
+   * Extracted so a CONTINUATION turn, which the app server starts by itself
+   * while a goal is active, reaches the owner through exactly the same path
+   * as a turn they asked for. A second copy of this would be a second place
+   * to forget a marker, a file or an error.
+   */
+  private async publishTurnResult(params: {
+    assistantId: number;
+    chatId: number;
+    replyHandle: ReplyHandle;
+    result: RunTurnResult;
+    sentViaTool: boolean;
+  }): Promise<void> {
+    const { assistantId, chatId, replyHandle, result, sentViaTool } = params;
     if (result.error && !result.replyText.trim()) {
       await replyHandle.finalizeTurn().catch(() => {});
       await this.outbound
@@ -915,6 +977,153 @@ export class CodexAdapter {
       await this.outbound
         .sendAgentError({ assistantId, chatId, reason: result.error })
         .catch(() => {});
+  }
+
+  /**
+   * Take ownership of a turn the app server started by itself.
+   *
+   * While a goal is active the runtime runs continuation turns with nobody
+   * asking, and the host offers each one here. Everything the owner sees of
+   * that work depends on this: the tool cards, the typing indicator and the
+   * reply all ride the same path an ordinary turn takes, or none of it
+   * happens at all.
+   *
+   * Two refusals, both deliberate. A chat the goal lane does not own is left
+   * exactly as it is today, which covers the goal an owner set in their own
+   * terminal: this daemon did not arm it, has no mission for it, and has no
+   * business posting its replies into a chat. And a chat this process cannot
+   * place with an assistant is left alone, because a reply needs an agent to
+   * come from.
+   */
+  private adoptGoalTurn(chatId: number): AdoptedTurn | null {
+    if (!this.goalLane.owns(chatId)) return null;
+    const assistantId = this.assistantForChat(chatId);
+    if (!assistantId) return null;
+    const replyHandle = buildReplyHandle(
+      { outbound: this.outbound, toolProgress: this.toolProgress },
+      { assistantId, chatId },
+    );
+    let sentViaTool = false;
+    const context: ToolContext = {
+      assistantId,
+      chatId,
+      // A continuation turn has no sender: the runtime started it, so the
+      // owner is the only person it can act for.
+      userId: this.ownerId,
+      readUserId: this.ownerId,
+      signal: new AbortController().signal,
+      onReply: () => {
+        sentViaTool = true;
+      },
+    };
+    const seenTools = new Set<string>();
+    let progressWork = Promise.resolve();
+    this.goalLane.noteTurnStarted(chatId);
+    return {
+      callbacks: {
+        onRequest: (method, params) =>
+          this.tools.handleRequest(method, params, context),
+        onTool: (card, itemId) => {
+          seenTools.add(itemId);
+          progressWork = progressWork
+            .then(() =>
+              this.toolProgress.sendToolStart({
+                assistantId,
+                chatId,
+                toolName: card.name,
+                icon: card.icon,
+                args: card.args,
+                itemId,
+                status: card.status,
+                ...(card.kind !== undefined ? { kind: card.kind } : {}),
+                ...(card.path !== undefined ? { path: card.path } : {}),
+                ...(card.pathCount !== undefined
+                  ? { pathCount: card.pathCount }
+                  : {}),
+                ...(card.detail !== undefined ? { detail: card.detail } : {}),
+                ...(card.durationMs !== undefined
+                  ? { durationMs: card.durationMs }
+                  : {}),
+              }),
+            )
+            .catch(() => {});
+          return progressWork;
+        },
+        onTick: () => {
+          void replyHandle.sendTyping().catch(() => {});
+        },
+        onActivityMarker: (marker) =>
+          this.postActivityMarker(assistantId, chatId, marker),
+        // The same two readers an ordinary turn has. Without them the owner's
+        // live Steps stay blank and the context reading stops moving for the
+        // whole autonomous run, which is the opposite of what this channel
+        // promises: the goal's work reaches the owner between messages
+        // exactly as it does inside a turn they asked for.
+        onUsage: (usage) => this.reportContextPct(assistantId, usage),
+        // A continuation turn carries no chat kind, and an absent kind is a
+        // DM, which is the only place the backend accepts Steps. A goal on
+        // any other kind of chat is refused once and then left alone by the
+        // lane's own permanent 4xx silencing.
+        onPlan: (signal) =>
+          this.stepsLane?.handlePlan({
+            assistantId,
+            chatId,
+            turnId: signal.turnId,
+            plan: signal.plan,
+          }),
+        // `onTodoList` stays unwired on purpose: the plan lane already stands
+        // down for a chat the goal lane owns, and a first plan arriving after
+        // the goal ended would make it build a SECOND mission for this work.
+      },
+      deliver: async (result) => {
+        await progressWork;
+        // Before the reply, exactly where an ordinary turn clears it: a list
+        // left behind is the finished turn's plan sitting under the next
+        // turn's work, re sent by the lane's keepalive until the backend
+        // sweeps it.
+        await this.stepsLane?.finalizeTurn(chatId);
+        await this.publishTurnResult({
+          assistantId,
+          chatId,
+          replyHandle,
+          result,
+          sentViaTool,
+        });
+        // After the reply, never before: the run report is the record of a
+        // turn that finished, and the cap is only reached at the end of one.
+        await this.goalLane.noteTurnFinished(chatId, {
+          text: result.finalAgentMessageText,
+          error: result.error,
+        });
+      },
+    };
+  }
+
+  /**
+   * How full this agent's context window is, from the runtime's own count.
+   *
+   * Shared by the turn the owner asked for and the continuation turn the app
+   * server starts by itself, because the reading is about the THREAD and a
+   * goal's turns fill the same window. Best effort: a failed patch is a
+   * stale percentage, never a broken turn.
+   */
+  private reportContextPct(assistantId: number, usage: RpcObject): void {
+    const window = Number(usage.modelContextWindow),
+      tokens = Number(usage.last?.inputTokens);
+    if (!(window > 0) || !(tokens >= 0)) return;
+    void this.api
+      .agentRequest(
+        "PATCH",
+        `integrations/assistants/${assistantId}/status`,
+        assistantId,
+        {
+          contextPct: Math.min(
+            100,
+            Math.max(0, Math.round((tokens / window) * 100)),
+          ),
+        },
+      )
+      .catch(() => {});
   }
 
   /**

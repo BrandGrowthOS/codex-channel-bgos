@@ -15,10 +15,15 @@ export class CommandUpgrade {
   ): Promise<void> {
     if (!Number.isSafeInteger(assistantId) || assistantId <= 0)
       throw new Error("Invalid assistant id.");
+    // The sentinel NAME is part of shipping a new command, not bookkeeping.
+    // Every agent paired before this release already carries the v1 marker
+    // and this method returns the moment it sees one, so a command added to
+    // the catalog would reach new agents and silently never appear in an
+    // existing owner's slash picker. v2 adds /goal, the native goal control.
     const file = join(
       this.home,
       "command-upgrades",
-      `${assistantId}-native-v1`,
+      `${assistantId}-native-v2`,
     );
     if (existsSync(file)) return;
     await this.api.mergeCommands(assistantId, commands);
