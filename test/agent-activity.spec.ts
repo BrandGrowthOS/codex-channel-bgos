@@ -582,6 +582,26 @@ describe("the plugin never reads the owner's switch", () => {
     expect(offenders).toEqual([]);
     expect(sourceFiles("src").length).toBeGreaterThan(40);
   });
+
+  it("reads the owner's approval wait nowhere in src/", () => {
+    // The same rule, on the setting that decides how long a request stays
+    // answerable. The daemon OFFERS the longest it can hold its own side open
+    // (APPROVAL_HOLD_SECONDS) on every request; the server stores the smaller
+    // of that and the owner's per-agent choice and sends the stored number
+    // back on the created message. A GET of the agent here buys nothing and
+    // costs a round trip in front of a person waiting to see the card, which
+    // is exactly what a first pass at this shipped and then removed.
+    // Case-insensitive on purpose: `getApprovalWaitSeconds` was the name it
+    // had, and a guard that only catches the lower-case spelling would have
+    // let that exact method back in.
+    const offenders = sourceFiles("src").filter((file) =>
+      /approvalWaitSeconds|approval_wait_seconds/i.test(
+        readFileSync(file, "utf8"),
+      ),
+    );
+    expect(offenders).toEqual([]);
+    expect(sourceFiles("src").length).toBeGreaterThan(40);
+  });
 });
 
 /**

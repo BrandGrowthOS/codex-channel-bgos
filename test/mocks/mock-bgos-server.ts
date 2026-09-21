@@ -4,7 +4,6 @@ import type { AddressInfo } from "node:net";
 interface StagedResponse {
   status: number;
   body: unknown;
-  delayMs?: number;
 }
 
 interface RecordedRequest {
@@ -53,9 +52,6 @@ export class MockBgosServer {
         res.end(JSON.stringify({ error: "not staged", path: key }));
         return;
       }
-      if (staged.delayMs) {
-        await new Promise((r) => setTimeout(r, staged.delayMs));
-      }
       res.writeHead(staged.status, { "Content-Type": "application/json" });
       res.end(JSON.stringify(staged.body ?? null));
     });
@@ -65,22 +61,10 @@ export class MockBgosServer {
     return `http://127.0.0.1:${port}`;
   }
 
-  /**
-   * `delayMs` holds the response back before answering, which is the only way
-   * to test a per-call `timeout` option: a constant like that is invisible to
-   * every test that answers instantly. Optional and last, so no existing
-   * staged call changes.
-   */
-  stage(
-    method: string,
-    path: string,
-    status: number,
-    body: unknown,
-    delayMs?: number,
-  ): this {
+  stage(method: string, path: string, status: number, body: unknown): this {
     const key = `${method} ${path}`;
     const existing = this.staged.get(key) ?? [];
-    existing.push({ status, body, delayMs });
+    existing.push({ status, body });
     this.staged.set(key, existing);
     return this;
   }

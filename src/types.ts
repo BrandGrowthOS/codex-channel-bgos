@@ -149,11 +149,12 @@ export interface ApprovalMeta {
   risk: "low" | "medium" | "high";
   request_id: string;
   /**
-   * How long this one request may wait for the owner, in seconds. The backend
-   * clamps whatever we ask for to its own ceiling (1800 s) and its expiry
-   * sweep reads the row's own value, so this is a request, not a promise.
-   * Absent means the backend's generic timeout (60 s), which is exactly what
-   * every Codex approval got before the owner had a wait of their own.
+   * The longest this daemon can hold its own side of the request open, in
+   * seconds (APPROVAL_HOLD_SECONDS). It is an offer, not the real wait: the
+   * server stores the smaller of this and the owner's per-agent choice, its
+   * expiry sweep reads the row's stored value, and that stored number rides
+   * back on the created message. Absent means a backend older than the field,
+   * which gives the row the generic 60 s.
    */
   wait_seconds?: number;
   /**

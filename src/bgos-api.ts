@@ -401,58 +401,33 @@ export class BgosApi {
     return r.data;
   }
 
-  /** Fetch the recent message history for a chat - used by the daemon to
-   *  rebuild conversation context before dispatching to a stateless
-   *  gateway. Backend returns up to 100 entries ASC by created_at. */
+  /**
+   * Fetch the recent message history for a chat - used by the daemon to
+   * rebuild conversation context before dispatching to a stateless gateway.
+   *
+   * `cursor` pins the page to a row the caller already knows about. With no
+   * cursor the route answers with the NEWEST 50 rows, which is right for a
+   * transcript read and wrong for a poll waiting on ONE row: `beforeId` filters
+   * id < beforeId and the page is taken newest first, so beforeId = id + 1 puts
+   * that row first whatever else has landed since. `Interactions.readPending`
+   * is why this exists; see the trap written out there.
+   */
   async getMessages(
     chatId: number,
     userId: string,
+    cursor?: { beforeId?: number; limit?: number },
   ): Promise<BgosMessageEnvelope[]> {
     const r = await this.http.get(`chats/${chatId}/messages`, {
-      params: { userId },
+      params: {
+        userId,
+        ...(cursor?.beforeId === undefined
+          ? {}
+          : { beforeId: cursor.beforeId }),
+        ...(cursor?.limit === undefined ? {} : { limit: cursor.limit }),
+      },
     });
     const rows = r.data?.messages;
     return Array.isArray(rows) ? (rows as BgosMessageEnvelope[]) : [];
-  }
-
-  /**
-   * How long this assistant's owner is willing to be waited for on ONE
-   * approval, in seconds, or null when we cannot tell.
-   *
-   * `GET /api/v1/assistants/:id` already answers a machine caller reading its
-   * own agent (pairing auth resolves the key owner), and already carries every
-   * per-agent field, so no new route is needed. Read right before a request is
-   * posted rather than cached at connect: approvals are rare, so one read per
-   * request is cheaper than any cache and a change the owner just made applies
-   * to the very next request.
-   *
-   * Deliberately total: ANY failure (an older backend that has no such field,
-   * a 401, a timeout, a non-owner read that answers 200 + null) returns null,
-   * and the caller then sends no `wait_seconds` and behaves exactly as this
-   * daemon did before the setting existed. A setting we could not read must
-   * never be able to break an approval. The 3 s timeout is short on purpose:
-   * this sits in front of a request a person is waiting on.
-   *
-   * The range mirrors the backend's own CHECK (60 to 1800). A value outside it
-   * is treated as unreadable rather than clamped here, because the server is
-   * the one that clamps and we do not want two opinions about the ceiling.
-   */
-  async getApprovalWaitSeconds(assistantId: number): Promise<number | null> {
-    try {
-      const r = await this.http.get(`assistants/${assistantId}`, {
-        timeout: 3_000,
-      });
-      const seconds = (r.data as { approvalWaitSeconds?: unknown } | null)
-        ?.approvalWaitSeconds;
-      return typeof seconds === "number" &&
-        Number.isInteger(seconds) &&
-        seconds >= 60 &&
-        seconds <= 1800
-        ? seconds
-        : null;
-    } catch {
-      return null;
-    }
   }
 
   /**
