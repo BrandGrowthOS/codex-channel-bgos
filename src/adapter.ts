@@ -45,6 +45,10 @@ import {
 import { pendingUnknownStats } from "./pending-unknown-store.js";
 import { pickCapabilitiesText } from "./capabilities.js";
 import { CodexHost, type RunTurnResult } from "./codex-host.js";
+import {
+  markerEventBody,
+  type ActivityMarker,
+} from "./activity-markers.js";
 import type { BrowserRelayCredentials } from "./browser-mcp.js";
 import { HOAI_TOOLS, HoaiTools, type ToolContext } from "./hoai-tools.js";
 import { BGOS_AGENT_HINTS } from "./agent-hints.js";
@@ -180,6 +184,13 @@ export class CodexAdapter {
       // requires the id, so an anonymous relay call is a 400 and the shim
       // would silently look offline. Local and offline still work.
       relay: (chatId) => this.browserRelay(chatId),
+      // A compaction that arrives between turns (the owner's own /compact)
+      // has no turn to hang off, so the host resolves the chat from its
+      // thread map and this resolves that chat's assistant.
+      onIdleActivityMarker: (chatId, marker) => {
+        const assistantId = this.assistantForChat(chatId);
+        if (assistantId) void this.postActivityMarker(assistantId, chatId, marker);
+      },
     });
     this.tools = new HoaiTools(this.api, () => this.capabilityText);
     this.nativeCommands = new NativeCommands({
@@ -710,9 +721,21 @@ export class CodexAdapter {
                 assistantId,
                 chatId,
                 toolName: card.name,
+                icon: card.icon,
                 args: card.args,
                 itemId,
                 status: card.status,
+                // The stage 4 fields travel exactly as the mapper built them,
+                // each only when the event actually carried it.
+                ...(card.kind !== undefined ? { kind: card.kind } : {}),
+                ...(card.path !== undefined ? { path: card.path } : {}),
+                ...(card.pathCount !== undefined
+                  ? { pathCount: card.pathCount }
+                  : {}),
+                ...(card.detail !== undefined ? { detail: card.detail } : {}),
+                ...(card.durationMs !== undefined
+                  ? { durationMs: card.durationMs }
+                  : {}),
               }),
             )
             .catch(() => {});
@@ -729,6 +752,11 @@ export class CodexAdapter {
           }),
         // The same plan, statuses intact, as the owner's live Steps. A
         // sibling of the mission lane, never a caller of it.
+        // Quiet lines from the agent's own events. Posted INSIDE the turn, so
+        // a marker lands before the reply bubble rather than after the card
+        // has closed. Never gated by chat kind: the card is not either.
+        onActivityMarker: (marker) =>
+          this.postActivityMarker(assistantId, chatId, marker),
         onPlan: stepsAdmitted
           ? (signal) =>
               this.stepsLane?.handlePlan({
@@ -837,6 +865,25 @@ export class CodexAdapter {
       await this.outbound
         .sendAgentError({ assistantId, chatId, reason: result.error })
         .catch(() => {});
+  }
+
+  /**
+   * Post one activity marker as an ordinary `event` message. Best effort by
+   * design: a refused marker is a missing line, never a broken turn, so every
+   * failure is swallowed the way the other lanes swallow theirs.
+   */
+  private async postActivityMarker(
+    assistantId: number,
+    chatId: number,
+    marker: ActivityMarker,
+  ): Promise<void> {
+    const body = markerEventBody(marker, { assistantId, chatId });
+    if (!body) return;
+    try {
+      await this.api.postMessage(body);
+    } catch {
+      // Swallowed on purpose. See the docblock.
+    }
   }
 
   /**

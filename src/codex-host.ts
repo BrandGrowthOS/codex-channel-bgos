@@ -5,7 +5,19 @@ import { createHash } from "node:crypto";
 import { resolve, join, dirname as dirnameOf } from "node:path";
 import { homedir } from "node:os";
 import { AppServer, codexEnvironment, type RpcObject } from "./app-server.js";
-import { type TodoListSignal, type ToolCard } from "./event-mapper.js";
+import { type TodoListSignal } from "./event-mapper.js";
+import {
+  entryFromItem,
+  markerFromNotification,
+  rowFromProgressNotification,
+  turnContinuesAtEnd,
+  type ActivityCard,
+  type ActivityMarker,
+  type ActivityRow,
+  type ItemContext,
+  type KnownRow,
+  type MarkerSignal,
+} from "./activity-markers.js";
 import {
   loadThreadMap,
   setThreadId,
@@ -49,6 +61,17 @@ export interface CodexHostOptions {
    * Returning null (or omitting this) leaves the browser local-or-offline.
    */
   relay?: (chatId: number) => BrowserRelayCredentials | null;
+  /**
+   * Markers that arrive with NO active turn, chiefly the owner's own
+   * `/compact`: it starts a compaction turn outside `this.active`, and that
+   * is the case the owner is most likely to look for the line in. The chat is
+   * resolved from the thread map. A marker inside a turn goes through
+   * `RunTurnCallbacks.onActivityMarker` instead, so it joins the drain.
+   */
+  onIdleActivityMarker?: (
+    chatId: number,
+    marker: ActivityMarker,
+  ) => void | Promise<void>;
 }
 /**
  * One entry of the app server's `turn/plan/updated` notification, exactly as
@@ -66,7 +89,13 @@ export interface PlanSignal {
 }
 export interface RunTurnCallbacks {
   signal?: AbortSignal;
-  onTool?: (card: ToolCard, id: string) => void | Promise<void>;
+  onTool?: (card: ActivityCard, id: string) => void | Promise<void>;
+  /**
+   * A quiet line in the chat: the context was compacted, or the reply is in
+   * while a delegated worker carries on. Pushed into the turn's drain, so a
+   * marker can never land after the adapter closed the card.
+   */
+  onActivityMarker?: (marker: ActivityMarker) => void | Promise<void>;
   onTodoList?: (signal: TodoListSignal) => void | Promise<void>;
   /** Raw plan snapshot for the live Steps lane. Never touches the mission. */
   onPlan?: (signal: PlanSignal) => void | Promise<void>;
@@ -88,6 +117,18 @@ interface ActiveTurn {
   callbacks: RunTurnCallbacks;
   messages: Map<string, string>;
   pending: Promise<unknown>[];
+  /**
+   * Name, glyph and current state per row id, because the progress
+   * notifications that refine a row (a live patch body, an mcp server's
+   * progress line) do not repeat the first two and the card merges whatever
+   * it is handed, and because a refinement must never re open a row this turn
+   * has already settled.
+   */
+  rowIdentity: Map<string, KnownRow>;
+  /** `startedAtMs` per item id, so a completed item can carry a duration. */
+  rowStartedAt: Map<string, number>;
+  /** The newest collab tool call's worker states, read at turn end. */
+  lastCollab?: unknown;
   finish: (result: RunTurnResult) => void;
 }
 
@@ -146,6 +187,15 @@ export class CodexHost {
   private modelCache?: { models: CodexModel[]; at: number };
   private modelFlight?: Promise<CodexModel[]>;
   private readonly usage = new Map<string, RpcObject>();
+  /** Marker keys already routed, bounded. One line per turn, not per event. */
+  private readonly seenMarkers = new Set<string>();
+  /**
+   * The last working directory a thread's own items reported (only
+   * `commandExecution` carries one). Paths are shortened against it before
+   * they reach the wire, so an owner reads `src/a.ts` rather than the
+   * absolute path that names their account on their own disk.
+   */
+  private readonly cwdByThread = new Map<string, string>();
   constructor(private opts: CodexHostOptions) {
     this.authMode = opts.auth.mode;
     this.workdir = resolve(
@@ -753,6 +803,8 @@ export class CodexHost {
         callbacks,
         messages: new Map(),
         pending: [],
+        rowIdentity: new Map(),
+        rowStartedAt: new Map(),
         finish: (result) => {
           if (finished) return;
           finished = true;
@@ -821,11 +873,21 @@ export class CodexHost {
   private notification(method: string, params: RpcObject): void {
     if (method === "thread/tokenUsage/updated")
       this.usage.set(params.threadId, params.tokenUsage);
+    // Markers sit ABOVE the active-turn guard on purpose: the owner's own
+    // /compact runs its compaction outside this.active, which is exactly the
+    // case the owner looks for the line in.
+    const signal = markerFromNotification(method, params);
+    if (signal) this.routeMarker(String(params.threadId ?? ""), signal);
     const turn = this.active.get(params.threadId);
     if (!turn) return;
     if (method === "turn/started") turn.id = params.turn.id;
     if (method === "turn/completed") {
       const status = params.turn.status;
+      // Only a normal exit: a stopped or failed turn is not "work continues".
+      if (status === "completed") {
+        const marker = turnContinuesAtEnd(turn.lastCollab);
+        if (marker) this.deliverMarker(turn, marker);
+      }
       turn.finish(
         this.result(
           params.threadId,
@@ -881,42 +943,118 @@ export class CodexHost {
     }
     if (method === "item/started" || method === "item/completed") {
       const item = params.item ?? {};
-      const name = (
-        {
-          commandExecution: "shell",
-          fileChange: "edit",
-          webSearch: "web_search",
-          mcpToolCall: item.tool,
-          dynamicToolCall: item.tool,
-          imageGeneration: "image_generation",
-          imageView: "view_image",
-          collabAgentToolCall: item.tool ?? "delegate",
-        } as Record<string, string>
-      )[item.type];
-      if (name)
-        turn.pending.push(
-          Promise.resolve(
-            turn.callbacks.onTool?.(
-              {
-                name,
-                icon: item.type === "fileChange" ? "✏️" : "⚡",
-                args: String(item.command ?? item.query ?? "").slice(0, 120),
-                status:
-                  method === "item/started"
-                    ? "running"
-                    : item.status === "failed" ||
-                        item.status === "declined" ||
-                        item.success === false ||
-                        item.error ||
-                        (typeof item.exitCode === "number" &&
-                          item.exitCode !== 0)
-                      ? "error"
-                      : "done",
-              },
-              item.id,
-            ),
-          ).catch(() => {}),
-        );
+      // The newest worker states, kept for the turn-continues read at the end.
+      if (item.type === "collabAgentToolCall") turn.lastCollab = item.agentsStates;
+      // The thread's working directory, as its own items report it.
+      if (typeof item.cwd === "string" && item.cwd.length > 0)
+        this.cwdByThread.set(String(params.threadId ?? ""), item.cwd);
+      const started = method === "item/started";
+      const itemKey = typeof item.id === "string" ? item.id : "";
+      if (started && itemKey && typeof params.startedAtMs === "number")
+        turn.rowStartedAt.set(itemKey, params.startedAtMs);
+      const row = entryFromItem(item, started ? "started" : "completed", {
+        ...this.itemContext(String(params.threadId ?? "")),
+        startedAtMs: itemKey ? turn.rowStartedAt.get(itemKey) : undefined,
+        completedAtMs:
+          !started && typeof params.completedAtMs === "number"
+            ? params.completedAtMs
+            : undefined,
+      });
+      if (!started && itemKey) turn.rowStartedAt.delete(itemKey);
+      if (row) {
+        turn.rowIdentity.set(row.itemId, {
+          name: row.card.name,
+          icon: row.card.icon,
+          status: row.card.status,
+        });
+        this.deliverRow(turn, row);
+      }
     }
+    if (
+      method === "item/fileChange/patchUpdated" ||
+      method === "item/mcpToolCall/progress"
+    ) {
+      const row = rowFromProgressNotification(
+        method,
+        params,
+        turn.rowIdentity.get(String(params.itemId ?? "")),
+        this.itemContext(String(params.threadId ?? "")),
+      );
+      if (row) this.deliverRow(turn, row);
+    }
+  }
+
+  /** One row to the card, inside the turn's drain. */
+  private deliverRow(turn: ActiveTurn, row: ActivityRow): void {
+    turn.pending.push(
+      Promise.resolve(turn.callbacks.onTool?.(row.card, row.itemId)).catch(
+        () => {},
+      ),
+    );
+  }
+
+  /** What the mapper needs about the thread an item arrived on. */
+  private itemContext(threadId: string): ItemContext {
+    return { cwd: this.cwdByThread.get(threadId) ?? this.workdir };
+  }
+
+  /** True when the marker reached a sink. False means nobody took it. */
+  private deliverMarker(turn: ActiveTurn, marker: ActivityMarker): boolean {
+    const handler = turn.callbacks.onActivityMarker;
+    if (!handler) return false;
+    turn.pending.push(
+      Promise.resolve()
+        .then(() => handler(marker))
+        .catch(() => {}),
+    );
+    return true;
+  }
+
+  /**
+   * One marker per turn, however many notifications announce it (the
+   * contextCompaction item arrives on both started and completed, and an
+   * older Codex also sends thread/compacted).
+   *
+   * The key is burned only once the marker has actually reached a sink. A
+   * turn whose caller passed no `onActivityMarker` (a native command, a
+   * background probe) used to eat the key and silence the very next
+   * announcement of the same compaction, which is the one the owner would
+   * have seen. "Reached a sink" means handed to the handler: whether the
+   * POST behind it succeeds is the adapter's business, and a failed post is
+   * deliberately not retried here.
+   */
+  private routeMarker(threadId: string, signal: MarkerSignal): void {
+    if (this.seenMarkers.has(signal.dedupeKey)) return;
+    const turn = this.active.get(threadId);
+    if (turn) {
+      if (!this.deliverMarker(turn, signal.marker)) return;
+      this.rememberMarker(signal.dedupeKey);
+      return;
+    }
+    const chatId = this.chatForThread(threadId);
+    if (chatId === null || !this.opts.onIdleActivityMarker) return;
+    this.rememberMarker(signal.dedupeKey);
+    void Promise.resolve()
+      .then(() => this.opts.onIdleActivityMarker?.(chatId, signal.marker))
+      .catch(() => {});
+  }
+
+  private rememberMarker(key: string): void {
+    this.seenMarkers.add(key);
+    if (this.seenMarkers.size > 200) {
+      const oldest = this.seenMarkers.values().next().value;
+      if (oldest !== undefined) this.seenMarkers.delete(oldest);
+    }
+  }
+
+  /** The chat a thread belongs to, for an event that arrives between turns. */
+  private chatForThread(threadId: string): number | null {
+    if (!threadId) return null;
+    for (const [chat, thread] of Object.entries(this.map)) {
+      if (thread !== threadId) continue;
+      const id = Number(chat);
+      if (Number.isSafeInteger(id) && id > 0) return id;
+    }
+    return null;
   }
 }

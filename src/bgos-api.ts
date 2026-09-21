@@ -83,6 +83,29 @@ export interface PatchMissionProgressInput {
 }
 
 /**
+ * The body `POST /api/v1/messages` actually accepts.
+ *
+ * Both message posters share one `OutboundMessagePayload`, but the two routes
+ * do NOT share one DTO. `/send-message` reads `MessageWrapperDto`, which
+ * declares `assistantId` and needs it. `/messages` reads `CreateMessageDto`,
+ * which does NOT declare it: the backend's global ValidationPipe runs with
+ * `whitelist: true`, so the field is stripped before the service sees it (the
+ * assistant is resolved from the chat there) and the shadow interceptor logs
+ * it as an unknown field on every single card POST. Sending it is therefore
+ * pure noise in the log that guards the `forbidNonWhitelisted` flip, and the
+ * day that flip lands it would become a 400 on the first tool of every turn.
+ *
+ * Dropped here, at the one route that refuses it, rather than at the callers.
+ */
+function messagesRouteBody(
+  payload: OutboundMessagePayload,
+): Omit<OutboundMessagePayload, "assistantId"> {
+  const body: Record<string, unknown> = { ...payload };
+  delete body.assistantId;
+  return body as Omit<OutboundMessagePayload, "assistantId">;
+}
+
+/**
  * Thin typed wrapper around the BGOS integration endpoints. All methods
  * attach the X-BGOS-Pairing header from cfg.pairingToken.
  *
@@ -342,7 +365,7 @@ export class BgosApi {
 
   /** Agent reply - assistant message with optional inline buttons/approval. */
   async postMessage(payload: OutboundMessagePayload): Promise<{ id: number }> {
-    const r = await this.http.post("messages", payload);
+    const r = await this.http.post("messages", messagesRouteBody(payload));
     return r.data;
   }
 
@@ -361,6 +384,8 @@ export class BgosApi {
    * `{ id }` (HTTP 201), so unwrap both shapes.
    */
   async sendMessage(payload: OutboundMessagePayload): Promise<{ id: number }> {
+    // NOTE: `assistantId` is DECLARED on this route's DTO (MessageWrapperDto)
+    // and the server needs it, so this body goes out whole.
     const r = await this.http.post("send-message", payload);
     const data = (r.data ?? {}) as {
       id?: number;
@@ -390,6 +415,12 @@ export class BgosApi {
           name: string;
           args?: string;
           status: "running" | "done" | "error";
+          // Stage 4 row fields, optional and additive (see types.ts).
+          kind?: "tool" | "subagent";
+          path?: string;
+          pathCount?: number;
+          detail?: string;
+          durationMs?: number;
         }>;
       };
     },
