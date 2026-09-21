@@ -1,4 +1,9 @@
 // Adapted from BrandGrowthOS/bgos-claude-plugin, Apache-2.0, commit 3ecbb58679febcc243f671e05788b521b065546e.
+// DIVERGENCE from that commit, deliberate (mission program stage 5): the
+// mission tools say one open mission per CHAT rather than one per agent, and
+// they target this chat's open mission, because a mission now belongs to one
+// chat. Codex takes no chat argument on any of the three: the host stamps the
+// chat of the turn, so there is nothing for the model to get wrong.
 export const HOAI_TOOL_DECLARATIONS = [
 {
       name: 'bgos_capabilities',
@@ -701,9 +706,10 @@ export const HOAI_TOOL_DECLARATIONS = [
         'this FIRST whenever a user request is multi-step (3+ distinct ' +
         'steps or work spanning tools and minutes), then work normally and ' +
         'tick goals with `tick_mini_goal` as their checks come true. One ' +
-        'active mission per agent; creating a new one abandons the previous ' +
-        'active mission. Maps to POST /api/v1/assistants/:id/missions ' +
-        '(user-scoped, X-API-Key).',
+        'open mission per CHAT; creating a new one sets aside that chat\'s ' +
+        'previous open mission and leaves every other chat alone. The host ' +
+        'stamps the chat of this turn for you, so you never send one. Maps ' +
+        'to POST /api/v1/assistants/:id/missions (user-scoped, X-API-Key).',
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -746,7 +752,7 @@ export const HOAI_TOOL_DECLARATIONS = [
         'is true (capability #20). Pass the goal_id from the create_mission ' +
         'result and a short `evidence` line (what proved the check). Ticks ' +
         'are quiet (no user ping) and idempotent; ticking the last open ' +
-        'goal completes the mission automatically. Targets your active ' +
+        'goal completes the mission automatically. Targets this chat\'s open ' +
         'mission unless mission_id is passed. Maps to PATCH ' +
         '/api/v1/assistants/:id/missions/:missionId/tick.',
       inputSchema: {
@@ -765,7 +771,7 @@ export const HOAI_TOOL_DECLARATIONS = [
           mission_id: {
             type: 'number',
             description:
-              'Optional mission id; omit to target your active mission.',
+              'Optional mission id; omit to target this chat\'s open mission.',
           },
         },
         required: ['goal_id'],
@@ -777,7 +783,7 @@ export const HOAI_TOOL_DECLARATIONS = [
         'End a mission early, marking it completed even though open ' +
         'mini-goals remain (capability #20). Only needed when the remaining ' +
         'goals became moot: ticking the last open goal already completes ' +
-        'the mission automatically. Targets your active mission unless ' +
+        'the mission automatically. Targets this chat\'s open mission unless ' +
         'mission_id is passed. Maps to PATCH ' +
         '/api/v1/assistants/:id/missions/:missionId/complete.',
       inputSchema: {
@@ -794,7 +800,7 @@ export const HOAI_TOOL_DECLARATIONS = [
           mission_id: {
             type: 'number',
             description:
-              'Optional mission id; omit to target your active mission.',
+              'Optional mission id; omit to target this chat\'s open mission.',
           },
         },
         required: [],

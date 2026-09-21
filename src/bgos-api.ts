@@ -46,6 +46,23 @@ export type MissionFeedKind =
   | "done"
   | "failed";
 
+/** One mini goal of a mission, as the snapshot carries it. */
+export interface MissionMiniGoal {
+  id: number;
+  name: string;
+  doneWhen: string;
+  done: boolean;
+  doneAt?: string | null;
+  evidence?: string | null;
+}
+
+/**
+ * The mission snapshot the backend returns and puts on every mission event.
+ *
+ * Every field past `progress` is OPTIONAL on purpose: a backend older than
+ * mission stage 5 sends none of them, and a snapshot that fails to type check
+ * at runtime would take the whole listener down with it.
+ */
 export interface MissionSnapshot {
   id: number;
   assistantId: number;
@@ -53,10 +70,24 @@ export interface MissionSnapshot {
   status: MissionStatus;
   origin: MissionOrigin;
   progress: MissionProgress | null;
+  /** The chat this mission belongs to. Absent before per chat scope shipped. */
+  chatId?: number | null;
+  doneWhen?: string | null;
+  pausedReason?: string | null;
+  createdByAssistant?: boolean;
+  miniGoals?: MissionMiniGoal[];
+  updatedAt?: string;
 }
 
 export interface CreateMissionInput {
   title: string;
+  /**
+   * The chat this mission belongs to. Omitted means the agent's main chat.
+   * Never send null: the backend's ValidationPipe runs `whitelist: true`, so
+   * an undeclared field is stripped with no error and a null would be a lie
+   * with nothing anywhere to report it.
+   */
+  chatId?: number;
   progress?: MissionProgress;
   effort?: MissionEffort;
   origin: MissionOrigin;
@@ -441,10 +472,20 @@ export class BgosApi {
     return r.data.mission;
   }
 
-  /** Fetch the assistant's current open mission, if any. */
-  async getActiveMission(assistantId: number): Promise<MissionSnapshot | null> {
+  /**
+   * Fetch the open mission for one chat of this assistant, if any.
+   *
+   * A backend older than mission stage 5 ignores `chatId` and answers with the
+   * assistant wide mission, which is exactly the pre stage 5 behaviour, so
+   * this is safe to ship ahead of the backend.
+   */
+  async getActiveMission(
+    assistantId: number,
+    opts?: { chatId?: number },
+  ): Promise<MissionSnapshot | null> {
     const r = await this.http.get(
       `integrations/assistants/${assistantId}/missions/active`,
+      opts?.chatId ? { params: { chatId: opts.chatId } } : undefined,
     );
     return r.data?.mission ?? null;
   }

@@ -7,6 +7,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { DECLARED_CAPABILITIES } from "../src/declared-capabilities.js";
 import { HeartbeatController, type HeartbeatDto } from "../src/heartbeat.js";
 
 function heartbeatFile(home: string): Record<string, unknown> {
@@ -124,5 +125,101 @@ describe("HeartbeatController", () => {
     expect(snap.pairingId).toBe(5);
     expect(snap.lastInboundAt).not.toBeNull();
     expect(snap.lastOutboundAt).not.toBeNull();
+  });
+
+  describe("declared capabilities (mission program stage 5)", () => {
+    it("carries the declared set on the posted body", () => {
+      const posts: HeartbeatDto[] = [];
+      const hb = new HeartbeatController({
+        version: "0.7.0",
+        capabilities: DECLARED_CAPABILITIES,
+        postHeartbeat: async (b) => void posts.push(b),
+      });
+      hb.start();
+      try {
+        expect(posts[0]!.capabilities).toEqual(["mission_events"]);
+      } finally {
+        hb.stop();
+      }
+    });
+
+    it("omits the key entirely when the set is empty, never sending []", () => {
+      // The backend REPLACES the stored declaration with whatever arrives, so
+      // an empty array would silently wipe a set another release declared.
+      const posts: HeartbeatDto[] = [];
+      const hb = new HeartbeatController({
+        version: "0.7.0",
+        capabilities: [],
+        postHeartbeat: async (b) => void posts.push(b),
+      });
+      hb.start();
+      try {
+        expect(posts[0]).not.toHaveProperty("capabilities");
+      } finally {
+        hb.stop();
+      }
+      const none: HeartbeatDto[] = [];
+      const hb2 = new HeartbeatController({
+        version: "0.7.0",
+        postHeartbeat: async (b) => void none.push(b),
+      });
+      hb2.start();
+      try {
+        expect(none[0]).not.toHaveProperty("capabilities");
+      } finally {
+        hb2.stop();
+      }
+    });
+
+    it("carries the FULL set on every beat, not a delta", () => {
+      const posts: HeartbeatDto[] = [];
+      const hb = new HeartbeatController({
+        version: "0.7.0",
+        capabilities: DECLARED_CAPABILITIES,
+        postHeartbeat: async (b) => void posts.push(b),
+      });
+      hb.start();
+      try {
+        hb.setLastError({ code: "backfill_failed", message: "boom", at: "x" });
+        expect(posts).toHaveLength(2);
+        for (const post of posts) expect(post.capabilities).toEqual(["mission_events"]);
+      } finally {
+        hb.stop();
+      }
+    });
+
+    it("does not declare mission_pause in this release", () => {
+      // Stage 6 turns it on with the native goal lane. See
+      // test/declared-capabilities.spec.ts for the reasoning.
+      const posts: HeartbeatDto[] = [];
+      const hb = new HeartbeatController({
+        version: "0.7.0",
+        capabilities: DECLARED_CAPABILITIES,
+        postHeartbeat: async (b) => void posts.push(b),
+      });
+      hb.start();
+      try {
+        expect(posts[0]!.capabilities).not.toContain("mission_pause");
+      } finally {
+        hb.stop();
+      }
+    });
+
+    it("copies the set so a caller cannot mutate what was already posted", () => {
+      const declared = ["mission_events"];
+      const posts: HeartbeatDto[] = [];
+      const hb = new HeartbeatController({
+        version: "0.7.0",
+        capabilities: declared,
+        postHeartbeat: async (b) => void posts.push(b),
+      });
+      hb.start();
+      try {
+        declared.push("invented_later");
+        expect(posts[0]!.capabilities).toEqual(["mission_events"]);
+      } finally {
+        hb.stop();
+      }
+    });
   });
 });

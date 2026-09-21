@@ -123,6 +123,7 @@ function adapterFixture(overrides: Record<string, unknown> = {}) {
       finalizeTurn: vi.fn(async () => {}),
       handleTodoList: vi.fn(async () => {}),
     },
+    missionControl: { applyBulletin: (_chatId: number, input: unknown) => input },
     voiceJournal: {
       get: vi.fn(() => undefined),
       begin: vi.fn(),

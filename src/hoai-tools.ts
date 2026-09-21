@@ -37,10 +37,28 @@ import {
   validateComponentPayload,
 } from "./hoai-shared/renderables.js";
 import {
+  buildMissionActivePath,
   buildMissionCreateBody,
   buildMissionTickBody,
   buildMissionCompleteBody,
 } from "./hoai-shared/missions.js";
+
+/**
+ * Told when a mission tool writes a mission, so the mission control lane can
+ * tell this daemon's own write apart from the owner's.
+ *
+ * It is load bearing against a backend older than mission stage 5, which
+ * sends no `cleared_by`: the agent's own last tick closes the mission and the
+ * completion that comes back would otherwise be read as the owner marking it
+ * done, narrated to the model as a falsehood and steered into the very turn
+ * that ticked it.
+ */
+export interface MissionSelfWrites {
+  /** About to write this mission: the frame it emits is ours. */
+  starting(missionId: number): void;
+  /** The write landed and closed nothing, so the stamp is spent. */
+  leftOpen(missionId: number): void;
+}
 
 export interface ToolContext extends InteractionContext {
   messageId?: number;
@@ -150,11 +168,17 @@ export function toolError(error: unknown): string {
   );
 }
 
+const NO_MISSION_SELF_WRITES: MissionSelfWrites = {
+  starting: () => {},
+  leftOpen: () => {},
+};
+
 export class HoaiTools {
   readonly interactions: Interactions;
   constructor(
     private api: BgosApi,
     private capabilities: () => string,
+    private missionWrites: MissionSelfWrites = NO_MISSION_SELF_WRITES,
   ) {
     this.interactions = new Interactions(api);
   }
@@ -521,32 +545,57 @@ export class HoaiTools {
         return response;
       }
       case "create_mission":
-        return post(
-          `assistants/${context.assistantId}/missions`,
-          built(buildMissionCreateBody(args)).body,
-        );
+        return post(`assistants/${context.assistantId}/missions`, {
+          ...built(buildMissionCreateBody(args)).body,
+          // A mission belongs to ONE chat. The turn already names it, so the
+          // agent is never asked. Omitted, never null: the backend's pipe runs
+          // whitelist:true, so a null would be stripped with no error anywhere
+          // and per chat scope would silently not happen.
+          ...(Number.isSafeInteger(context.chatId) && context.chatId > 0
+            ? { chatId: context.chatId }
+            : {}),
+        });
       case "tick_mini_goal":
       case "complete_mission": {
-        const mission =
-          args.mission_id ??
-          (
-            await request(
-              "GET",
-              `assistants/${context.assistantId}/missions/active`,
-            )
-          )?.mission?.id;
-        const path = `assistants/${context.assistantId}/missions/${positive(mission, "mission_id")}`;
-        return name === "tick_mini_goal"
-          ? request(
-              "PATCH",
-              `${path}/tick`,
-              built(buildMissionTickBody(args)).body,
-            )
-          : request(
-              "PATCH",
-              `${path}/complete`,
-              built(buildMissionCompleteBody(args)).body,
-            );
+        // The chat is load bearing on the read. A mission belongs to one
+        // chat, and without the chat of this turn the backend answers with
+        // the agent's MAIN chat mission: a tick issued while working chat B
+        // would tick chat A's card, or fail outright when chat A has none.
+        const named = args.mission_id ?? undefined;
+        const active =
+          named === undefined
+            ? await request(
+                "GET",
+                built(
+                  buildMissionActivePath(context.assistantId, context.chatId),
+                ).path,
+              )
+            : null;
+        const missionId = positive(named ?? active?.mission?.id, "mission_id");
+        const path = `assistants/${context.assistantId}/missions/${missionId}`;
+        // Stamp BEFORE the write, the way the derived lane does: the gateway
+        // emits the mission event from inside the request, so the frame can
+        // beat the response back. Unstamped, the completion the agent's own
+        // last tick triggers is narrated straight back to it as its owner
+        // ending the mission, and steered into the live turn.
+        this.missionWrites.starting(missionId);
+        if (name === "complete_mission")
+          return request(
+            "PATCH",
+            `${path}/complete`,
+            built(buildMissionCompleteBody(args)).body,
+          );
+        const ticked = await request(
+          "PATCH",
+          `${path}/tick`,
+          built(buildMissionTickBody(args)).body,
+        );
+        // A tick of any goal but the last closes nothing, so its stamp has
+        // nothing to answer for. Spend it here rather than leave it waiting
+        // for a frame that is never coming.
+        if (ticked?.mission?.status && ticked.mission.status !== "completed")
+          this.missionWrites.leftOpen(missionId);
+        return ticked;
       }
       case "complete_voice_task": {
         if (!context.completeVoiceTask || args.task_id !== context.voiceTaskId)

@@ -334,6 +334,7 @@ describe("the adapter's activity wiring", () => {
         beginTurn: vi.fn(() => 1),
         finalizeTurn: vi.fn(async () => {}),
       },
+      missionControl: { applyBulletin: (_chatId: number, input: unknown) => input },
       stepsLane: {
         handlePlan: vi.fn(async () => {}),
         finalizeTurn: vi.fn(async () => {}),

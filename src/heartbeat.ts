@@ -30,6 +30,12 @@ export interface HeartbeatDto {
   lastError?: HeartbeatLastError | null;
   /** Active Codex auth mode ("chatgpt" | "apikey"), D7 surfacing. */
   authMode?: string;
+  /**
+   * What this daemon declares it can do. The backend REPLACES the stored
+   * declaration with whatever arrives, so this is always the daemon's full
+   * current set and the key is omitted rather than sent empty.
+   */
+  capabilities?: string[];
 }
 
 /** Local heartbeat file shape (contract C1). */
@@ -52,6 +58,8 @@ export interface HeartbeatDeps {
   postHeartbeat: (body: HeartbeatDto) => Promise<void>;
   /** Active Codex auth mode, surfaced in the payload + local file (D7). */
   authMode?: string;
+  /** The daemon's declared capability tokens (src/declared-capabilities.ts). */
+  capabilities?: readonly string[];
   /** Injectable clock for tests. */
   now?: () => number;
 }
@@ -228,6 +236,11 @@ export class HeartbeatController {
         wsConnected: this.wsConnected,
         lastError: this.lastError,
         authMode: this.deps.authMode,
+        // Never send an empty array: an empty array REPLACES the stored set
+        // with nothing, silently clearing what another release declared.
+        ...(this.deps.capabilities?.length
+          ? { capabilities: [...this.deps.capabilities] }
+          : {}),
       });
     } catch {
       /* best-effort: a heartbeat failure must never break the daemon */
