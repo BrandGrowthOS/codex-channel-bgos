@@ -48,6 +48,10 @@ Do not run two foreground daemons for the same home. Managed services use a rene
 
 Receiving an audio/video file does not imply transcription or video understanding. Codex can inspect file paths with its available tools. Meeting turn-refresh is not advertised. Codex consults return directly through the host; they do not expose Claude's cooperative `voice_consult_reply` tool. Outbound caps: images 10 MB, videos 100 MB, other files 25 MB.
 
+A tool row carries what the step actually did. A shell row carries what the command printed, taken from the completed item as the last 2,048 characters and at most 200 lines, with known secret shapes masked on this computer before anything leaves it and a private key block removed body and all; one card carries at most 8,192 characters of output in total, spent on the newest rows first. The row also carries the exit code, kept only inside the range the platform accepts, so an unusual Windows status costs the row its code and never the card. A running row carries neither, because the protocol leaves both empty until the command ends.
+
+An edit row carries the lines it added and the lines it removed, counted here from the completed change's own unified diff, because the protocol sends no counts. The counts come from a change that landed: a patch the owner declined, or one that failed to apply, leaves the row in its error colour with no counts at all. The diff body itself never leaves the computer. The card also carries the turn's own start and finish, as the runtime reported them, on the final update of the turn.
+
 The backend capability canon is requested with `channel=codex&daemonVersion=0.3.0`. Older daemons continue receiving their old syntax. Tool declarations and pure request builders are adapted from the Claude Code plugin at the revision recorded in `NOTICE`.
 
 ## Native chat controls

@@ -68,6 +68,13 @@ and it reports the working time your runtime counted; there is no separate judge
 this channel, so never claim a check ran, never write a checked feed entry and never
 say a goal was verified. When the host tells you the goal stopped, say in one short
 line where you got to.
+Tool rows also carry what a command printed and its exit code, and an edit row
+carries the lines it added and removed: the host reads all of it off the completed
+commandExecution and fileChange items, masks secrets, caps the output and counts
+the diff for you, and it reports this turn's own start and finish from
+turn/completed. You fill none of these fields. Do not paste command output into
+your answer, do not restate an exit code or a line count in prose, and do not end
+a turn with a summary of the work, because the folded card already carries one.
 /new, /retry, /status, /stop, /compact, /model, /effort,
 /plan, /code, /permissions, /personality, /fast, /usage, /skills, /mcp, /review,
 /diff, /resume, /fork, /ps, /steer, /goal and /help are native bridge controls, also

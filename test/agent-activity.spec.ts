@@ -24,14 +24,27 @@ class Server extends EventEmitter {
     if (method === "turn/start") return { turn: { id: `turn-${p.threadId}` } };
     return {};
   });
-  finish(id: string, text: string) {
+  /**
+   * A real `Turn` on `turn/completed`, which this fake did not send before
+   * stage 7. Without it every host spec here keeps passing while the card's
+   * clock silently stays absent, which is the whole reason the fake is the
+   * first thing stage 7 changed. The two timestamps are UNIX SECONDS on this
+   * protocol, exactly as the live gate capture recorded them.
+   */
+  finish(id: string, text: string, turn: Record<string, unknown> = {}) {
     this.emit("notification", "item/completed", {
       threadId: id,
       item: { id: "message", type: "agentMessage", text },
     });
     this.emit("notification", "turn/completed", {
       threadId: id,
-      turn: { status: "completed" },
+      turn: {
+        status: "completed",
+        startedAt: 1789932968,
+        completedAt: 1789932983,
+        durationMs: 15143,
+        ...turn,
+      },
     });
   }
 }
@@ -317,6 +330,21 @@ describe("the Codex host's activity events", () => {
     // A turn the owner stopped is not a normal exit.
     expect((await run("running", "interrupted")).length).toBe(0);
   });
+  /**
+   * Stage 7: the clock the card closes with is the runtime's own.
+   *
+   * MUTATION PROOF: leave the `Server` fake's `finish()` sending
+   * `turn: { status: "completed" }` alone and this cannot go green, which is
+   * why the fake was the first thing this stage changed.
+   */
+  it("reports the turn's own start and finish, converted out of seconds", async () => {
+    const task = host.runTurn(17, "work");
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.finish("thread-1", "Done");
+    const result = await task;
+    expect(result.turnStartedAtMs).toBe(1789932968000);
+    expect(result.turnFinishedAtMs).toBe(1789932983000);
+  });
 });
 
 describe("the adapter's activity wiring", () => {
@@ -339,7 +367,10 @@ describe("the adapter's activity wiring", () => {
         handlePlan: vi.fn(async () => {}),
         finalizeTurn: vi.fn(async () => {}),
       },
-      toolProgress: { sendToolStart: vi.fn(async () => {}) },
+      toolProgress: {
+        sendToolStart: vi.fn(async () => {}),
+        noteTurnMeta: vi.fn(),
+      },
       outbound: { sendAgentError: vi.fn(async () => {}) },
       api: { postMessage },
       tools: { handleRequest: vi.fn(async () => ({})) },
@@ -413,12 +444,40 @@ describe("the adapter's activity wiring", () => {
         },
         "col1",
       );
+      // A finished shell row, with everything stage 7 reads off the completed
+      // item. `exitCode: 0` is the field a falsy guard silently loses.
+      await cb.onTool?.(
+        {
+          icon: "⚡",
+          name: "shell",
+          args: "npm test",
+          status: "done",
+          kind: "tool",
+          output: "ok\n2 passed",
+          exitCode: 0,
+        },
+        "cmd1",
+      );
+      // And a finished edit row, with the counts the plugin counted itself.
+      await cb.onTool?.(
+        {
+          icon: "✏️",
+          name: "edit",
+          args: "src/a.ts +1",
+          status: "done",
+          kind: "tool",
+          path: "src/a.ts",
+          linesAdded: 12,
+          linesRemoved: 4,
+        },
+        "fc1",
+      );
       return { error: null, replyText: "All done", turnCompleted: true };
     });
 
     await adapter.executeAndReply(10, 20, "Work", reply);
 
-    expect(adapter.toolProgress.sendToolStart).toHaveBeenCalledWith({
+    expect(adapter.toolProgress.sendToolStart).toHaveBeenNthCalledWith(1, {
       assistantId: 10,
       chatId: 20,
       toolName: "spawnAgent",
@@ -429,6 +488,69 @@ describe("the adapter's activity wiring", () => {
       kind: "subagent",
       detail: "1 running, 1 done",
     });
+    expect(adapter.toolProgress.sendToolStart).toHaveBeenNthCalledWith(2, {
+      assistantId: 10,
+      chatId: 20,
+      toolName: "shell",
+      icon: "⚡",
+      args: "npm test",
+      itemId: "cmd1",
+      status: "done",
+      kind: "tool",
+      output: "ok\n2 passed",
+      exitCode: 0,
+    });
+    expect(adapter.toolProgress.sendToolStart).toHaveBeenNthCalledWith(3, {
+      assistantId: 10,
+      chatId: 20,
+      toolName: "edit",
+      icon: "✏️",
+      args: "src/a.ts +1",
+      itemId: "fc1",
+      status: "done",
+      kind: "tool",
+      path: "src/a.ts",
+      linesAdded: 12,
+      linesRemoved: 4,
+    });
+  });
+
+  it("notes the turn's clock for the card, before the card is closed", async () => {
+    const { adapter, reply } = fixture(async (cb) => {
+      await cb.onTool?.({ icon: "⚡", name: "shell", status: "done" }, "cmd1");
+      return {
+        error: null,
+        replyText: "All done",
+        turnCompleted: true,
+        turnStartedAtMs: 1789932968000,
+        turnFinishedAtMs: 1789932983000,
+      };
+    });
+
+    await adapter.executeAndReply(10, 20, "Work", reply);
+
+    expect(adapter.toolProgress.noteTurnMeta).toHaveBeenCalledWith(20, {
+      startedAtMs: 1789932968000,
+      finishedAtMs: 1789932983000,
+    });
+    // Before, never after: the final PATCH is the only one that carries it.
+    const noted =
+      adapter.toolProgress.noteTurnMeta.mock.invocationCallOrder[0]!;
+    const closed = reply.finalizeTurn.mock.invocationCallOrder[0]!;
+    expect(noted).toBeLessThan(closed);
+  });
+
+  it("notes nothing when the runtime reported no clock for this turn", async () => {
+    const { adapter, reply } = fixture(async (cb) => {
+      await cb.onTool?.({ icon: "⚡", name: "shell", status: "done" }, "cmd1");
+      // A turn the owner stopped, or a runtime that left an end null. Absent
+      // is the honest answer and the card simply has no minutes on it.
+      return { error: null, replyText: "All done", turnCompleted: true };
+    });
+
+    await adapter.executeAndReply(10, 20, "Work", reply);
+
+    expect(adapter.toolProgress.noteTurnMeta).not.toHaveBeenCalled();
   });
 
   it("wires the host's idle marker sink to the chat's own assistant", () => {
@@ -459,5 +581,179 @@ describe("the plugin never reads the owner's switch", () => {
     );
     expect(offenders).toEqual([]);
     expect(sourceFiles("src").length).toBeGreaterThan(40);
+  });
+});
+
+/**
+ * Stage 7, the ADOPTED continuation turn: the run the owner is least able to
+ * watch, and the one whose second `onTool` call site is 230 lines away from
+ * the first.
+ *
+ * MUTATION PROOFS:
+ *  - spread the four row fields at only the FIRST `onTool` call site and the
+ *    row fields case here goes red
+ *  - drop the `noteTurnMeta` call from `deliver` and the clock case goes red
+ */
+describe("an adopted turn's card carries everything an ordinary turn's does", () => {
+  function fixture() {
+    const adapter = Object.create(CodexAdapter.prototype) as any;
+    Object.assign(adapter, {
+      ownerId: "owner-1",
+      identityReady: false,
+      chatToAssistant: new Map<number, number>([[20, 10]]),
+      assistantToRoute: new Map<number, string>(),
+      goalLane: {
+        owns: () => true,
+        noteTurnStarted: vi.fn(),
+        noteTurnFinished: vi.fn(async () => {}),
+      },
+      stepsLane: {
+        handlePlan: vi.fn(async () => {}),
+        finalizeTurn: vi.fn(async () => {}),
+      },
+      toolProgress: {
+        sendToolStart: vi.fn(async () => {}),
+        finalizeTurn: vi.fn(async () => {}),
+        noteTurnMeta: vi.fn(),
+      },
+      outbound: {
+        sendText: vi.fn(async () => {}),
+        sendAgentError: vi.fn(async () => {}),
+      },
+      tools: { handleRequest: vi.fn(async () => ({})) },
+      api: { setStatus: vi.fn(async () => {}) },
+    });
+    return adapter;
+  }
+
+  it("hands the four stage 7 row fields to the card on the adopted path too", async () => {
+    const adapter = fixture();
+    const adopted = adapter.adoptGoalTurn(20)!;
+
+    await adopted.callbacks.onTool(
+      {
+        icon: "⚡",
+        name: "shell",
+        args: "npm test",
+        status: "error",
+        kind: "tool",
+        output: "boom",
+        exitCode: 2,
+        linesAdded: 3,
+        linesRemoved: 1,
+      },
+      "cmd1",
+    );
+
+    expect(adapter.toolProgress.sendToolStart).toHaveBeenCalledWith({
+      assistantId: 10,
+      chatId: 20,
+      toolName: "shell",
+      icon: "⚡",
+      args: "npm test",
+      itemId: "cmd1",
+      status: "error",
+      kind: "tool",
+      output: "boom",
+      exitCode: 2,
+      linesAdded: 3,
+      linesRemoved: 1,
+    });
+  });
+
+  it("notes an adopted turn's clock before it closes that turn's card", async () => {
+    const adapter = fixture();
+    const adopted = adapter.adoptGoalTurn(20)!;
+
+    await adopted.deliver({
+      replyText: "The page now loads in 1.8 seconds.",
+      finalAgentMessageText: "The page now loads in 1.8 seconds.",
+      turnCompleted: true,
+      error: null,
+      threadId: "thread-20",
+      turnStartedAtMs: 1789932968000,
+      turnFinishedAtMs: 1789933688000,
+    });
+
+    expect(adapter.toolProgress.noteTurnMeta).toHaveBeenCalledWith(20, {
+      startedAtMs: 1789932968000,
+      finishedAtMs: 1789933688000,
+    });
+    const noted =
+      adapter.toolProgress.noteTurnMeta.mock.invocationCallOrder[0]!;
+    const closed =
+      adapter.toolProgress.finalizeTurn.mock.invocationCallOrder[0]!;
+    expect(noted).toBeLessThan(closed);
+  });
+});
+
+/**
+ * Stage 7: the row shape is written out by hand THREE times in this plugin
+ * and the three do not share a type, so a field added to two of them compiles
+ * and is simply dropped at the third boundary with no error anywhere.
+ *
+ * Every match below is scoped to the DECLARING BLOCK and never to the whole
+ * file, because `src/tool-progress.ts` writes all four names twice: once on
+ * `ToolProgressEntry`, the shape that rides the wire, and once on the
+ * `sendToolStart` params object. A file wide grep passes with the wire
+ * shape's own declaration deleted, which is the copy that matters, so it
+ * guarded the one file it was there for least.
+ *
+ * MUTATION PROOF: delete one of the four fields from the declaring block of
+ * any one of the three files and this goes red naming that file. Performed on
+ * `ToolProgressEntry.output?: string` in src/tool-progress.ts.
+ */
+describe("the three hand written copies of the row shape agree", () => {
+  const COPIES: [string, string][] = [
+    ["src/tool-progress.ts", "export interface ToolProgressEntry"],
+    ["src/types.ts", "toolProgress?:"],
+    ["src/bgos-api.ts", "toolProgress?:"],
+  ];
+  const ROW_FIELDS = ["output", "exitCode", "linesAdded", "linesRemoved"];
+
+  /** The braced block the anchor opens, and nothing else in the file. */
+  function declaringBlock(source: string, anchor: string): string {
+    const at = source.indexOf(anchor);
+    if (at < 0) throw new Error(`no declaration matching ${anchor}`);
+    const open = source.indexOf("{", at);
+    if (open < 0) throw new Error(`no block after ${anchor}`);
+    let depth = 0;
+    for (let i = open; i < source.length; i += 1) {
+      if (source[i] === "{") depth += 1;
+      else if (source[i] === "}") {
+        depth -= 1;
+        if (depth === 0) return source.slice(open, i + 1);
+      }
+    }
+    throw new Error(`unbalanced block after ${anchor}`);
+  }
+
+  it("reads the wire shape alone, not the whole file that declares it", () => {
+    const source = readFileSync("src/tool-progress.ts", "utf8");
+    const block = declaringBlock(source, "export interface ToolProgressEntry");
+    // The params object of sendToolStart declares the same four names. If the
+    // slice reached it, deleting a field from the wire shape would still pass.
+    expect(source).toContain("sendToolStart");
+    expect(block).not.toContain("sendToolStart");
+    expect(block.length).toBeLessThan(source.length / 2);
+    for (const field of ROW_FIELDS) {
+      expect(block.match(new RegExp(`\\b${field}\\?:`, "g")) ?? []).toHaveLength(
+        1,
+      );
+    }
+  });
+
+  it.each(COPIES)("%s declares every stage 7 row field", (file, anchor) => {
+    const block = declaringBlock(readFileSync(file, "utf8"), anchor);
+    const missing = ROW_FIELDS.filter(
+      (field) => !new RegExp(`\\b${field}\\?:`).test(block),
+    );
+    expect(missing).toEqual([]);
+  });
+
+  it.each(COPIES.slice(1))("%s declares the card's own clock", (file, anchor) => {
+    const block = declaringBlock(readFileSync(file, "utf8"), anchor);
+    expect(block).toMatch(/\bstartedAt\?:/);
+    expect(block).toMatch(/\bfinishedAt\?:/);
   });
 });

@@ -156,6 +156,55 @@ describe("native Codex host contracts", () => {
     server.finish("thread-1", "Verified.");
     expect((await task).replyText).toBe("Verified.");
   });
+  /**
+   * Stage 7: the turn's own clock, from `turn/completed` and from nowhere
+   * else. Both ends arrive on that one notification, in UNIX SECONDS, and
+   * both are nullable.
+   *
+   * MUTATION PROOFS:
+   *  - carrying `startedAt` through as milliseconds turns 2026 into 1970 and
+   *    the converted case goes red
+   *  - reading a null `completedAt` as a zero gives a 56 year turn and the
+   *    "no clock" case goes red
+   *  - filling the clock anywhere but from the completed turn makes the
+   *    watchdog case carry one
+   */
+  it("carries the turn clock the runtime reported, converted from seconds", async () => {
+    const task = host.runTurn(1, "work");
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.emit("notification", "turn/completed", {
+      threadId: "thread-1",
+      turn: {
+        status: "completed",
+        // The live shape from the gate capture: seconds, not milliseconds.
+        startedAt: 1789932968,
+        completedAt: 1789932983,
+        durationMs: 15143,
+      },
+    });
+    const result = await task;
+    expect(result.turnStartedAtMs).toBe(1789932968000);
+    expect(result.turnFinishedAtMs).toBe(1789932983000);
+  });
+  it("reports NO clock when the runtime left either end null", async () => {
+    const task = host.runTurn(1, "work");
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.emit("notification", "turn/completed", {
+      threadId: "thread-1",
+      turn: { status: "completed", startedAt: 1789932968, completedAt: null },
+    });
+    const result = await task;
+    // Absent, never a zero: a zero here is a turn that started in 1970.
+    expect(result.turnStartedAtMs).toBeUndefined();
+    expect(result.turnFinishedAtMs).toBeUndefined();
+  });
+  it("carries no clock from the watchdog, because no turn ever completed", async () => {
+    const task = host.runDetached(1, "slow", {}, true, 1);
+    const result = await task;
+    expect(result.error).toMatch(/timed out/);
+    expect(result.turnStartedAtMs).toBeUndefined();
+    expect(result.turnFinishedAtMs).toBeUndefined();
+  });
   it("upgrades a legacy thread with tools without deleting its history", async () => {
     host.close();
     writeFileSync(

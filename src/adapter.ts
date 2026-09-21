@@ -811,8 +811,10 @@ export class CodexAdapter {
                 args: card.args,
                 itemId,
                 status: card.status,
-                // The stage 4 fields travel exactly as the mapper built them,
-                // each only when the event actually carried it.
+                // The stage 4 and stage 7 fields travel exactly as the mapper
+                // built them, each only when the event actually carried it.
+                // `!== undefined` and never a falsy test: a command that
+                // succeeded exits with zero.
                 ...(card.kind !== undefined ? { kind: card.kind } : {}),
                 ...(card.path !== undefined ? { path: card.path } : {}),
                 ...(card.pathCount !== undefined
@@ -821,6 +823,16 @@ export class CodexAdapter {
                 ...(card.detail !== undefined ? { detail: card.detail } : {}),
                 ...(card.durationMs !== undefined
                   ? { durationMs: card.durationMs }
+                  : {}),
+                ...(card.output !== undefined ? { output: card.output } : {}),
+                ...(card.exitCode !== undefined
+                  ? { exitCode: card.exitCode }
+                  : {}),
+                ...(card.linesAdded !== undefined
+                  ? { linesAdded: card.linesAdded }
+                  : {}),
+                ...(card.linesRemoved !== undefined
+                  ? { linesRemoved: card.linesRemoved }
                   : {}),
               }),
             )
@@ -906,6 +918,11 @@ export class CodexAdapter {
       ms: Date.now() - startedAt,
     });
 
+    // The turn's own clock, on its way to the card that is about to close.
+    // BEFORE publishTurnResult, because that is where the final PATCH goes
+    // out and the final PATCH is the only one that carries it.
+    this.noteTurnClock(chatId, result);
+
     await this.publishTurnResult({
       assistantId,
       chatId,
@@ -913,6 +930,23 @@ export class CodexAdapter {
       result,
       sentViaTool,
     });
+  }
+
+  /**
+   * Hand the card orchestrator the clock the RUNTIME reported for this turn.
+   *
+   * Both ends or nothing. A turn the owner stopped and a turn the watchdog
+   * gave up on carry no clock at all, and leaving the card without minutes is
+   * the honest answer there: the app draws every part of the summary line
+   * only where its data exists, and it is forbidden from working the minutes
+   * out from when a message was created.
+   */
+  private noteTurnClock(chatId: number, result: RunTurnResult): void {
+    const startedAtMs = result.turnStartedAtMs;
+    const finishedAtMs = result.turnFinishedAtMs;
+    if (typeof startedAtMs !== "number" || typeof finishedAtMs !== "number")
+      return;
+    this.toolProgress.noteTurnMeta(chatId, { startedAtMs, finishedAtMs });
   }
 
   /**
@@ -1023,6 +1057,10 @@ export class CodexAdapter {
       callbacks: {
         onRequest: (method, params) =>
           this.tools.handleRequest(method, params, context),
+        // The row fields below are the SAME list as the ordinary turn's call
+        // site, 230 lines up. A field spread there and not here is a field
+        // missing for the whole of an autonomous goal run, which is exactly
+        // the run the owner is least able to watch.
         onTool: (card, itemId) => {
           seenTools.add(itemId);
           progressWork = progressWork
@@ -1043,6 +1081,16 @@ export class CodexAdapter {
                 ...(card.detail !== undefined ? { detail: card.detail } : {}),
                 ...(card.durationMs !== undefined
                   ? { durationMs: card.durationMs }
+                  : {}),
+                ...(card.output !== undefined ? { output: card.output } : {}),
+                ...(card.exitCode !== undefined
+                  ? { exitCode: card.exitCode }
+                  : {}),
+                ...(card.linesAdded !== undefined
+                  ? { linesAdded: card.linesAdded }
+                  : {}),
+                ...(card.linesRemoved !== undefined
+                  ? { linesRemoved: card.linesRemoved }
                   : {}),
               }),
             )
@@ -1077,6 +1125,9 @@ export class CodexAdapter {
       },
       deliver: async (result) => {
         await progressWork;
+        // The same clock an ordinary turn notes, in the same place: before
+        // this turn's card is closed inside publishTurnResult.
+        this.noteTurnClock(chatId, result);
         // Before the reply, exactly where an ordinary turn clears it: a list
         // left behind is the finished turn's plan sitting under the next
         // turn's work, re sent by the lane's keepalive until the backend

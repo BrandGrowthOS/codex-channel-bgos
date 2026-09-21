@@ -18,6 +18,8 @@ describe("entryFromItem (the Codex item table)", () => {
           type: "commandExecution",
           command: "yarn test",
           status: "completed",
+          aggregatedOutput: "2 passing\n",
+          exitCode: 0,
           durationMs: 1500,
         },
         "completed",
@@ -30,6 +32,8 @@ describe("entryFromItem (the Codex item table)", () => {
         args: "yarn test",
         status: "done",
         kind: "tool",
+        output: "2 passing\n",
+        exitCode: 0,
         durationMs: 1500,
       },
     });
@@ -71,6 +75,8 @@ describe("entryFromItem (the Codex item table)", () => {
         path: "src/a.ts",
         pathCount: 2,
         detail: "update",
+        linesAdded: 2,
+        linesRemoved: 1,
       },
     });
     expect(JSON.stringify(row)).not.toContain("secret");
@@ -586,5 +592,86 @@ describe("durationMs comes from the envelope when the item has none", () => {
         )!.card,
       ).not.toHaveProperty("durationMs");
     }
+  });
+});
+
+/**
+ * What a shell row carries out of the machine, added in stage 7.
+ *
+ * MUTATION PROOFS (each test names the change that must turn it red):
+ *  - read item.aggregated_output -> "carries what the command printed" goes red
+ *  - route the output through clip() -> "keeps the line breaks" goes red
+ *  - guard exitCode with a falsy check -> "a successful zero" goes red
+ *  - drop the minus one to 255 range guard -> "an exit code the wire cannot carry" goes red
+ *  - copy aggregatedOutput straight onto the card -> "masks a secret" goes red
+ */
+describe("a shell row carries what the command printed", () => {
+  const done = (item: Record<string, unknown>) =>
+    entryFromItem({ id: "c20", type: "commandExecution", ...item }, "completed")!
+      .card;
+
+  it("carries what the command printed, and nothing while it still runs", () => {
+    expect(
+      done({ command: "ls", status: "completed", aggregatedOutput: "out.txt" })
+        .output,
+    ).toBe("out.txt");
+
+    const running = entryFromItem(
+      {
+        id: "c21",
+        type: "commandExecution",
+        command: "ls",
+        aggregatedOutput: "out.txt",
+        exitCode: 0,
+      },
+      "started",
+    )!.card;
+    expect(running).not.toHaveProperty("output");
+    expect(running).not.toHaveProperty("exitCode");
+
+    // Nothing printed, nothing carried.
+    expect(done({ command: "true", aggregatedOutput: null })).not.toHaveProperty(
+      "output",
+    );
+    expect(done({ command: "true" })).not.toHaveProperty("output");
+  });
+
+  it("keeps the line breaks, so a stack trace is still a stack trace", () => {
+    const trace = "Traceback:\n  File main.py, line 2\nZeroDivisionError";
+    expect(done({ command: "python3 x.py", aggregatedOutput: trace }).output).toBe(
+      trace,
+    );
+  });
+
+  it("keeps a successful exit code of zero", () => {
+    expect(done({ command: "true", exitCode: 0, status: "completed" })).toEqual(
+      expect.objectContaining({ exitCode: 0, status: "done" }),
+    );
+    expect(done({ command: "false", exitCode: 1 }).exitCode).toBe(1);
+    // Minus one is a signal death with no code of its own.
+    expect(done({ command: "sleep 9", exitCode: -1 }).exitCode).toBe(-1);
+  });
+
+  it("leaves an exit code the wire cannot carry absent, rather than costing the card", () => {
+    // Windows reports an access violation as 3221225477. The platform accepts
+    // minus one to 255 and would refuse the whole PATCH for anything else, so
+    // the row keeps its red colour and simply has no chip.
+    const huge = done({ command: "crash.exe", exitCode: 3_221_225_477 });
+    expect(huge).not.toHaveProperty("exitCode");
+    expect(huge.status).toBe("error");
+    for (const code of [-2, 256, 1.5, Number.NaN, "1"]) {
+      expect(done({ command: "x", exitCode: code })).not.toHaveProperty(
+        "exitCode",
+      );
+    }
+  });
+
+  it("masks a secret before the output ever reaches the card", () => {
+    const card = done({
+      command: "env",
+      aggregatedOutput: "AWS_KEY=AKIAIOSFODNN7EXAMPLE\nHOME=/home/kc",
+    });
+    expect(card.output).toBe("AWS_KEY=AKIA...\nHOME=/home/kc");
+    expect(JSON.stringify(card)).not.toContain("AKIAIOSFODNN7EXAMPLE");
   });
 });

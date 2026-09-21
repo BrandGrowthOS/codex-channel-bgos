@@ -490,17 +490,25 @@ export class BgosApi {
       text?: string;
       toolProgress?: {
         state: "running" | "done";
+        // The turn's own clock, ISO 8601, on the final PATCH only (types.ts).
+        startedAt?: string;
+        finishedAt?: string;
         tools: Array<{
           icon: string;
           name: string;
           args?: string;
           status: "running" | "done" | "error";
-          // Stage 4 row fields, optional and additive (see types.ts).
+          // Stage 4 and stage 7 row fields, optional and additive. THIRD of
+          // three hand written copies of this shape (see types.ts).
           kind?: "tool" | "subagent";
           path?: string;
           pathCount?: number;
           detail?: string;
           durationMs?: number;
+          output?: string;
+          exitCode?: number;
+          linesAdded?: number;
+          linesRemoved?: number;
         }>;
       };
     },
