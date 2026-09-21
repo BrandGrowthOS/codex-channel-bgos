@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BgosApi } from "../src/bgos-api.js";
 import { ToolProgressOrchestrator } from "../src/tool-progress.js";
@@ -40,7 +40,6 @@ describe("ToolProgressOrchestrator (Codex)", () => {
     );
     expect(posts).toHaveLength(1);
     expect(posts[0]!.body).toMatchObject({
-      assistantId: 1,
       chatId: 42,
       sender: "assistant",
       messageType: "tool_progress",
@@ -49,6 +48,9 @@ describe("ToolProgressOrchestrator (Codex)", () => {
         tools: [{ icon: "💻", name: "Bash", args: "uptime", status: "done" }],
       },
     });
+    // `/messages` does not declare assistantId, so the card POST does not
+    // carry it (the backend resolves the assistant from the chat).
+    expect(posts[0]!.body).not.toHaveProperty("assistantId");
     expect(orch._internal.activeChats).toEqual([42]);
   });
 
@@ -257,3 +259,305 @@ describe("ToolProgressOrchestrator (Codex)", () => {
     ]);
   });
 });
+
+describe("ToolProgressOrchestrator (stage 4: the cap, the new fields)", () => {
+  let server: MockBgosServer;
+  let baseUrl: string;
+
+  beforeEach(async () => {
+    server = new MockBgosServer();
+    baseUrl = await server.start();
+  });
+  afterEach(async () => {
+    await server.stop();
+  });
+
+  /** The card's own PATCH bodies, newest last. */
+  function patches(cardId: number) {
+    return server.requests.filter(
+      (r) => r.method === "PATCH" && r.url.endsWith(`/api/v1/messages/${cardId}`),
+    );
+  }
+
+  it("keeps the newest rows at the cap, behind one honest earlier row", async () => {
+    server.stage("POST", "/api/v1/messages", 201, { id: 9700 });
+    server.stage("PATCH", "/api/v1/messages/9700", 200, { id: 9700 });
+    // A long debounce means no flush lands mid loop: the single PATCH the
+    // test reads is the finalize, carrying the clipped list.
+    const orch = new ToolProgressOrchestrator(makeApi(baseUrl), {
+      debounceMs: 5000,
+    });
+
+    for (let i = 1; i <= 60; i += 1) {
+      await orch.sendToolStart({
+        assistantId: 1,
+        chatId: 70,
+        toolName: `tool-${i}`,
+        itemId: `item-${i}`,
+        status: "done",
+      });
+    }
+    await orch.finalizeTurn(70);
+
+    const tools = (patches(9700).at(-1)!.body as any).toolProgress
+      .tools as Array<Record<string, unknown>>;
+    expect(tools).toHaveLength(50);
+    // The end of the turn is what the owner is looking at.
+    expect(tools.at(-1)!.name).toBe("tool-60");
+    expect(tools[1]!.name).toBe("tool-12");
+    expect(tools.map((t) => t.name)).not.toContain("tool-11");
+    expect(tools[0]).toMatchObject({
+      name: "earlier",
+      status: "done",
+      args: "11 earlier tools",
+    });
+  });
+
+  it("counts every dropped row once, however many times the cap bites", async () => {
+    server.stage("POST", "/api/v1/messages", 201, { id: 9710 });
+    server.stage("PATCH", "/api/v1/messages/9710", 200, { id: 9710 });
+    const orch = new ToolProgressOrchestrator(makeApi(baseUrl), {
+      debounceMs: 5000,
+    });
+
+    for (let i = 1; i <= 52; i += 1) {
+      await orch.sendToolStart({
+        assistantId: 1,
+        chatId: 71,
+        toolName: `tool-${i}`,
+        itemId: `item-${i}`,
+        status: "done",
+      });
+    }
+    await orch.finalizeTurn(71);
+
+    const tools = (patches(9710).at(-1)!.body as any).toolProgress
+      .tools as Array<Record<string, unknown>>;
+    expect(tools).toHaveLength(50);
+    expect(tools[0]!.args).toBe("3 earlier tools");
+    expect(tools[1]!.name).toBe("tool-4");
+    expect(tools.at(-1)!.name).toBe("tool-52");
+  });
+
+  it("still updates a kept row in place after the cap has bitten", async () => {
+    server.stage("POST", "/api/v1/messages", 201, { id: 9720 });
+    server.stage("PATCH", "/api/v1/messages/9720", 200, { id: 9720 });
+    const orch = new ToolProgressOrchestrator(makeApi(baseUrl), {
+      debounceMs: 5000,
+    });
+
+    for (let i = 1; i <= 60; i += 1) {
+      await orch.sendToolStart({
+        assistantId: 1,
+        chatId: 72,
+        toolName: `tool-${i}`,
+        itemId: `item-${i}`,
+        status: "running",
+      });
+    }
+    await orch.sendToolStart({
+      assistantId: 1,
+      chatId: 72,
+      toolName: "tool-55",
+      itemId: "item-55",
+      status: "error",
+    });
+    await orch.finalizeTurn(72);
+
+    const tools = (patches(9720).at(-1)!.body as any).toolProgress
+      .tools as Array<Record<string, unknown>>;
+    expect(tools).toHaveLength(50);
+    const hits = tools.filter((t) => t.name === "tool-55");
+    expect(hits).toHaveLength(1);
+    expect(hits[0]!.status).toBe("error");
+  });
+
+  it("carries the five optional row fields, and only when they are present", async () => {
+    server.stage("POST", "/api/v1/messages", 201, { id: 9730 });
+    server.stage("PATCH", "/api/v1/messages/9730", 200, { id: 9730 });
+    const orch = new ToolProgressOrchestrator(makeApi(baseUrl), {
+      debounceMs: 0,
+    });
+
+    await orch.sendToolStart({
+      assistantId: 1,
+      chatId: 73,
+      toolName: "edit",
+      icon: "✏️",
+      itemId: "fc1",
+      status: "done",
+      path: "src/a.ts",
+      pathCount: 2,
+      detail: "update",
+      durationMs: 1200,
+      kind: "tool",
+    });
+    await orch.sendToolStart({
+      assistantId: 1,
+      chatId: 73,
+      toolName: "Bash",
+      itemId: "cmd1",
+      status: "running",
+    });
+
+    const first = (server.requests[0]!.body as any).toolProgress.tools[0];
+    expect(first).toEqual({
+      icon: "✏️",
+      name: "edit",
+      status: "done",
+      kind: "tool",
+      path: "src/a.ts",
+      pathCount: 2,
+      detail: "update",
+      durationMs: 1200,
+    });
+    const second = (patches(9730).at(-1)!.body as any).toolProgress.tools[1];
+    // No icon from the sender falls back to the name mapper, and the four
+    // fields it did not have never reach the wire as empty strings.
+    expect(second).toEqual({ icon: "💻", name: "Bash", status: "running" });
+  });
+
+  it("clears a subagent's state word when the row stops reporting one", async () => {
+    server.stage("POST", "/api/v1/messages", 201, { id: 9750 });
+    server.stage("PATCH", "/api/v1/messages/9750", 200, { id: 9750 });
+    const orch = new ToolProgressOrchestrator(makeApi(baseUrl), {
+      debounceMs: 0,
+    });
+
+    await orch.sendToolStart({
+      assistantId: 1,
+      chatId: 75,
+      toolName: "reviewer",
+      itemId: "t9",
+      status: "running",
+      kind: "subagent",
+      detail: "1 running",
+    });
+    // The same worker row, with no state left to report.
+    await orch.sendToolStart({
+      assistantId: 1,
+      chatId: 75,
+      toolName: "reviewer",
+      itemId: "t9",
+      status: "done",
+      kind: "subagent",
+    });
+
+    const row = (patches(9750).at(-1)!.body as any).toolProgress.tools[0];
+    expect(row).toEqual({
+      icon: "🔧",
+      name: "reviewer",
+      status: "done",
+      kind: "subagent",
+    });
+  });
+
+  it("keeps a path sticky, and a tool row's detail too", async () => {
+    server.stage("POST", "/api/v1/messages", 201, { id: 9760 });
+    server.stage("PATCH", "/api/v1/messages/9760", 200, { id: 9760 });
+    const orch = new ToolProgressOrchestrator(makeApi(baseUrl), {
+      debounceMs: 0,
+    });
+
+    await orch.sendToolStart({
+      assistantId: 1,
+      chatId: 76,
+      toolName: "edit",
+      itemId: "fc1",
+      status: "running",
+      kind: "tool",
+      path: "src/a.ts",
+      pathCount: 3,
+      detail: "update",
+    });
+    // A later event that simply knows less: a file a row touched does not
+    // become unknown, and a tool row's detail is a qualifier, not a state.
+    await orch.sendToolStart({
+      assistantId: 1,
+      chatId: 76,
+      toolName: "edit",
+      itemId: "fc1",
+      status: "done",
+      kind: "tool",
+    });
+
+    const row = (patches(9760).at(-1)!.body as any).toolProgress.tools[0];
+    expect(row).toMatchObject({
+      status: "done",
+      path: "src/a.ts",
+      pathCount: 3,
+      detail: "update",
+    });
+  });
+
+  it("never clips a character in half on its way to the card", async () => {
+    server.stage("POST", "/api/v1/messages", 201, { id: 9770 });
+    const orch = new ToolProgressOrchestrator(makeApi(baseUrl), {
+      debounceMs: 5000,
+    });
+
+    await orch.sendToolStart({
+      assistantId: 1,
+      chatId: 77,
+      toolName: "Bash",
+      // The astral pair straddles each limit: args 120, path 200, detail 120.
+      args: "a".repeat(118) + "\u{1F600}" + "tail",
+      path: "/tmp/" + "p".repeat(194) + "\u{1F600}.ts",
+      detail: "d".repeat(119) + "\u{1F600}",
+      itemId: "s1",
+      status: "running",
+    });
+
+    const row = (server.requests[0]!.body as any).toolProgress.tools[0];
+    for (const field of [row.args, row.path, row.detail]) {
+      expect(loneSurrogates(field)).toBe(0);
+    }
+    // The ellipsis still marks a clipped args line, and nothing is longer
+    // than its limit.
+    expect(row.args.endsWith("…")).toBe(true);
+    expect(row.args.length).toBeLessThanOrEqual(120);
+    expect(row.path.length).toBeLessThanOrEqual(200);
+    expect(row.detail.length).toBeLessThanOrEqual(120);
+    // A round trip through JSON is what the backend does before JSONB.
+    expect(JSON.parse(JSON.stringify(row)).path).toBe(row.path);
+  });
+
+  it("never runs two PATCHes for one card at the same time", async () => {
+    let release: () => void = () => {};
+    const inFlight = new Promise<void>((r) => {
+      release = r;
+    });
+    const patchMessage = vi.fn(async () => {
+      await inFlight;
+      return { id: 9740 };
+    });
+    const api = {
+      postMessage: async () => ({ id: 9740 }),
+      patchMessage,
+    } as unknown as BgosApi;
+    const orch = new ToolProgressOrchestrator(api, { debounceMs: 0 });
+
+    await orch.sendToolStart({ assistantId: 1, chatId: 74, toolName: "Bash" });
+    void orch.sendToolStart({ assistantId: 1, chatId: 74, toolName: "Read" });
+    void orch.sendToolStart({ assistantId: 1, chatId: 74, toolName: "Edit" });
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(patchMessage).toHaveBeenCalledTimes(1);
+    release();
+    await new Promise((r) => setTimeout(r, 10));
+  });
+});
+
+/** Halves of a surrogate pair with no partner. Postgres refuses these. */
+function loneSurrogates(text: string): number {
+  let lone = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const code = text.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = text.charCodeAt(i + 1);
+      if (Number.isNaN(next) || next < 0xdc00 || next > 0xdfff) lone += 1;
+      else i += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) lone += 1;
+  }
+  return lone;
+}

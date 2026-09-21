@@ -29,12 +29,14 @@ describe("BgosOutbound (Codex)", () => {
     const out = new BgosOutbound(makeApi(baseUrl));
     await out.sendText({ assistantId: 1, chatId: 2, text: "hi" });
     expect(server.requests.at(-1)!.body).toMatchObject({
-      assistantId: 1,
       chatId: 2,
       sender: "assistant",
       text: "hi",
       messageType: "standard",
     });
+    // `/messages` does not declare assistantId (CreateMessageDto), so the
+    // backend strips it and logs it as an unknown field. It is not sent.
+    expect(server.requests.at(-1)!.body).not.toHaveProperty("assistantId");
   });
 
   it("sendButtons posts message + options[] up to the inline limit", async () => {

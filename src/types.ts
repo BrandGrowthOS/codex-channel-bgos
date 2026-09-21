@@ -191,8 +191,23 @@ export interface OutboundMessagePayload {
     | "slash_command"
     | "approval_request"
     | "agent_error"
-    | "tool_progress";
+    | "tool_progress"
+    | "event";
   approvalMeta?: ApprovalMeta;
+  /**
+   * Renderable payload - required when messageType="event". The app draws the
+   * card registered for `payload.kind` and falls back to the title plus the
+   * message text when it does not know the kind, so an older build shows a
+   * plain titled row rather than nothing. Stage 4 posts the two quiet activity
+   * markers this way (context_compacted, turn_continues) rather than adding a
+   * MessageType, which older clients parse strictly.
+   */
+  eventMeta?: {
+    source: "agent";
+    title: string;
+    peek?: string;
+    payload: Record<string, unknown> & { kind: string };
+  };
   /**
    * tool_progress card payload - required when messageType="tool_progress".
    * Codex agents stream tool_use events from Claude's API in real time
@@ -209,6 +224,17 @@ export interface OutboundMessagePayload {
       name: string;
       args?: string;
       status: "running" | "done" | "error";
+      /**
+       * Stage 4 row fields, all optional and all additive: an older backend
+       * drops what it does not know and an older app draws the row as before.
+       * `kind` absent reads as "tool". Output, exit codes and diffs are NOT
+       * here by design (stage 7 owns those; a diff never leaves the machine).
+       */
+      kind?: "tool" | "subagent";
+      path?: string;
+      pathCount?: number;
+      detail?: string;
+      durationMs?: number;
     }>;
   };
   files?: Array<{
