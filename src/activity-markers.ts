@@ -11,33 +11,51 @@
  *     bandwidth: the backend derives the agent's live working status from the
  *     rows arriving, so a silent plugin looks like an idle agent. The app
  *     decides what to draw.
- *  2. A diff never leaves the machine. `fileChange` carries a full patch body
- *     in `changes[].diff` (required and unbounded by the protocol); only the
- *     path and the change word are ever copied out.
+ *  2. A diff BODY never leaves the machine. `fileChange` carries a full patch
+ *     body in `changes[].diff` (required and unbounded by the protocol); the
+ *     path, the change word and two line counts are copied out, and the patch
+ *     text itself never is.
  *  3. `FileUpdateChange.kind` is an OBJECT in the app server v2 protocol
  *     (`{type:"update", move_path?}`) and a plain string in the older SDK
  *     shape. Both are read here, so a template literal can never ship
  *     "[object Object]" to an owner.
  *
- * Command output, stderr and exit code VALUES stay out by design: stage 7
- * owns those.
+ * Command output and the exit code DO leave the machine, since stage 7, and
+ * only from a COMPLETED `commandExecution` item: the output is masked by
+ * `redact-output.ts` and cut to its tail by `output-tail.ts` before it is
+ * copied, and the exit code is carried only inside the range the wire
+ * accepts. A running row carries neither, because the protocol leaves both
+ * null while a command runs and an empty block is a worse row than one with
+ * nothing to open. Codex gives ONE merged string (`aggregatedOutput` is
+ * documented as stdout and stderr together), so there is no second field and
+ * no `stderr:` line to insert on this channel.
  */
 import { homedir } from "node:os";
 
 import { buildComponentEventMessage } from "./hoai-shared/renderables.js";
 import { clipText } from "./clip-text.js";
+import { buildOutputTail } from "./output-tail.js";
+import { lineCountForWire } from "./tool-progress.js";
 import type { ToolCard } from "./event-mapper.js";
 import type { OutboundMessagePayload } from "./types.js";
 
 type Rec = Record<string, any>;
 
-/** A tool_progress row, with the stage 4 optional fields. */
+/** A tool_progress row, with the stage 4 and stage 7 optional fields. */
 export interface ActivityCard extends ToolCard {
   kind?: "tool" | "subagent";
   path?: string;
   pathCount?: number;
   detail?: string;
   durationMs?: number;
+  /** The masked tail of what a command printed. Absent when it printed nothing. */
+  output?: string;
+  /** The process exit code. Zero is legal and meaningful. */
+  exitCode?: number;
+  /** Lines this edit added. Absent when nothing was measured. */
+  linesAdded?: number;
+  /** Lines this edit removed. Absent when nothing was measured. */
+  linesRemoved?: number;
 }
 
 export interface ActivityRow {
@@ -265,6 +283,81 @@ function envelopeSpan(ctx?: ItemContext): number | null {
 }
 
 /**
+ * How many lines a unified diff puts in and takes out.
+ *
+ * The protocol carries no counts at all: `FileUpdateChange` is
+ * `{ path, kind, diff }` and the item itself is `{ id, changes, status }`, so
+ * the plugin counts or nobody does. The rule is defensive about the file
+ * headers, because the binary writes a standard unified diff and a naive
+ * count would be off by one per file in each direction when it does, and the
+ * skip is POSITIONAL and not a prefix test:
+ *
+ *  - a `+++` or `---` line BEFORE the first `@@` is a file header and is
+ *    skipped. After the first `@@` every `+` and `-` line is content: a diff
+ *    prepends ONE character to a source line, so a dropped SQL comment
+ *    arrives as `--- comment` and a `++i;` as `+++i;`, and skipping those
+ *    undercounts ordinary source files
+ *  - added when a line starts with `+`, removed when it starts with `-`
+ *  - a line starting with `@@` or with a backslash (the "No newline at end of
+ *    file" note) is skipped and is never either
+ *
+ * One change carries ONE file's diff, which is why the first `@@` is enough
+ * to say the headers are behind us.
+ *
+ * Only the two integers ever leave the machine. The diff body does not.
+ */
+export function countDiffLines(diff: unknown): {
+  added: number;
+  removed: number;
+} {
+  let added = 0;
+  let removed = 0;
+  if (typeof diff !== "string" || diff.length === 0) return { added, removed };
+  let inHunk = false;
+  for (const line of diff.split(/\r?\n/)) {
+    if (line.startsWith("@@")) {
+      inHunk = true;
+      continue;
+    }
+    if (line.startsWith("\\")) continue;
+    if (!inHunk && (line.startsWith("+++") || line.startsWith("---"))) continue;
+    if (line.startsWith("+")) added += 1;
+    else if (line.startsWith("-")) removed += 1;
+  }
+  return { added, removed };
+}
+
+/** The counts across EVERY change, not only the one the row names in `path`. */
+function changeLineCounts(changes: unknown): { added: number; removed: number } {
+  const list = Array.isArray(changes) ? (changes as Rec[]) : [];
+  let added = 0;
+  let removed = 0;
+  for (const change of list) {
+    if (!isRecord(change)) continue;
+    const counts = countDiffLines(change.diff);
+    added += counts.added;
+    removed += counts.removed;
+  }
+  return { added, removed };
+}
+
+/**
+ * The exit code, or null when the wire cannot carry the one the item reports.
+ *
+ * The platform accepts an integer from minus one (killed by a signal with no
+ * code of its own) to 255, and refuses the whole PATCH for anything else, so
+ * a Windows style 32 bit status costs the row its chip and never the card.
+ * `typeof`, never a falsy check: zero is the commonest code there is.
+ */
+function exitCodeOf(item: Rec): number | null {
+  const code = item.exitCode;
+  if (typeof code !== "number" || !Number.isFinite(code)) return null;
+  if (!Number.isInteger(code)) return null;
+  if (code < -1 || code > 255) return null;
+  return code;
+}
+
+/**
  * The first real path of a change list, plus how many of the changes actually
  * NAME a path. A change without one is still a change, but it is not a file
  * the count can honestly claim, and `+N` beside a filename reads as N more
@@ -286,10 +379,23 @@ function pathsOf(
   };
 }
 
+/**
+ * An edit row. `countLines` is true only for a COMPLETED item whose change
+ * LANDED, and both halves of that matter. A live patch update carries the
+ * same `changes[]` and the same diffs, and a number that ticks up mid flight
+ * and then changes is a number the owner learns to distrust; a declined,
+ * failed or interrupted item carries the diffs it proposed, and counting
+ * those tells the owner an edit happened that they refused. The folded head
+ * sums the counted rows, so a count here becomes "1 file changed +38 -6" on
+ * a card whose row is red.
+ *
+ * A count past what the wire accepts costs BOTH counts (see `LINE_COUNT_MAX`).
+ */
 function editCard(
   item: Rec,
   status: ActivityCard["status"],
-  ctx?: ItemContext,
+  ctx: ItemContext | undefined,
+  countLines: boolean,
 ): ActivityCard {
   const { path, count, word } = pathsOf(item, ctx);
   const card: ActivityCard = {
@@ -307,6 +413,17 @@ function editCard(
     if (count > 1) card.pathCount = count;
   }
   if (word) card.detail = word;
+  if (countLines) {
+    const { added, removed } = changeLineCounts(item.changes);
+    // Each count only where it was measured. A pair of zeroes reads as a
+    // measured result rather than an unmeasured one, so neither is sent. A
+    // count the wire refuses costs both, so the pair the card draws is never
+    // half a measurement.
+    if (lineCountForWire(added) !== null && lineCountForWire(removed) !== null) {
+      if (added > 0) card.linesAdded = added;
+      if (removed > 0) card.linesRemoved = removed;
+    }
+  }
   return card;
 }
 
@@ -403,25 +520,37 @@ export function entryFromItem(
 
   if (type === "fileChange")
     return {
-      card: withDuration(editCard(item, status, ctx), item, ctx),
-      itemId: id,
-    };
-
-  if (type === "commandExecution")
-    return {
       card: withDuration(
-        {
-          icon: TOOL_ICON.commandExecution!,
-          name: "shell",
-          status,
-          kind: "tool",
-          ...argsField(clip(item.command, ARGS_MAX)),
-        },
+        // Completed, AND it landed: a declined or failed patch carries the
+        // diffs it proposed and none of them reached a file.
+        editCard(item, status, ctx, phase === "completed" && !failed(item)),
         item,
         ctx,
       ),
       itemId: id,
     };
+
+  if (type === "commandExecution") {
+    const card: ActivityCard = {
+      icon: TOOL_ICON.commandExecution!,
+      name: "shell",
+      status,
+      kind: "tool",
+      ...argsField(clip(item.command, ARGS_MAX)),
+    };
+    if (phase === "completed") {
+      // `aggregatedOutput`, the app server v2 name. The snake case
+      // `aggregated_output` is the old SDK dialect and reading it produces a
+      // card with no output, forever, with no error. NOT through `clip()`:
+      // that helper collapses every newline into a space, which turns a
+      // stack trace into one long line.
+      const output = buildOutputTail(item.aggregatedOutput);
+      if (output.length > 0) card.output = output;
+      const code = exitCodeOf(item);
+      if (code !== null) card.exitCode = code;
+    }
+    return { card: withDuration(card, item, ctx), itemId: id };
+  }
 
   if (type === "webSearch")
     return {
@@ -516,8 +645,9 @@ export function rowFromProgressNotification(
   if (!itemId) return null;
   if (known && known.status && known.status !== "running") return null;
 
+  // No line counts on a live patch update: they come from the completed item.
   if (method === "item/fileChange/patchUpdated")
-    return { card: editCard(params, "running", ctx), itemId };
+    return { card: editCard(params, "running", ctx, false), itemId };
 
   if (method === "item/mcpToolCall/progress") {
     if (!known) return null;

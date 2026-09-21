@@ -219,22 +219,41 @@ export interface OutboundMessagePayload {
    */
   toolProgress?: {
     state: "running" | "done";
+    /**
+     * The turn's own clock as the RUNTIME reported it, ISO 8601, on the final
+     * PATCH only. Never computed from a message timestamp, and both ends or
+     * neither.
+     */
+    startedAt?: string;
+    finishedAt?: string;
     tools: Array<{
       icon: string;
       name: string;
       args?: string;
       status: "running" | "done" | "error";
       /**
-       * Stage 4 row fields, all optional and all additive: an older backend
-       * drops what it does not know and an older app draws the row as before.
-       * `kind` absent reads as "tool". Output, exit codes and diffs are NOT
-       * here by design (stage 7 owns those; a diff never leaves the machine).
+       * Stage 4 and stage 7 row fields, all optional and all additive: an
+       * older backend drops what it does not know and an older app draws the
+       * row as before. `kind` absent reads as "tool". The last four are what
+       * a command printed, the code it exited with and the lines an edit
+       * moved; a diff BODY still never leaves the machine.
+       *
+       * This is the SECOND of three hand written copies of this row shape
+       * (`ToolProgressEntry` in tool-progress.ts and the inline type in
+       * `BgosApi.patchMessage` are the others). They do not share a type, so
+       * a field added to two of the three is a field the third denies exists:
+       * the row is refused at that boundary and every reader of this type is
+       * told the field is not there.
        */
       kind?: "tool" | "subagent";
       path?: string;
       pathCount?: number;
       detail?: string;
       durationMs?: number;
+      output?: string;
+      exitCode?: number;
+      linesAdded?: number;
+      linesRemoved?: number;
     }>;
   };
   files?: Array<{

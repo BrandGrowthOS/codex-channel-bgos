@@ -210,3 +210,31 @@ describe("BUNDLED_CAPABILITIES goal lane paragraph", () => {
     expect(flat).toContain("/ps, /steer, /goal and /help are native bridge controls");
   });
 });
+
+/**
+ * Stage 7: the turn summary paragraph, word for word against the served
+ * canon's CODEX_TURN_SUMMARY_SENTENCE.
+ *
+ * The bundled hints are appended AFTER the served canon on every connect, so
+ * an agent reads both texts together. A canon edit alone would ship the model
+ * a contradiction, which is why this file pins the two together.
+ *
+ * MUTATION PROOF: change one word of the paragraph in src/agent-hints.ts and
+ * the matching sentence below goes red.
+ */
+describe("BUNDLED_CAPABILITIES turn summary paragraph", () => {
+  const SERVED_TRUTH = [
+    "Tool rows also carry what a command printed and its exit code, and an edit row carries the lines it added and removed: the host reads all of it off the completed commandExecution and fileChange items, masks secrets, caps the output and counts the diff for you, and it reports this turn's own start and finish from turn/completed.",
+    "You fill none of these fields.",
+    "Do not paste command output into your answer, do not restate an exit code or a line count in prose, and do not end a turn with a summary of the work, because the folded card already carries one.",
+  ];
+  const flat = BUNDLED_CAPABILITIES.replace(/\s+/g, " ");
+
+  it.each(SERVED_TRUTH)("says, word for word: %s", (sentence) => {
+    expect(flat).toContain(sentence);
+  });
+
+  it("carries no em dash and no en dash", () => {
+    expect(BUNDLED_CAPABILITIES).not.toMatch(/[\u2013\u2014]/);
+  });
+});

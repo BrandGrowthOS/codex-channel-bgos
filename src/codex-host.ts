@@ -142,6 +142,17 @@ export interface RunTurnResult {
   turnCompleted: boolean;
   error: string | null;
   threadId: string | null;
+  /**
+   * The turn's own clock as the RUNTIME reported it, epoch milliseconds.
+   *
+   * Both ends arrive on `turn/completed` alone, so there is no `turn/started`
+   * branch to keep. Both are absent together or present together: a card that
+   * shows a start with no finish asks the app to invent the missing half, and
+   * the app is forbidden from reading a message timestamp for it. A turn that
+   * never completed (the watchdog, a refused `turn/start`) carries neither.
+   */
+  turnStartedAtMs?: number | null;
+  turnFinishedAtMs?: number | null;
 }
 interface ActiveTurn {
   id?: string;
@@ -168,6 +179,31 @@ interface ActiveTurn {
    * outcome then belongs to the turn that replaced it.
    */
   release?: () => void;
+}
+
+/**
+ * The turn clock off the runtime's own `Turn`, in epoch milliseconds.
+ *
+ * `startedAt` and `completedAt` are UNIX SECONDS on this protocol and both are
+ * nullable (`Turn.ts:26-33` in the app server bindings). Reading them as
+ * milliseconds puts the turn in 1970; reading a null as a zero gives a turn
+ * that lasted fifty six years. Either end missing means no clock at all,
+ * because half a clock is a number the app would have to guess the rest of.
+ */
+function turnClock(reported: unknown): {
+  turnStartedAtMs?: number;
+  turnFinishedAtMs?: number;
+} {
+  if (reported === null || typeof reported !== "object") return {};
+  const turn = reported as { startedAt?: unknown; completedAt?: unknown };
+  const started = turn.startedAt;
+  const finished = turn.completedAt;
+  if (typeof started !== "number" || !Number.isFinite(started)) return {};
+  if (typeof finished !== "number" || !Number.isFinite(finished)) return {};
+  return {
+    turnStartedAtMs: started * 1000,
+    turnFinishedAtMs: finished * 1000,
+  };
 }
 
 export function appServerInput(input: Input): RpcObject[] {
@@ -976,6 +1012,8 @@ export class CodexHost {
     turn: ActiveTurn,
     completed: boolean,
     error: string | null,
+    /** The `Turn` the runtime reported on `turn/completed`, when there was one. */
+    reported?: RpcObject,
   ): RunTurnResult {
     const texts = [...turn.messages.values()].filter(Boolean);
     // The final answer belongs in chat; preparatory commentary is not another answer.
@@ -986,6 +1024,7 @@ export class CodexHost {
       finalAgentMessageText: finalText,
       turnCompleted: completed,
       error,
+      ...turnClock(reported),
     };
   }
   private notification(method: string, params: RpcObject): void {
@@ -1028,6 +1067,10 @@ export class CodexHost {
                     ? "Stopped by you."
                     : "Codex could not finish the turn."),
               ),
+          // The clock rides a failed turn too: the runtime counted the same
+          // minutes whether or not the work landed, and the gate capture of a
+          // 401 turn carried all three fields.
+          params.turn,
         ),
       );
     }

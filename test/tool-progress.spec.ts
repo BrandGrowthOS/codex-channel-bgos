@@ -452,7 +452,7 @@ describe("ToolProgressOrchestrator (stage 4: the cap, the new fields)", () => {
     });
   });
 
-  it("keeps a path sticky, and a tool row's detail too", async () => {
+  it("keeps a path sticky, and a tool row's detail, and its output too", async () => {
     server.stage("POST", "/api/v1/messages", 201, { id: 9760 });
     server.stage("PATCH", "/api/v1/messages/9760", 200, { id: 9760 });
     const orch = new ToolProgressOrchestrator(makeApi(baseUrl), {
@@ -469,9 +469,13 @@ describe("ToolProgressOrchestrator (stage 4: the cap, the new fields)", () => {
       path: "src/a.ts",
       pathCount: 3,
       detail: "update",
+      output: "ok\nfinished",
+      exitCode: 0,
     });
     // A later event that simply knows less: a file a row touched does not
-    // become unknown, and a tool row's detail is a qualifier, not a state.
+    // become unknown, a tool row's detail is a qualifier rather than a state,
+    // and an mcp progress line that carries no output is not evidence that
+    // the command printed nothing.
     await orch.sendToolStart({
       assistantId: 1,
       chatId: 76,
@@ -487,6 +491,8 @@ describe("ToolProgressOrchestrator (stage 4: the cap, the new fields)", () => {
       path: "src/a.ts",
       pathCount: 3,
       detail: "update",
+      output: "ok\nfinished",
+      exitCode: 0,
     });
   });
 
@@ -545,6 +551,314 @@ describe("ToolProgressOrchestrator (stage 4: the cap, the new fields)", () => {
     expect(patchMessage).toHaveBeenCalledTimes(1);
     release();
     await new Promise((r) => setTimeout(r, 10));
+  });
+});
+
+/**
+ * Stage 7 of the Mission program (C-30): what a command printed, the code it
+ * exited with, the lines an edit moved, and the turn's own clock.
+ *
+ * MUTATION PROOFS, one per test below:
+ *  - a falsy check on `exitCode` in the entry build drops the zero case
+ *  - a falsy check on `linesAdded` drops the legal zero case
+ *  - dropping the wire side tail clip lets an oversized output through
+ *  - sending a count the wire refuses breaks the "past the wire's ceiling" case
+ *  - sending the meta in `drain` too breaks the "final PATCH only" case
+ *  - clearing the noted clock after the no card early return leaks a finished
+ *    turn's clock onto the next turn's card
+ *  - spending the budget from the FRONT, or not spending it at all, breaks
+ *    the newest rows case
+ *  - replacing the in place merge with the new entry alone blanks a shell
+ *    row's output on the next progress line
+ */
+describe("ToolProgressOrchestrator (stage 7: output, the exit code, the counts, the clock)", () => {
+  let server: MockBgosServer;
+  let baseUrl: string;
+
+  beforeEach(async () => {
+    server = new MockBgosServer();
+    baseUrl = await server.start();
+  });
+  afterEach(async () => {
+    await server.stop();
+  });
+
+  /** The card's own PATCH bodies, newest last. */
+  function patches(cardId: number) {
+    return server.requests.filter(
+      (r) => r.method === "PATCH" && r.url.endsWith(`/api/v1/messages/${cardId}`),
+    );
+  }
+
+  it("carries the four stage 7 row fields, and only when they are present", async () => {
+    server.stage("POST", "/api/v1/messages", 201, { id: 9800 });
+    server.stage("PATCH", "/api/v1/messages/9800", 200, { id: 9800 });
+    const orch = new ToolProgressOrchestrator(makeApi(baseUrl), {
+      debounceMs: 0,
+    });
+
+    await orch.sendToolStart({
+      assistantId: 1,
+      chatId: 80,
+      toolName: "shell",
+      icon: "⚡",
+      itemId: "cmd1",
+      status: "error",
+      kind: "tool",
+      output: "line one\nline two",
+      exitCode: 3,
+    });
+    await orch.sendToolStart({
+      assistantId: 1,
+      chatId: 80,
+      toolName: "edit",
+      icon: "✏️",
+      itemId: "fc1",
+      status: "done",
+      kind: "tool",
+      path: "src/a.ts",
+      linesAdded: 12,
+      linesRemoved: 4,
+    });
+    await orch.sendToolStart({
+      assistantId: 1,
+      chatId: 80,
+      toolName: "Read",
+      itemId: "rd1",
+      status: "done",
+    });
+
+    const rows = (patches(9800).at(-1)!.body as any).toolProgress.tools;
+    // The newline is the whole point of the block the owner opens, so it
+    // survives the wire exactly as the mapper handed it over.
+    expect(rows[0]).toEqual({
+      icon: "⚡",
+      name: "shell",
+      status: "error",
+      kind: "tool",
+      output: "line one\nline two",
+      exitCode: 3,
+    });
+    expect(rows[1]).toEqual({
+      icon: "✏️",
+      name: "edit",
+      status: "done",
+      kind: "tool",
+      path: "src/a.ts",
+      linesAdded: 12,
+      linesRemoved: 4,
+    });
+    // A row that measured nothing carries nothing: no empty string, no zero.
+    expect(rows[2]).toEqual({ icon: "📖", name: "Read", status: "done" });
+  });
+
+  it("keeps a legal zero: a successful exit code and a zero count both survive", async () => {
+    server.stage("POST", "/api/v1/messages", 201, { id: 9810 });
+    const orch = new ToolProgressOrchestrator(makeApi(baseUrl), {
+      debounceMs: 5000,
+    });
+
+    await orch.sendToolStart({
+      assistantId: 1,
+      chatId: 81,
+      toolName: "shell",
+      itemId: "cmd0",
+      status: "done",
+      exitCode: 0,
+      linesAdded: 0,
+      linesRemoved: 0,
+    });
+
+    const row = (server.requests[0]!.body as any).toolProgress.tools[0];
+    expect(row.exitCode).toBe(0);
+    expect(row.linesAdded).toBe(0);
+    expect(row.linesRemoved).toBe(0);
+  });
+
+  it("drops a pair of counts past the wire's ceiling, rather than lose the card", async () => {
+    server.stage("POST", "/api/v1/messages", 201, { id: 9815 });
+    const orch = new ToolProgressOrchestrator(makeApi(baseUrl), {
+      debounceMs: 5000,
+    });
+
+    // The platform declares zero to a million on both counts and refuses the
+    // WHOLE patch above it, and a refusal is not recovered: the same row
+    // rides every later patch, so the card freezes where it is. The row keeps
+    // its path and its status and simply has no counts.
+    await orch.sendToolStart({
+      assistantId: 1,
+      chatId: 815,
+      toolName: "edit",
+      itemId: "fc9",
+      status: "done",
+      path: "src/generated.ts",
+      linesAdded: 1_000_001,
+      linesRemoved: 4,
+    });
+
+    const row = (server.requests[0]!.body as any).toolProgress.tools[0];
+    expect(row.path).toBe("src/generated.ts");
+    expect(row).not.toHaveProperty("linesAdded");
+    expect(row).not.toHaveProperty("linesRemoved");
+  });
+
+  it("cuts an oversized output to its TAIL at the wire, never in half", async () => {
+    server.stage("POST", "/api/v1/messages", 201, { id: 9820 });
+    const orch = new ToolProgressOrchestrator(makeApi(baseUrl), {
+      debounceMs: 5000,
+    });
+
+    // A caller that did not cap its own output: the platform refuses the whole
+    // PATCH over 2048, and the cost of a refusal is the card for the rest of
+    // the turn, so the wire cuts it here rather than lose the card.
+    await orch.sendToolStart({
+      assistantId: 1,
+      chatId: 82,
+      toolName: "shell",
+      itemId: "cmd2",
+      status: "done",
+      output: "\u{1F600}".repeat(1200) + "END",
+    });
+
+    const row = (server.requests[0]!.body as any).toolProgress.tools[0];
+    expect(row.output.length).toBeLessThanOrEqual(2048);
+    expect(row.output.endsWith("END")).toBe(true);
+    expect(loneSurrogates(row.output)).toBe(0);
+  });
+
+  it("sends the turn's clock on the FINAL patch and on no running one", async () => {
+    server.stage("POST", "/api/v1/messages", 201, { id: 9830 });
+    server.stage("PATCH", "/api/v1/messages/9830", 200, { id: 9830 });
+    const orch = new ToolProgressOrchestrator(makeApi(baseUrl), {
+      debounceMs: 0,
+    });
+
+    await orch.sendToolStart({
+      assistantId: 1,
+      chatId: 83,
+      toolName: "shell",
+      itemId: "cmd1",
+      status: "running",
+    });
+    orch.noteTurnMeta(83, {
+      startedAtMs: 1789932968000,
+      finishedAtMs: 1789932983000,
+    });
+    // A running patch, which happens while the turn is still going.
+    await orch.sendToolStart({
+      assistantId: 1,
+      chatId: 83,
+      toolName: "Read",
+      itemId: "rd1",
+      status: "done",
+    });
+    await orch.finalizeTurn(83);
+
+    const bodies = patches(9830).map((r) => (r.body as any).toolProgress);
+    const running = bodies.filter((b) => b.state === "running");
+    expect(running.length).toBeGreaterThan(0);
+    for (const body of running) {
+      expect(body.startedAt).toBeUndefined();
+      expect(body.finishedAt).toBeUndefined();
+    }
+    const final = bodies.at(-1)!;
+    expect(final.state).toBe("done");
+    expect(final.startedAt).toBe("2026-09-20T19:36:08.000Z");
+    expect(final.finishedAt).toBe("2026-09-20T19:36:23.000Z");
+  });
+
+  it("closes a card with no clock at all when the runtime reported none", async () => {
+    server.stage("POST", "/api/v1/messages", 201, { id: 9840 });
+    server.stage("PATCH", "/api/v1/messages/9840", 200, { id: 9840 });
+    const orch = new ToolProgressOrchestrator(makeApi(baseUrl), {
+      debounceMs: 5000,
+    });
+
+    await orch.sendToolStart({
+      assistantId: 1,
+      chatId: 84,
+      toolName: "shell",
+      itemId: "cmd1",
+      status: "done",
+    });
+    await orch.finalizeTurn(84);
+
+    const final = (patches(9840).at(-1)!.body as any).toolProgress;
+    expect(final.state).toBe("done");
+    expect("startedAt" in final).toBe(false);
+    expect("finishedAt" in final).toBe(false);
+  });
+
+  it("never lets one turn's clock reach the next turn's card", async () => {
+    server.stage("POST", "/api/v1/messages", 201, { id: 9850 });
+    server.stage("PATCH", "/api/v1/messages/9850", 200, { id: 9850 });
+    const orch = new ToolProgressOrchestrator(makeApi(baseUrl), {
+      debounceMs: 5000,
+    });
+
+    // A turn that ran NO tools has no card to close, so the finalize returns
+    // early. The clock it reported must still be forgotten, or the next turn
+    // opens a card and closes it with the previous turn's minutes.
+    orch.noteTurnMeta(85, {
+      startedAtMs: 1789932968000,
+      finishedAtMs: 1789932983000,
+    });
+    await orch.finalizeTurn(85);
+
+    await orch.sendToolStart({
+      assistantId: 1,
+      chatId: 85,
+      toolName: "shell",
+      itemId: "cmd1",
+      status: "done",
+    });
+    await orch.finalizeTurn(85);
+
+    const final = (patches(9850).at(-1)!.body as any).toolProgress;
+    expect("startedAt" in final).toBe(false);
+    expect("finishedAt" in final).toBe(false);
+  });
+
+  it("spends the card's output budget on the NEWEST rows, and never drops a row", async () => {
+    server.stage("POST", "/api/v1/messages", 201, { id: 9860 });
+    server.stage("PATCH", "/api/v1/messages/9860", 200, { id: 9860 });
+    const orch = new ToolProgressOrchestrator(makeApi(baseUrl), {
+      debounceMs: 5000,
+    });
+
+    // Six rows of 2000 characters each against a 8192 character card budget:
+    // the last four fit, the fifth from the end would not, and nothing older
+    // than it keeps its output either.
+    for (let i = 1; i <= 6; i += 1) {
+      await orch.sendToolStart({
+        assistantId: 1,
+        chatId: 86,
+        toolName: `shell-${i}`,
+        itemId: `cmd-${i}`,
+        status: "done",
+        output: String(i).repeat(2000),
+        exitCode: i,
+      });
+    }
+    await orch.finalizeTurn(86);
+
+    const rows = (patches(9860).at(-1)!.body as any).toolProgress.tools;
+    expect(rows).toHaveLength(6);
+    expect(rows.map((r: any) => r.output === undefined)).toEqual([
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+    ]);
+    // The budget spends output and never a row, and never a row's exit code:
+    // the chip the owner reads is not what costs the card its bytes.
+    expect(rows.map((r: any) => r.exitCode)).toEqual([1, 2, 3, 4, 5, 6]);
+    const spent = rows
+      .map((r: any) => (r.output ? r.output.length : 0))
+      .reduce((a: number, b: number) => a + b, 0);
+    expect(spent).toBeLessThanOrEqual(8192);
   });
 });
 

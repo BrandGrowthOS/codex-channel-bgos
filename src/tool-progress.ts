@@ -9,6 +9,7 @@
  */
 import type { BgosApi } from "./bgos-api.js";
 import { clipText } from "./clip-text.js";
+import { OUTPUT_MAX, tailClip } from "./output-tail.js";
 
 /** Per-tool entry on a tool_progress card. */
 export interface ToolProgressEntry {
@@ -22,9 +23,9 @@ export interface ToolProgressEntry {
    * sender fills them in only when it has them, so an absent field never
    * travels as an empty string.
    *
-   * `kind` absent reads as `tool`. Output, stderr, exit codes and diffs are
-   * deliberately NOT here: stage 7 owns those, and a diff never leaves the
-   * agent's machine.
+   * `kind` absent reads as `tool`. Stage 7 adds the last four: what a command
+   * printed, the code it exited with, and the lines an edit moved. A diff
+   * BODY still never leaves the agent's machine; only two integers do.
    */
   kind?: "tool" | "subagent";
   /** First file path the row touched, already shortened by the sender. */
@@ -34,7 +35,62 @@ export interface ToolProgressEntry {
   /** One short human qualifier (a worker's state word), never output. */
   detail?: string;
   durationMs?: number;
+  /**
+   * The masked TAIL of what a command printed, at most 2048 characters. It is
+   * the only field on this row measured in kilobytes and it rides every
+   * coalesced PATCH, which is why the card also has a total budget for it
+   * (see `spendOutputBudget`).
+   */
+  output?: string;
+  /** The process exit code. Zero is legal and is the commonest one there is. */
+  exitCode?: number;
+  /** Lines this edit added. Absent when nothing was measured. */
+  linesAdded?: number;
+  /** Lines this edit removed. Absent when nothing was measured. */
+  linesRemoved?: number;
 }
+
+/**
+ * The largest line count the wire carries. The platform declares an integer
+ * from zero to a million on both counts and refuses the WHOLE patch for
+ * anything else, and a refusal is not recovered here: the offending row rides
+ * every later patch and the card freezes at its last accepted state. So a
+ * count past this is dropped, exactly as an out of range exit code is, and
+ * the row keeps its path and its status without a `+N -M`.
+ */
+export const LINE_COUNT_MAX = 1_000_000;
+
+/** A line count the wire accepts, or null. Rounds first, as the sender did. */
+export function lineCountForWire(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  const rounded = Math.round(value);
+  return rounded >= 0 && rounded <= LINE_COUNT_MAX ? rounded : null;
+}
+
+/**
+ * The turn's own clock, as the RUNTIME reported it, in epoch milliseconds.
+ *
+ * Held per chat OUTSIDE the card, because the card is only created on the
+ * first tool and the clock arrives at the end of the turn, by which time the
+ * chat may have no card at all.
+ */
+export interface TurnCardMeta {
+  startedAtMs: number;
+  finishedAtMs: number;
+}
+
+/** The clock as the wire carries it: two ISO 8601 strings, or nothing. */
+interface CardClock {
+  startedAt: string;
+  finishedAt: string;
+}
+
+/**
+ * Characters of output one CARD may carry in total, spent on the newest rows
+ * first. The per row cap bounds one row; this bounds the whole array, which
+ * is what actually rides every PATCH and every WS frame to every viewer.
+ */
+const CARD_OUTPUT_BUDGET = 8192;
 
 /** Rows kept when the cap bites, plus the one row that says what was dropped. */
 const ROW_CAP = 50;
@@ -76,6 +132,12 @@ export class ToolProgressOrchestrator {
   private readonly debounceMs: number;
   private readonly iconForToolName: (toolName: string) => string;
   private readonly cardByChat = new Map<number, ChatState>();
+  /**
+   * The turn clock per chat, deliberately NOT on `ChatState`: a turn can
+   * report its clock for a chat whose card was never created, and a clock
+   * left behind would be the previous turn's minutes on the next turn's card.
+   */
+  private readonly metaByChat = new Map<number, CardClock>();
 
   constructor(api: BgosApi, options: ToolProgressOptions = {}) {
     this.api = api;
@@ -105,6 +167,12 @@ export class ToolProgressOrchestrator {
     pathCount?: number;
     detail?: string;
     durationMs?: number;
+    /** The masked tail of what the command printed. */
+    output?: string;
+    /** The process exit code, zero included. */
+    exitCode?: number;
+    linesAdded?: number;
+    linesRemoved?: number;
   }): Promise<void> {
     const { assistantId, chatId, toolName, args } = params;
     // Every clip here goes through clipText: a bare slice can cut a surrogate
@@ -133,6 +201,29 @@ export class ToolProgressOrchestrator {
       entry.detail = clipText(params.detail, 120);
     if (typeof params.durationMs === "number" && params.durationMs >= 0)
       entry.durationMs = Math.round(params.durationMs);
+    // The sender already masked and cut this to its tail; the cut is repeated
+    // here because the platform refuses the whole PATCH over the cap, and the
+    // cost of a refusal is the card for the rest of the turn. `tailClip` and
+    // not `clipText`: a tail keeps its END, and a lone surrogate at the front
+    // is what Postgres refuses inside JSONB.
+    if (params.output !== undefined && params.output.length > 0)
+      entry.output = tailClip(params.output, OUTPUT_MAX);
+    // `typeof`, never a falsy check, for all three: a successful command exits
+    // with zero, and a zero count a sender measured is still a measurement.
+    if (typeof params.exitCode === "number" && Number.isFinite(params.exitCode))
+      entry.exitCode = Math.round(params.exitCode);
+    // The counts travel as a PAIR: one of them refused and the other sent
+    // reads as a measured zero on the half that is missing, so a value the
+    // wire will not carry costs both.
+    const added = lineCountForWire(params.linesAdded);
+    const removed = lineCountForWire(params.linesRemoved);
+    const refused =
+      (params.linesAdded !== undefined && added === null) ||
+      (params.linesRemoved !== undefined && removed === null);
+    if (!refused) {
+      if (added !== null) entry.linesAdded = added;
+      if (removed !== null) entry.linesRemoved = removed;
+    }
 
     const existing = this.cardByChat.get(chatId);
     if (existing) {
@@ -148,6 +239,7 @@ export class ToolProgressOrchestrator {
         existing.itemIds.push(params.itemId);
       }
       clipToCap(existing);
+      spendOutputBudget(existing);
       await this.maybePatchSoon(chatId);
       return;
     }
@@ -184,11 +276,33 @@ export class ToolProgressOrchestrator {
   }
 
   /**
+   * Record the clock THIS TURN's runtime reported, for the card about to be
+   * closed. Call it before `finalizeTurn`, because the final PATCH is the
+   * only one that carries it.
+   *
+   * Both ends or neither: a card that shows a start with no finish would be
+   * asking the app to invent the missing half, and the app is forbidden from
+   * reading a message timestamp for it. A value that cannot be written as an
+   * ISO 8601 instant is no clock at all.
+   */
+  noteTurnMeta(chatId: number, meta: TurnCardMeta): void {
+    const startedAt = isoInstant(meta?.startedAtMs);
+    const finishedAt = isoInstant(meta?.finishedAtMs);
+    if (!startedAt || !finishedAt) return;
+    this.metaByChat.set(chatId, { startedAt, finishedAt });
+  }
+
+  /**
    * End-of-turn signal. Flushes any pending PATCH, then PATCHes the card
    * one last time with state="done". Idempotent - no-op when no active
    * card exists for this chat.
    */
   async finalizeTurn(chatId: number): Promise<void> {
+    // BEFORE the early return, always: a turn that ran no tools has no card,
+    // and a clock left behind here is the finished turn's minutes drawn on
+    // the next turn's card.
+    const clock = this.metaByChat.get(chatId);
+    this.metaByChat.delete(chatId);
     const state = this.cardByChat.get(chatId);
     if (!state) return;
     // Clear pending flush - we're about to send the final PATCH ourselves.
@@ -204,7 +318,9 @@ export class ToolProgressOrchestrator {
     try {
       await this.api.patchMessage(state.cardId, {
         text: buildSummary(state.tools, true),
-        toolProgress: { state: "done", tools: state.tools },
+        // The clock rides the FINAL patch and no other: a turn still running
+        // has no finish time, and the running card is redrawn every 600 ms.
+        toolProgress: { state: "done", tools: state.tools, ...(clock ?? {}) },
       });
     } catch (err) {
       // eslint-disable-next-line no-console
@@ -233,6 +349,7 @@ export class ToolProgressOrchestrator {
       }
     }
     this.cardByChat.clear();
+    this.metaByChat.clear();
   }
 
   /** Test-only - surface internal state so vitest can assert. */
@@ -324,6 +441,42 @@ function clipToCap(state: ChatState): void {
   state.tools = [earlierRow(state.dropped), ...rows.slice(-ROWS_KEPT_AT_CAP)];
   // The head row carries no native id, so `indexOf` of a real id never hits it.
   state.itemIds = [undefined, ...ids.slice(-ROWS_KEPT_AT_CAP)];
+}
+
+/**
+ * Hold the card inside its total output budget by spending it on the NEWEST
+ * rows, for the same reason `clipToCap` drops rows from the front: the end of
+ * a turn is what the owner is looking at.
+ *
+ * Walk from the last row back, adding each output's length to a running
+ * total. The first row whose output would take the total past the budget
+ * loses its `output`, and so does every older row, whatever its size, so the
+ * card can never keep an old scrap while a newer one was refused. Only
+ * `output` is ever dropped: the exit code, the counts, the detail and the
+ * duration are what the owner reads at a glance and they cost almost nothing.
+ *
+ * A dropped output is invisible in the app: the row simply has no chevron.
+ */
+function spendOutputBudget(state: ChatState): void {
+  let spent = 0;
+  let exhausted = false;
+  for (let i = state.tools.length - 1; i >= 0; i -= 1) {
+    const row = state.tools[i]!;
+    if (row.output === undefined) continue;
+    if (!exhausted && spent + row.output.length <= CARD_OUTPUT_BUDGET) {
+      spent += row.output.length;
+      continue;
+    }
+    exhausted = true;
+    delete row.output;
+  }
+}
+
+/** One epoch millisecond reading as an ISO 8601 instant, or null. */
+function isoInstant(ms: unknown): string | null {
+  if (typeof ms !== "number" || !Number.isFinite(ms)) return null;
+  const at = new Date(ms);
+  return Number.isNaN(at.getTime()) ? null : at.toISOString();
 }
 
 /**
