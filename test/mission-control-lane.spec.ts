@@ -45,16 +45,45 @@ function frame(
 function makeLane(
   opts: { owned?: boolean; chats?: number[]; steer?: () => Promise<void> } = {},
 ) {
-  const steer = vi.fn(opts.steer ?? (async () => {}));
+  const order: string[] = [];
+  const innerSteer = opts.steer ?? (async () => {});
+  const steer = vi.fn(async (_chatId: number, _text: string) => {
+    order.push("steer");
+    await innerSteer();
+  });
   const missionLane = {
     notePaused: vi.fn(),
     noteResumed: vi.fn(),
     noteClosed: vi.fn(),
   };
+  const goalLane = {
+    armFromMission: vi.fn(async () => {
+      order.push("arm");
+    }),
+    noteUpdated: vi.fn(async () => {
+      order.push("updated");
+    }),
+    notePaused: vi.fn(async () => {
+      order.push("goalPaused");
+    }),
+    noteResumed: vi.fn(async () => {
+      order.push("goalResumed");
+    }),
+    noteClosed: vi.fn(async () => {
+      order.push("goalClosed");
+    }),
+  };
   let now = NOW;
+  const logs: string[] = [];
+  const noteChat = vi.fn((_chatId: number, _assistantId: number) => {
+    order.push("noteChat");
+  });
   const lane = new MissionControlLane({
     host: { steer },
     missionLane,
+    goalLane,
+    noteChat,
+    log: (message) => logs.push(message),
     chatsForAssistant: () => opts.chats ?? [],
     isOwned: () => opts.owned ?? true,
     now: () => now,
@@ -63,6 +92,10 @@ function makeLane(
     lane,
     steer,
     missionLane,
+    goalLane,
+    noteChat,
+    order,
+    logs,
     setNow(ms: number) {
       now = ms;
     },
@@ -333,5 +366,196 @@ describe("MissionControlLane", () => {
     await lane.handle(frame("mission_paused"));
     expect(drain(4403)).not.toBe("");
     expect(drain(4403)).toBe("");
+  });
+});
+
+/**
+ * Stage 6: the owner's decisions reach the RUNTIME's own goal, not only the
+ * model. A pause that leaves the loop running would be a button that changes
+ * nothing, which is the whole reason this channel refused to claim a pause
+ * control until it had one.
+ */
+/** What every frame of the test mission tells the goal lane about its goal. */
+const GOAL_CONTEXT = {
+  assistantId: 7,
+  chatId: 4403,
+  objective: "the tag is filled",
+  turnCap: null,
+  keepWorking: true,
+};
+/** The same mission with the owner's Keep working switch off. */
+const GOAL_CONTEXT_OFF = { ...GOAL_CONTEXT, keepWorking: false };
+
+describe("MissionControlLane and the native goal", () => {
+  it("arms the goal when the owner starts a mission with Keep working on", async () => {
+    const { lane, goalLane } = makeLane();
+    await lane.handle(
+      frame("mission_created", {}, {
+        createdByAssistant: false,
+        keepWorking: true,
+        turnCap: 40,
+      }),
+    );
+    expect(goalLane.armFromMission).toHaveBeenCalledWith({
+      assistantId: 7,
+      chatId: 4403,
+      missionId: 91,
+      // The owner's own test for the mission is the condition to work toward.
+      objective: "the tag is filled",
+      turnCap: 40,
+    });
+  });
+
+  it("falls back to the title when the owner wrote no Done when", async () => {
+    const { lane, goalLane } = makeLane();
+    await lane.handle(
+      frame("mission_created", {}, {
+        createdByAssistant: false,
+        keepWorking: true,
+        doneWhen: null,
+        turnCap: null,
+      }),
+    );
+    expect(goalLane.armFromMission).toHaveBeenCalledWith(
+      expect.objectContaining({ objective: "Ship the strip", turnCap: null }),
+    );
+  });
+
+  it("arms nothing for an ordinary mission, which is most of them", async () => {
+    const { lane, goalLane } = makeLane();
+    await lane.handle(frame("mission_created", {}, { createdByAssistant: false }));
+    expect(goalLane.armFromMission).not.toHaveBeenCalled();
+  });
+
+  it("arms nothing for a mission the daemon created itself", async () => {
+    const { lane, goalLane } = makeLane();
+    await lane.handle(
+      frame("mission_created", {}, { createdByAssistant: true, keepWorking: true }),
+    );
+    expect(goalLane.armFromMission).not.toHaveBeenCalled();
+  });
+
+  it("names the chat's agent BEFORE it arms, or the goal's turns have no agent", async () => {
+    const { lane, noteChat, order } = makeLane();
+    await lane.handle(
+      frame("mission_created", {}, { createdByAssistant: false, keepWorking: true }),
+    );
+    expect(noteChat).toHaveBeenCalledWith(4403, 7);
+    // Arming starts the thread, and the thread's config is where the agent is
+    // named, so a pair recorded afterwards is a pair recorded too late.
+    expect(order.indexOf("noteChat")).toBeLessThan(order.indexOf("arm"));
+  });
+
+  it("names no agent for a mission that arms no goal", async () => {
+    const { lane, noteChat } = makeLane();
+    await lane.handle(frame("mission_created", {}, { createdByAssistant: false }));
+    expect(noteChat).not.toHaveBeenCalled();
+  });
+
+  it("tells the model its mission started BEFORE it arms, because a set starts a turn", async () => {
+    const { lane, goalLane, drain } = makeLane();
+    let toldWhenArmed = "";
+    goalLane.armFromMission.mockImplementation(async () => {
+      toldWhenArmed = drain(4403);
+    });
+    await lane.handle(
+      frame("mission_created", {}, { createdByAssistant: false, keepWorking: true }),
+    );
+    expect(toldWhenArmed).toContain('started the mission "Ship the strip"');
+  });
+
+  it("holds the goal on Pause and starts it again on Resume", async () => {
+    const { lane, goalLane } = makeLane();
+    await lane.handle(frame("mission_paused", { cleared_by: "owner" }, { keepWorking: true }));
+    expect(goalLane.notePaused).toHaveBeenCalledWith(91, GOAL_CONTEXT);
+    await lane.handle(frame("mission_resumed", { cleared_by: "owner" }, { keepWorking: true }));
+    expect(goalLane.noteResumed).toHaveBeenCalledWith(91, GOAL_CONTEXT);
+  });
+
+  /**
+   * The lane's own state does not survive a daemon restart and the runtime's
+   * goal does, so a control that could only name a mission id reached nothing
+   * at all: the owner's Pause was a no op against a goal still running. The
+   * frame carries the chat, the condition and the cap, so it is passed on.
+   */
+  it("hands every control the chat and the condition, not only the mission id", async () => {
+    const { lane, goalLane } = makeLane();
+    await lane.handle(frame("mission_abandoned", { cleared_by: "owner" }, { keepWorking: true }));
+    expect(goalLane.noteClosed).toHaveBeenCalledWith(91, GOAL_CONTEXT);
+    await lane.handle(
+      frame("mission_updated", {}, { keepWorking: true, turnCap: 30 }),
+    );
+    expect(goalLane.noteUpdated).toHaveBeenCalledWith(
+      { missionId: 91, keepWorking: true, turnCap: 30 },
+      { ...GOAL_CONTEXT, turnCap: 30 },
+    );
+  });
+
+  it("says a mission with no chat of its own carries no goal context", async () => {
+    const { lane, goalLane } = makeLane();
+    await lane.handle(
+      frame("mission_paused", { cleared_by: "owner", chat_id: null }, { chatId: null, keepWorking: true }),
+    );
+    expect(goalLane.notePaused).toHaveBeenCalledWith(91, null);
+  });
+
+  it("clears the goal BEFORE it steers the model off a mission that is over", async () => {
+    const { lane, goalLane, order } = makeLane();
+    await lane.handle(
+      frame("mission_abandoned", { cleared_by: "owner", clear_reason: "set_aside" }),
+    );
+    expect(goalLane.noteClosed).toHaveBeenCalledWith(91, GOAL_CONTEXT_OFF);
+    expect(order).toEqual(["goalClosed", "steer"]);
+  });
+
+  it("clears the goal on a completion the agent wrote itself, and says nothing", async () => {
+    const { lane, goalLane, steer, drain } = makeLane();
+    await lane.handle(frame("mission_completed", { cleared_by: "agent" }));
+    // The mission is closed either way, so the runtime must stop working
+    // toward it; the model wrote this one, so it is told nothing.
+    expect(goalLane.noteClosed).toHaveBeenCalledWith(91, GOAL_CONTEXT_OFF);
+    expect(steer).not.toHaveBeenCalled();
+    expect(drain(4403)).toBe("");
+  });
+
+  it("hands a raised cap to the lane, and still narrates nothing", async () => {
+    const { lane, goalLane, drain, steer } = makeLane();
+    await lane.handle(
+      frame("mission_updated", {}, { keepWorking: true, turnCap: 30 }),
+    );
+    expect(goalLane.noteUpdated).toHaveBeenCalledWith(
+      { missionId: 91, keepWorking: true, turnCap: 30 },
+      { ...GOAL_CONTEXT, turnCap: 30 },
+    );
+    expect(drain(4403)).toBe("");
+    expect(steer).not.toHaveBeenCalled();
+  });
+
+  it("touches the goal for no frame of an assistant this daemon does not own", async () => {
+    const { lane, goalLane } = makeLane({ owned: false });
+    await lane.handle(
+      frame("mission_created", {}, { createdByAssistant: false, keepWorking: true }),
+    );
+    await lane.handle(frame("mission_abandoned", { cleared_by: "owner" }));
+    expect(goalLane.armFromMission).not.toHaveBeenCalled();
+    expect(goalLane.noteClosed).not.toHaveBeenCalled();
+  });
+
+  it("never throws out of handle when arming the goal fails", async () => {
+    const { lane, goalLane, drain, logs } = makeLane();
+    goalLane.armFromMission.mockRejectedValue(
+      new Error("goals feature is disabled") as never,
+    );
+    await expect(
+      lane.handle(
+        frame("mission_created", {}, { createdByAssistant: false, keepWorking: true }),
+      ),
+    ).resolves.toBeUndefined();
+    // The model still learns its mission started, which is the half that
+    // works with no goal loop at all, and the reason is named as a goal
+    // failure rather than swallowed as a broken frame.
+    expect(drain(4403)).toContain('started the mission "Ship the strip"');
+    expect(logs.join(" ")).toContain("goal arm failed for mission 91");
+    expect(logs.join(" ")).toContain("goals feature is disabled");
   });
 });

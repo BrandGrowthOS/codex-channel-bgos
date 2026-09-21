@@ -77,6 +77,17 @@ export interface MissionSnapshot {
   createdByAssistant?: boolean;
   miniGoals?: MissionMiniGoal[];
   updatedAt?: string;
+  /** The turn budget the card shows. Absent on a backend that sends none. */
+  effort?: MissionEffort | null;
+  /**
+   * Stage 6. The owner's Keep working instruction for THIS mission, and the
+   * turn limit that goes with it. The goal lane learns both from the
+   * mission_created frame it already receives, so arming a native goal costs
+   * no extra fetch. Absent means a backend older than the columns, which is
+   * read as off.
+   */
+  keepWorking?: boolean;
+  turnCap?: number | null;
 }
 
 export interface CreateMissionInput {
@@ -92,6 +103,16 @@ export interface CreateMissionInput {
   effort?: MissionEffort;
   origin: MissionOrigin;
   firstFeedText?: string;
+  /** The owner's own test for the whole mission, up to 200 characters. */
+  doneWhen?: string;
+  /**
+   * Stage 6. That a runtime loop is working toward this mission right now,
+   * and the limit it stops at. Sent by the goal lane and by nothing else: a
+   * mission created with neither reads as Keep working OFF, which would have
+   * the card draw the switch off for work that is already running.
+   */
+  keepWorking?: boolean;
+  turnCap?: number;
 }
 
 /** One row of a live Steps snapshot, as the backend's ReplaceStepsDto reads it. */
@@ -108,9 +129,37 @@ export interface ReplaceStepsBody {
   steps: StepInput[];
 }
 
+/**
+ * What the RUNTIME counted, reported on progress or on complete.
+ *
+ * Every count is optional on its own and NOTHING here is ever worked out from
+ * when the mission was created: Codex counts elapsed goal time, this daemon
+ * counts the continuation turns it adopted because the protocol has no turn
+ * counter at all, and a number nobody counted is simply not sent. The server
+ * stamps `source` from this pairing's own integration and refuses to read it
+ * from the body, so this client never sends one.
+ */
+export interface MissionRunReportInput {
+  turnsUsed?: number;
+  turnCap?: number;
+  workingMs?: number;
+}
+
+/**
+ * The daemon reporting that its OWN goal loop stopped itself. There is no
+ * owner twin on the wire: an owner has no loop to stop. The server turns Keep
+ * working off, records why, and the mission reads Needs you until the owner
+ * answers; `at` is the server's and is never sent.
+ */
+export interface MissionStoppedInput {
+  kind: "turn_cap" | "no_progress";
+  text?: string;
+}
+
 export interface PatchMissionProgressInput {
   progress?: MissionProgress;
   feedEntry?: { kind: MissionFeedKind; text: string };
+  runReport?: MissionRunReportInput;
 }
 
 /**
@@ -503,11 +552,16 @@ export class BgosApi {
     return r.data.mission;
   }
 
-  /** Mark a mission completed with an optional final summary. */
+  /**
+   * Mark a mission completed with an optional final summary, and with what
+   * the runtime counted when there is a goal behind it. NO verdict block ever
+   * rides this call from this channel: Codex has no separate judge, so a
+   * completion here is the agent's own word and the card says exactly that.
+   */
   async completeMission(
     assistantId: number,
     missionId: number,
-    body: { summary?: string } = {},
+    body: { summary?: string; runReport?: MissionRunReportInput } = {},
   ): Promise<MissionSnapshot> {
     const r = await this.http.patch(
       `integrations/assistants/${assistantId}/missions/${missionId}/complete`,
@@ -527,6 +581,25 @@ export class BgosApi {
       `integrations/assistants/${assistantId}/missions/${missionId}/fail`,
       body,
       options,
+    );
+    return r.data.mission;
+  }
+
+  /**
+   * Report that this daemon's own goal loop stopped itself.
+   *
+   * The mission stays open on purpose: the answer belongs to the owner, so
+   * the card turns to Needs you rather than going quiet. Never a fail, which
+   * would read as Did not finish and close it.
+   */
+  async postMissionStopped(
+    assistantId: number,
+    missionId: number,
+    body: MissionStoppedInput,
+  ): Promise<MissionSnapshot> {
+    const r = await this.http.post(
+      `integrations/assistants/${assistantId}/missions/${missionId}/stopped`,
+      body,
     );
     return r.data.mission;
   }

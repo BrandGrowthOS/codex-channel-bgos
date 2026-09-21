@@ -145,6 +145,59 @@ describe("normalizeMissionEvent", () => {
     expect(frame!.mission.status).toBe("hibernating");
   });
 
+  /**
+   * Stage 6. The goal lane learns the owner's Keep working instruction and
+   * their turn limit from the mission_created frame it already receives, and
+   * nowhere else: there is no extra fetch. A field this normalizer drops is a
+   * cap the daemon cannot hold, so each one is read here in both shapes.
+   */
+  it("carries the effort, the Keep working switch and the turn cap", () => {
+    const base = envelope().mission;
+    const camel = normalizeMissionEvent(
+      "mission_created",
+      envelope({
+        event_type: "mission_created",
+        mission: {
+          ...base,
+          effort: { used: 3, budget: 20, unit: "turns" },
+          keepWorking: true,
+          turnCap: 20,
+        },
+      }),
+    );
+    expect(camel!.mission.effort).toEqual({ used: 3, budget: 20, unit: "turns" });
+    expect(camel!.mission.keepWorking).toBe(true);
+    expect(camel!.mission.turnCap).toBe(20);
+
+    const snake = normalizeMissionEvent(
+      "mission_created",
+      envelope({
+        event_type: "mission_created",
+        mission: { ...base, keep_working: true, turn_cap: 40 },
+      }),
+    );
+    expect(snake!.mission.keepWorking).toBe(true);
+    expect(snake!.mission.turnCap).toBe(40);
+  });
+
+  it("keeps a null turn cap null, because off is not the same as twenty", () => {
+    const frame = normalizeMissionEvent(
+      "mission_updated",
+      envelope({
+        mission: { ...envelope().mission, keepWorking: false, turnCap: null },
+      }),
+    );
+    expect(frame!.mission.keepWorking).toBe(false);
+    expect(frame!.mission.turnCap).toBeNull();
+  });
+
+  it("leaves all three ABSENT on a backend older than the columns", () => {
+    const frame = normalizeMissionEvent("mission_created", envelope({ event_type: "mission_created" }));
+    expect(frame!.mission).not.toHaveProperty("effort");
+    expect(frame!.mission).not.toHaveProperty("keepWorking");
+    expect(frame!.mission).not.toHaveProperty("turnCap");
+  });
+
   it("never throws on junk shapes", () => {
     const junk: unknown[] = [
       null,

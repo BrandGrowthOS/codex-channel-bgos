@@ -166,11 +166,47 @@ describe("BUNDLED_CAPABILITIES mission paragraph", () => {
     expect(flat).not.toContain("interrupt a turn");
   });
 
-  it("keeps the no pause control line, because Codex still cannot enforce one", () => {
-    expect(flat).toContain("This channel has no pause control of its own yet");
+  it("no longer says this channel has no pause control, because now it has one", () => {
+    // Stage 6. The bundled text is appended AFTER the served canon on every
+    // connect, so leaving this sentence in place would ship the model a flat
+    // contradiction of the canon it just read, and of what the daemon now
+    // does: the owner's Pause really holds the native goal.
+    expect(flat).not.toContain("This channel has no pause control of its own yet");
+    expect(flat).toContain("Their Pause really stops the work on this channel");
   });
 
   it("carries no em dash and no en dash", () => {
     expect(BUNDLED_CAPABILITIES).not.toMatch(/[\u2013\u2014]/);
+  });
+});
+
+/**
+ * Stage 6: the goal lane paragraph, word for word against the served canon.
+ *
+ * The bundled hints are appended AFTER the served canon on every connect
+ * (adapter.ts), so the two texts are read together by every agent and any
+ * drift between them is a contradiction the model has to resolve on its own.
+ * The sentences below are copied from CODEX_GOAL_LANE_SENTENCE in
+ * backend/src/integrations/capability-canon.ts.
+ */
+describe("BUNDLED_CAPABILITIES goal lane paragraph", () => {
+  const SERVED_TRUTH = [
+    "Your owner's Keep working arms a native Codex goal on this chat's thread: the host calls thread/goal/set from the mission and adopts the continuation turns the app server starts by itself, so your work reaches your owner between messages exactly as it does inside a turn they asked for.",
+    "You can set one yourself with /goal <condition>, read it with /goal, and stop or hold it with /goal clear, /goal pause and /goal resume.",
+    "The host counts the turns and pauses the goal at your owner's cap, and it reports the working time your runtime counted; there is no separate judge on this channel, so never claim a check ran, never write a checked feed entry and never say a goal was verified.",
+    "When the host tells you the goal stopped, say in one short line where you got to.",
+  ];
+  const flat = BUNDLED_CAPABILITIES.replace(/\s+/g, " ");
+
+  it.each(SERVED_TRUTH)("says, word for word: %s", (sentence) => {
+    expect(flat).toContain(sentence);
+  });
+
+  it("no longer claims autonomous Codex goals are not implemented here", () => {
+    expect(flat).not.toContain("autonomous Codex goals are not implemented");
+  });
+
+  it("lists /goal in the control list itself, not only in the paragraph", () => {
+    expect(flat).toContain("/ps, /steer, /goal and /help are native bridge controls");
   });
 });

@@ -27,6 +27,12 @@ import {
 } from "./thread-map.js";
 import { BGOS_AGENT_HINTS } from "./agent-hints.js";
 import {
+  goalFromNotification,
+  normalizeThreadGoal,
+  type ThreadGoal,
+  type ThreadGoalStatus,
+} from "./goal-protocol.js";
+import {
   browserMcpConfigOverrides,
   resolveBrowserShim,
   type BrowserRelayCredentials,
@@ -72,6 +78,31 @@ export interface CodexHostOptions {
     chatId: number,
     marker: ActivityMarker,
   ) => void | Promise<void>;
+  /**
+   * A thread goal changed, or was cleared (`null`). Routed ABOVE the turn
+   * guard and NEVER pushed into a turn's drain: a goal outlives the turn it
+   * was set in, and most goal updates arrive when this process has no turn
+   * of its own open at all.
+   */
+  onGoalUpdate?: (
+    chatId: number,
+    goal: ThreadGoal | null,
+  ) => void | Promise<void>;
+  /**
+   * A turn this process never started. While a goal is active the app server
+   * runs continuation turns by itself, so `turn/started` and every item
+   * after it arrive for a thread with no entry in `this.active` and the turn
+   * guard drops the whole of that work. Answering with handlers adopts the
+   * turn: the callbacks are the adapter's, and `deliver` takes the result,
+   * because no caller is holding a promise for a turn nobody asked for.
+   * Answering null leaves the turn unadopted, exactly as before.
+   */
+  onAdoptedTurn?: (chatId: number) => AdoptedTurn | null;
+}
+/** What the adapter hands back to take ownership of a continuation turn. */
+export interface AdoptedTurn {
+  callbacks: RunTurnCallbacks;
+  deliver: (result: RunTurnResult) => void | Promise<void>;
 }
 /**
  * One entry of the app server's `turn/plan/updated` notification, exactly as
@@ -130,6 +161,13 @@ interface ActiveTurn {
   /** The newest collab tool call's worker states, read at turn end. */
   lastCollab?: unknown;
   finish: (result: RunTurnResult) => void;
+  /**
+   * Present only on an ADOPTED turn: drop its bookkeeping without delivering
+   * anything. A turn the owner asks for takes the same thread key (the app
+   * server steers a running turn rather than starting a second one), and the
+   * outcome then belongs to the turn that replaced it.
+   */
+  release?: () => void;
 }
 
 export function appServerInput(input: Input): RpcObject[] {
@@ -279,6 +317,18 @@ export class CodexHost {
   }
   isBusy(chatId: number): boolean {
     return this.queues.has(chatId) || this.active.has(this.map[String(chatId)]);
+  }
+  /**
+   * Does this chat already have a thread.
+   *
+   * A goal lives ON a thread, so a chat with none can hold none. Every goal
+   * call goes through `ensureThread`, which would happily CREATE one, so a
+   * control that only means to act on a goal asks this first: no thread, no
+   * goal, nothing to do. The map is loaded from `threads.json`, so the
+   * answer survives a restart exactly as the goal itself does.
+   */
+  hasThread(chatId: number): boolean {
+    return Boolean(this.map[String(chatId)]);
   }
   async listModels(refresh = false): Promise<CodexModel[]> {
     if (
@@ -547,6 +597,64 @@ export class CodexHost {
       input: appServerInput(text),
     });
   }
+  /**
+   * The chat's native Codex goal: set it, read it, clear it.
+   *
+   * Three things bind all three calls.
+   *
+   * The thread always comes from `ensureThread`, never from `runDetached`:
+   * a consult thread is ephemeral and the runtime refuses a goal on one
+   * outright ("ephemeral thread does not support goals"), so a goal set
+   * there could never run anyway.
+   *
+   * Only the keys the caller actually supplied are sent. `thread/goal/set`
+   * is a typed request at the far end, so a key it does not take is a
+   * decode error rather than a field it quietly ignores, and a status only
+   * call (a pause, a resume) must leave the objective exactly where it is.
+   *
+   * Every failure comes back as a sentence, not a stack: "goals feature is
+   * disabled" and a stale sign-in are both things the owner can act on.
+   *
+   * Setting a goal, or setting its status back to active, STARTS A TURN AT
+   * ONCE. Whatever should watch that turn is armed before these are called.
+   */
+  async setGoal(
+    chatId: number,
+    objective: string | null,
+    opts: { status?: ThreadGoalStatus; tokenBudget?: number | null } = {},
+  ): Promise<ThreadGoal | null> {
+    const threadId = await this.ensureThread(chatId);
+    const result = await this.goalRequest("thread/goal/set", {
+      threadId,
+      ...(objective === null ? {} : { objective }),
+      ...(opts.status === undefined ? {} : { status: opts.status }),
+      ...(opts.tokenBudget === undefined
+        ? {}
+        : { tokenBudget: opts.tokenBudget }),
+    });
+    return normalizeThreadGoal(result.goal);
+  }
+  async getGoal(chatId: number): Promise<ThreadGoal | null> {
+    const threadId = await this.ensureThread(chatId);
+    const result = await this.goalRequest("thread/goal/get", { threadId });
+    return normalizeThreadGoal(result.goal);
+  }
+  /** True when there was one to clear. Clearing twice is not an error. */
+  async clearGoal(chatId: number): Promise<boolean> {
+    const threadId = await this.ensureThread(chatId);
+    const result = await this.goalRequest("thread/goal/clear", { threadId });
+    return result.cleared === true;
+  }
+  private async goalRequest(
+    method: string,
+    params: RpcObject,
+  ): Promise<RpcObject> {
+    try {
+      return await this.server.request(method, params);
+    } catch (error) {
+      throw new Error(friendlyCodexError(error));
+    }
+  }
   close(): void {
     this.server.close();
   }
@@ -588,8 +696,14 @@ export class CodexHost {
       ? await this.server.request("thread/fork", {
           ...params,
           threadId: parent,
+          // No `deferGoalContinuation` here. The runtime refuses it together
+          // with `ephemeral` ("`deferGoalContinuation` cannot be combined
+          // with `ephemeral`"), unconditionally, whether or not the source
+          // thread carries a goal, and this branch is the normal one for a
+          // read-only consult against an existing chat. An ephemeral thread
+          // cannot hold a goal at all, so there is no continuation here to
+          // defer.
           excludeTurns: true,
-          deferGoalContinuation: true,
         })
       : await this.server.request("thread/start", {
           ...params,
@@ -823,6 +937,10 @@ export class CodexHost {
             .catch(() => {});
       };
       callbacks.signal?.addEventListener("abort", abort, { once: true });
+      // A continuation turn this process adopted holds the same thread key.
+      // Drop its bookkeeping before taking the thread, or its tick outlives
+      // it and its result is delivered for work this turn now owns.
+      this.active.get(id)?.release?.();
       this.active.set(id, turn);
       void this.server
         .request(
@@ -878,6 +996,15 @@ export class CodexHost {
     // case the owner looks for the line in.
     const signal = markerFromNotification(method, params);
     if (signal) this.routeMarker(String(params.threadId ?? ""), signal);
+    // Goals sit above the guard for the same reason and a stronger one: a
+    // goal update arrives when this.active holds nothing far more often than
+    // it arrives inside a turn, because the runtime reports the goal between
+    // its own continuation turns.
+    const goalSignal = goalFromNotification(method, params);
+    if (goalSignal) this.routeGoal(goalSignal.threadId, goalSignal.goal);
+    // And the continuation turn itself, which nobody here asked for.
+    if (method === "turn/started")
+      this.adoptTurn(String(params.threadId ?? ""));
     const turn = this.active.get(params.threadId);
     if (!turn) return;
     if (method === "turn/started") turn.id = params.turn.id;
@@ -1037,6 +1164,72 @@ export class CodexHost {
     void Promise.resolve()
       .then(() => this.opts.onIdleActivityMarker?.(chatId, signal.marker))
       .catch(() => {});
+  }
+
+  /**
+   * A goal update to the lane, straight away. Never inside a turn's drain:
+   * a goal outlives the turn, and a lane that is slow or wedged must never
+   * be able to hold a turn open.
+   */
+  private routeGoal(threadId: string, goal: ThreadGoal | null): void {
+    const chatId = this.chatForThread(threadId);
+    if (chatId === null || !this.opts.onGoalUpdate) return;
+    void Promise.resolve()
+      .then(() => this.opts.onGoalUpdate?.(chatId, goal))
+      .catch(() => {});
+  }
+
+  /**
+   * Take ownership of a turn this process never started, so the existing
+   * branch table can do the rest of the work for it.
+   *
+   * There is no watchdog here on purpose. The one in `execute` exists
+   * because a caller is awaiting a promise and must not hang forever; a
+   * continuation turn belongs to the runtime, and interrupting a goal turn
+   * for running long would be this daemon deciding the work is over. The
+   * tick still runs, and `close` settles every live turn, so nothing is
+   * left behind when the server goes away.
+   */
+  private adoptTurn(threadId: string): void {
+    if (!threadId || this.active.has(threadId)) return;
+    const chatId = this.chatForThread(threadId);
+    if (chatId === null || !this.opts.onAdoptedTurn) return;
+    let adopted: AdoptedTurn | null = null;
+    try {
+      adopted = this.opts.onAdoptedTurn(chatId) ?? null;
+    } catch {
+      adopted = null;
+    }
+    if (!adopted) return;
+    const { callbacks, deliver } = adopted;
+    let settled = false;
+    const tick = setInterval(() => callbacks.onTick?.(), 4000);
+    const forget = () => {
+      if (settled) return false;
+      settled = true;
+      clearInterval(tick);
+      // Only if this turn is still the registered one: a turn the owner
+      // asked for may already have taken the thread.
+      if (this.active.get(threadId) === turn) this.active.delete(threadId);
+      return true;
+    };
+    const turn: ActiveTurn = {
+      callbacks,
+      messages: new Map(),
+      pending: [],
+      rowIdentity: new Map(),
+      rowStartedAt: new Map(),
+      finish: (result) => {
+        if (!forget()) return;
+        void Promise.allSettled(turn.pending)
+          .then(() => deliver(result))
+          .catch(() => {});
+      },
+      release: () => {
+        forget();
+      },
+    };
+    this.active.set(threadId, turn);
   }
 
   private rememberMarker(key: string): void {

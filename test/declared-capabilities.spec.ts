@@ -13,6 +13,8 @@ import { describe, expect, it } from "vitest";
 import {
   DECLARED_CAPABILITIES,
   MISSION_EVENTS,
+  MISSION_GOAL_CHECKS,
+  MISSION_GOAL_LOOP,
   MISSION_PAUSE,
 } from "../src/declared-capabilities.js";
 
@@ -34,14 +36,25 @@ describe("DECLARED_CAPABILITIES", () => {
     expect(DECLARED_CAPABILITIES.length).toBeLessThanOrEqual(32);
   });
 
-  it("does NOT declare mission_pause in this release", () => {
-    // Stage 6 turns this on together with the native goal lane, which is the
-    // first thing on this channel a pause can actually suspend. Declaring it
-    // now would put a Pause button in the owner's hand that changes nothing
-    // they can see, and Kc's own rule is that a Pause that does nothing is
-    // worse than no Pause. This test fails loudly the day someone adds the
-    // token without adding the enforcement.
-    expect(DECLARED_CAPABILITIES).not.toContain(MISSION_PAUSE);
+  it("declares mission_pause, because a pause now really stops the work", () => {
+    // Stage 5 held this back on purpose: there was no loop to suspend, so a
+    // Pause button would have changed nothing the owner could see. Stage 6
+    // gives the runtime its own goal with a native paused status, and the
+    // owner's Pause holds it. The token and the enforcement ship together,
+    // which is the only order in which either is honest.
+    expect(DECLARED_CAPABILITIES).toContain(MISSION_PAUSE);
+  });
+
+  it("declares mission_goal_loop, because Keep working really arms one", () => {
+    expect(DECLARED_CAPABILITIES).toContain(MISSION_GOAL_LOOP);
+  });
+
+  it("NEVER declares mission_goal_checks, because this channel has no judge", () => {
+    // Codex has no separate checker and is not getting one: it runs a
+    // continuation loop and the model itself decides it is done. Declaring
+    // the token would put a Checked tag on the owner's card for a check that
+    // never ran, which is the exact thing this whole stage exists to stop.
+    expect(DECLARED_CAPABILITIES).not.toContain(MISSION_GOAL_CHECKS);
   });
 
   it("is frozen, so one constant is the single source", () => {

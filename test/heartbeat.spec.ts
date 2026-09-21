@@ -137,7 +137,11 @@ describe("HeartbeatController", () => {
       });
       hb.start();
       try {
-        expect(posts[0]!.capabilities).toEqual(["mission_events"]);
+        expect(posts[0]!.capabilities).toEqual([
+          "mission_events",
+          "mission_goal_loop",
+          "mission_pause",
+        ]);
       } finally {
         hb.stop();
       }
@@ -182,24 +186,34 @@ describe("HeartbeatController", () => {
       try {
         hb.setLastError({ code: "backfill_failed", message: "boom", at: "x" });
         expect(posts).toHaveLength(2);
-        for (const post of posts) expect(post.capabilities).toEqual(["mission_events"]);
+        for (const post of posts)
+          expect(post.capabilities).toEqual([
+            "mission_events",
+            "mission_goal_loop",
+            "mission_pause",
+          ]);
       } finally {
         hb.stop();
       }
     });
 
-    it("does not declare mission_pause in this release", () => {
-      // Stage 6 turns it on with the native goal lane. See
-      // test/declared-capabilities.spec.ts for the reasoning.
+    it("carries the pause and the goal loop, and never the checker", () => {
+      // The beat is where a declaration actually reaches the app, so the
+      // inversion is pinned here as well as at the constant. mission_pause
+      // and mission_goal_loop ship with stage 6's native goal;
+      // mission_goal_checks never does, because there is no separate judge on
+      // this channel and the owner's card must never say there is.
       const posts: HeartbeatDto[] = [];
       const hb = new HeartbeatController({
-        version: "0.7.0",
+        version: "0.8.0",
         capabilities: DECLARED_CAPABILITIES,
         postHeartbeat: async (b) => void posts.push(b),
       });
       hb.start();
       try {
-        expect(posts[0]!.capabilities).not.toContain("mission_pause");
+        expect(posts[0]!.capabilities).toContain("mission_pause");
+        expect(posts[0]!.capabilities).toContain("mission_goal_loop");
+        expect(posts[0]!.capabilities).not.toContain("mission_goal_checks");
       } finally {
         hb.stop();
       }

@@ -2,6 +2,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { CodexHost, RunTurnCallbacks } from "./codex-host.js";
+import { formatGoalSeconds, goalStatusWord, GOAL_DEFAULT_TURN_CAP } from "./goal-lane.js";
+import type { ThreadGoal } from "./goal-protocol.js";
 import type { DispatchArgs } from "./inbound-handler.js";
 import type { Interactions, InteractionContext } from "./interactions.js";
 import type { SessionSettings } from "./session-settings.js";
@@ -24,6 +26,7 @@ export const NATIVE_COMMAND_DESCRIPTIONS = [
   ["fork", "Continue from a copy of this chat's Codex conversation"],
   ["ps", "Show whether this chat has an active Codex response"],
   ["steer", "Send a correction to this chat's running response"],
+  ["goal", "Set a condition Codex works toward until it is met"],
   ["help", "Show supported Codex controls and how to use them"],
 ] as const;
 
@@ -58,7 +61,6 @@ const LOCAL_UI_COMMANDS = new Set([
   "exit",
   "import",
   "side",
-  "goal",
 ]);
 export function normalizeNativeCommand(command: {
   name: string;
@@ -150,6 +152,26 @@ export function usageSummary(response: RpcObject, context?: RpcObject): string {
   return lines.join("\n\n");
 }
 
+/**
+ * One goal, in the runtime's own words. Nothing here is worked out from a
+ * clock: the time is the elapsed goal time the runtime itself counted, and a
+ * count it has not made is simply not printed.
+ */
+export function goalReadout(goal: ThreadGoal | null): string {
+  if (!goal || !goal.objective) {
+    return "No goal is set for this chat. Use `/goal` followed by the condition to set one.";
+  }
+  const lines = ["**Codex goal**", `Objective: ${safe(goal.objective)}`];
+  lines.push(`Status: ${safe(goalStatusWord(goal.status))}`);
+  const timeUsed = formatGoalSeconds(goal.timeUsedSeconds);
+  if (timeUsed) lines.push(`Time used: ${timeUsed}`);
+  if (goal.tokensUsed > 0)
+    lines.push(`Tokens used: ${goal.tokensUsed.toLocaleString("en-US")}`);
+  if (typeof goal.tokenBudget === "number")
+    lines.push(`Token budget: ${goal.tokenBudget.toLocaleString("en-US")}`);
+  return lines.join("\n");
+}
+
 export class NativeCommands {
   private readonly controllers = new Map<number, AbortController>();
   constructor(
@@ -163,6 +185,22 @@ export class NativeCommands {
         prompt: string,
         options?: NativeRunOptions,
       ) => Promise<void>;
+      /**
+       * The native goal lane. `/goal <condition>` goes through it rather than
+       * straight to the host, because the mission has to exist and the lane
+       * has to be watching BEFORE the goal is set: setting one starts a turn
+       * at once, and a turn nobody is watching is dropped on the floor.
+       */
+      goalLane: {
+        setFromChat(input: {
+          assistantId: number;
+          chatId: number;
+          objective: string;
+        }): Promise<number | null>;
+        clearForChat(chatId: number): Promise<boolean>;
+        pauseForChat(chatId: number): Promise<ThreadGoal | null>;
+        resumeForChat(chatId: number): Promise<ThreadGoal | null>;
+      };
     },
   ) {}
 
@@ -253,6 +291,66 @@ export class NativeCommands {
     return true;
   }
 
+  /**
+   * `/goal`, in five forms: set a condition, read it, clear it, hold it and
+   * start it again.
+   *
+   * Only the exact words clear, pause and resume are controls. Anything else
+   * is the owner's own condition, so "/goal clear the design backlog" sets a
+   * goal and does not wipe one, which is what a person typing that sentence
+   * plainly meant.
+   */
+  private async runGoal(
+    args: DispatchArgs,
+    text: string,
+    say: (message: string) => Promise<void>,
+  ): Promise<void> {
+    const lane = this.deps.goalLane;
+    const chatId = args.chatId;
+    const control = text.trim().toLowerCase();
+    if (!text.trim()) {
+      const goal = await this.deps.host.getGoal(chatId);
+      await say(goalReadout(goal));
+      return;
+    }
+    if (control === "clear") {
+      const had = await lane.clearForChat(chatId);
+      await say(
+        had
+          ? "Goal cleared. Codex stops working toward it and answers you normally."
+          : "There was no goal set for this chat.",
+      );
+      return;
+    }
+    if (control === "pause") {
+      const goal = await lane.pauseForChat(chatId);
+      await say(
+        goal
+          ? "Goal held. Codex stops working toward it until you send /goal resume."
+          : "There is no goal set for this chat to hold.",
+      );
+      return;
+    }
+    if (control === "resume") {
+      const goal = await lane.resumeForChat(chatId);
+      await say(
+        goal
+          ? "Goal restarted. Codex is working toward it again."
+          : "There is no goal set for this chat to restart.",
+      );
+      return;
+    }
+    await lane.setFromChat({
+      assistantId: args.assistantId,
+      chatId,
+      objective: text.trim(),
+    });
+    await say(
+      `Goal set. Codex keeps working toward it on its own until it holds, or until it has taken ${GOAL_DEFAULT_TURN_CAP} turns. ` +
+        "Use /goal to see where it is, /goal pause to hold it and /goal clear to stop it.",
+    );
+  }
+
   private async runCommand(
     args: DispatchArgs,
     context: InteractionContext,
@@ -274,11 +372,9 @@ export class NativeCommands {
         ? "HOAI uses its own interface. Use HOAI's Theme and chat settings for appearance."
         : ["logout", "login", "quit", "exit"].includes(name)
           ? "Manage this agent's sign-in and connection in Agent settings → Integration. /stop ends the current response."
-          : name === "goal"
-            ? "Autonomous Codex goals are not enabled in this bridge yet. Use HOAI scheduled tasks or send a bounded task in this chat."
-            : name === "import"
-              ? "Codex does not support /import through a local app-server. /resume lists conversations belonging to this HOAI chat."
-              : "This Codex terminal control is not exposed by this bridge. Use Agent settings for skills and integrations; /help lists supported chat controls.";
+          : name === "import"
+            ? "Codex does not support /import through a local app-server. /resume lists conversations belonging to this HOAI chat."
+            : "This Codex terminal control is not exposed by this bridge. Use Agent settings for skills and integrations; /help lists supported chat controls.";
       await say(where);
       return;
     }
@@ -297,6 +393,10 @@ export class NativeCommands {
         );
       await host.steer(args.chatId, text);
       await say("Correction delivered to the current response.");
+      return;
+    }
+    if (name === "goal") {
+      await this.runGoal(args, text, say);
       return;
     }
     const apply = async (patch: SessionSettings) => {

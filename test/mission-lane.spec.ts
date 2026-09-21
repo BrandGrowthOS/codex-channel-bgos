@@ -142,6 +142,75 @@ describe("MissionLane (Codex todo_list)", () => {
     });
   });
 
+  /**
+   * Stage 6. A chat whose work is a native goal already has a mission, and
+   * the first plan of that goal's own first turn would otherwise create a
+   * SECOND one: attachMission only steps aside for a self reported mission,
+   * and a goal mission is derived like this lane's own.
+   */
+  it("stands down completely for a chat the native goal lane owns", async () => {
+    const lane = new MissionLane(makeApi(baseUrl), {
+      debounceMs: 600,
+      goalOwnsChat: (chatId) => chatId === 42,
+    });
+    lanes.push(lane);
+    const turn = startTurn(lane, {
+      assistantId: 7,
+      chatId: 42,
+      prompt: "Make the page fast",
+    });
+
+    await turn.handleTodoList({
+      chatId: 42,
+      eventType: "item.started",
+      item: todo([
+        { text: "Measure", completed: false },
+        { text: "Fix", completed: false },
+        { text: "Measure again", completed: false },
+      ]),
+    });
+
+    // Not even the active read: this chat is not this lane's at all.
+    expect(server.requests).toHaveLength(0);
+  });
+
+  it("still creates one for a chat the goal lane does not own", async () => {
+    server.stage(
+      "GET",
+      "/api/v1/integrations/assistants/7/missions/active",
+      200,
+      { mission: null },
+    );
+    server.stage(
+      "POST",
+      "/api/v1/integrations/assistants/7/missions",
+      201,
+      { ok: true, mission: mission(101, { current: 0, total: 3, label: "steps" }) },
+    );
+    const lane = new MissionLane(makeApi(baseUrl), {
+      debounceMs: 600,
+      goalOwnsChat: (chatId) => chatId === 42,
+    });
+    lanes.push(lane);
+    const turn = startTurn(lane, {
+      assistantId: 7,
+      chatId: 44,
+      prompt: "Make the page fast",
+    });
+
+    await turn.handleTodoList({
+      chatId: 44,
+      eventType: "item.started",
+      item: todo([
+        { text: "Measure", completed: false },
+        { text: "Fix", completed: false },
+        { text: "Measure again", completed: false },
+      ]),
+    });
+
+    expect(server.requests.map((r) => r.method)).toEqual(["GET", "POST"]);
+  });
+
   it("does not create a mission for a two-step plan", async () => {
     const lane = makeLane();
     const turn = startTurn(lane, {

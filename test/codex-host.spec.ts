@@ -3,7 +3,11 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CodexHost, appServerInput } from "../src/codex-host.js";
+import {
+  CodexHost,
+  appServerInput,
+  type RunTurnResult,
+} from "../src/codex-host.js";
 import { verifyModel } from "../src/setup/verify-model.js";
 
 class Server extends EventEmitter {
@@ -11,11 +15,37 @@ class Server extends EventEmitter {
   next = 0;
   start = vi.fn(async () => {});
   close = vi.fn(() => this.emit("closed", new Error("closed")));
+  /** The one goal this fake holds, as the real server holds one per thread. */
+  goal: any = null;
   request = vi.fn(async (method: string, p: any) => {
     if (method === "thread/start")
       return { thread: { id: `thread-${++this.next}` } };
     if (method === "thread/resume") return { thread: { id: p.threadId } };
     if (method === "turn/start") return { turn: { id: `turn-${p.threadId}` } };
+    if (method === "thread/fork")
+      return { thread: { id: `fork-${++this.next}` } };
+    if (method === "thread/goal/set") {
+      this.goal = {
+        threadId: p.threadId,
+        objective: p.objective ?? this.goal?.objective ?? "",
+        status: p.status ?? this.goal?.status ?? "active",
+        tokenBudget: p.tokenBudget ?? this.goal?.tokenBudget ?? null,
+        tokensUsed: 0,
+        timeUsedSeconds: 7,
+        createdAt: 1789932968,
+        updatedAt: 1789932968,
+        // A field a newer runtime adds, which this daemon must drop rather
+        // than carry through untyped.
+        goalId: "01a0c051-goal",
+      };
+      return { goal: this.goal };
+    }
+    if (method === "thread/goal/get") return { goal: this.goal };
+    if (method === "thread/goal/clear") {
+      const had = this.goal !== null;
+      this.goal = null;
+      return { cleared: had };
+    }
     return {};
   });
   finish(id: string, text: string) {
@@ -298,5 +328,261 @@ describe("native Codex host contracts", () => {
       /runtime needs an update/,
     );
     expect(server.listenerCount("notification")).toBe(1); // only the host listener remains
+  });
+});
+
+/**
+ * The goal half of the host (mission program stage 6).
+ *
+ * Every case here turns on one fact the feasibility gate proved live: while a
+ * goal is active the app server runs turns nobody asked for, so the goal
+ * notifications and the first `turn/started` of a continuation arrive when
+ * `this.active` holds nothing for the thread. The shipped turn guard drops
+ * all of it, which is what these tests stand against.
+ */
+describe("the Codex goal lane's half of the host", () => {
+  let home: string, server: Server, host: CodexHost;
+  let goalUpdates: Array<{ chatId: number; goal: unknown }>;
+  let adopted: number[];
+  let delivered: RunTurnResult[];
+  let cards: Array<{ name: string; status: string }>;
+  let holdGoal: boolean;
+  const liveGoal = (threadId: string, patch: Record<string, unknown> = {}) => ({
+    threadId,
+    objective: "a file named done.txt exists in this folder containing the word done",
+    status: "active",
+    tokenBudget: null,
+    tokensUsed: 0,
+    timeUsedSeconds: 0,
+    createdAt: 1789932968,
+    updatedAt: 1789932968,
+    ...patch,
+  });
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "hoai-goal-"));
+    vi.stubEnv("CODEX_BGOS_HOME", home);
+    goalUpdates = [];
+    adopted = [];
+    delivered = [];
+    cards = [];
+    holdGoal = false;
+    server = new Server();
+    host = new CodexHost({
+      auth: { ok: true, mode: "chatgpt", label: "test" },
+      workdir: home,
+      server: server as any,
+      onGoalUpdate: (chatId, goal) => {
+        goalUpdates.push({ chatId, goal });
+        // A lane that is slow, or wedged, must never hold a turn open.
+        return holdGoal ? new Promise<void>(() => {}) : undefined;
+      },
+      onAdoptedTurn: (chatId) => {
+        adopted.push(chatId);
+        return {
+          callbacks: {
+            onTool: (card) => {
+              cards.push({ name: card.name, status: card.status });
+            },
+          },
+          deliver: (result) => {
+            delivered.push(result);
+          },
+        };
+      },
+    });
+  });
+  afterEach(() => {
+    host.close();
+    vi.unstubAllEnvs();
+    rmSync(home, { recursive: true, force: true });
+  });
+  /** One finished turn, which is what binds this chat to a durable thread. */
+  async function bindThread(chatId: number): Promise<string> {
+    const task = host.runTurn(chatId, "hello");
+    await vi.waitFor(() => expect(server.next).toBeGreaterThan(0));
+    const threadId = `thread-${server.next}`;
+    server.finish(threadId, "hi");
+    await task;
+    return threadId;
+  }
+
+  it("hands a goal update to the lane when no turn of ours is open", async () => {
+    const threadId = await bindThread(5);
+    server.emit("notification", "thread/goal/updated", {
+      threadId,
+      turnId: null,
+      goal: liveGoal(threadId),
+    });
+    await vi.waitFor(() => expect(goalUpdates).toHaveLength(1));
+    expect(goalUpdates[0]).toEqual({ chatId: 5, goal: liveGoal(threadId) });
+    server.emit("notification", "thread/goal/cleared", { threadId });
+    await vi.waitFor(() => expect(goalUpdates).toHaveLength(2));
+    expect(goalUpdates[1]).toEqual({ chatId: 5, goal: null });
+  });
+
+  it("never lets the goal lane hold a turn open, because a goal outlives it", async () => {
+    const threadId = await bindThread(6);
+    holdGoal = true;
+    const task = host.runTurn(6, "work");
+    await vi.waitFor(() =>
+      expect(
+        server.request.mock.calls.filter((c) => c[0] === "turn/start"),
+      ).toHaveLength(2),
+    );
+    server.emit("notification", "thread/goal/updated", {
+      threadId,
+      turnId: "01a0c055-ba0f-7e40-b4fb-a9a7d849539c",
+      goal: liveGoal(threadId, { timeUsedSeconds: 1 }),
+    });
+    await vi.waitFor(() => expect(goalUpdates).toHaveLength(1));
+    server.finish(threadId, "finished");
+    expect((await task).replyText).toBe("finished");
+  });
+
+  it("sets and pauses the goal on the chat's own durable thread", async () => {
+    const threadId = await bindThread(7);
+    const goal = await host.setGoal(7, "done.txt exists and says done");
+    expect(server.request).toHaveBeenLastCalledWith("thread/goal/set", {
+      threadId,
+      objective: "done.txt exists and says done",
+    });
+    expect(goal?.objective).toBe("done.txt exists and says done");
+    expect(goal?.status).toBe("active");
+    // A pause carries the status and nothing else: the objective stays where
+    // it is, and a key this request does not take is a serde error at the
+    // app server rather than a field it quietly ignores.
+    await host.setGoal(7, null, { status: "paused" });
+    expect(server.request).toHaveBeenLastCalledWith("thread/goal/set", {
+      threadId,
+      status: "paused",
+    });
+    await host.setGoal(7, "done.txt exists and says done", {
+      tokenBudget: 120000,
+    });
+    expect(server.request).toHaveBeenLastCalledWith("thread/goal/set", {
+      threadId,
+      objective: "done.txt exists and says done",
+      tokenBudget: 120000,
+    });
+  });
+
+  it("reads the goal back in the lane's own eight field shape", async () => {
+    const threadId = await bindThread(8);
+    expect(await host.getGoal(8)).toBeNull();
+    await host.setGoal(8, "ship the lane");
+    expect(await host.getGoal(8)).toEqual({
+      threadId,
+      objective: "ship the lane",
+      status: "active",
+      tokenBudget: null,
+      tokensUsed: 0,
+      timeUsedSeconds: 7,
+      createdAt: 1789932968,
+      updatedAt: 1789932968,
+    });
+    expect(server.request).toHaveBeenCalledWith("thread/goal/get", {
+      threadId,
+    });
+  });
+
+  it("clears the goal and says whether there was one to clear", async () => {
+    const threadId = await bindThread(9);
+    await host.setGoal(9, "something to finish");
+    expect(await host.clearGoal(9)).toBe(true);
+    expect(server.request).toHaveBeenLastCalledWith("thread/goal/clear", {
+      threadId,
+    });
+    expect(await host.clearGoal(9)).toBe(false);
+  });
+
+  it("never puts a goal on an ephemeral consult thread", async () => {
+    const threadId = await bindThread(10);
+    await host.setGoal(10, "persisted threads only");
+    await host.getGoal(10);
+    await host.clearGoal(10);
+    const goalCalls = server.request.mock.calls.filter((c) =>
+      String(c[0]).startsWith("thread/goal/"),
+    );
+    expect(goalCalls).toHaveLength(3);
+    expect(goalCalls.every((c) => c[1].threadId === threadId)).toBe(true);
+    expect(server.request.mock.calls.some((c) => c[1]?.ephemeral === true)).toBe(
+      false,
+    );
+  });
+
+  it("turns a refused goal into a sentence the owner can act on", async () => {
+    await bindThread(11);
+    const base = server.request.getMockImplementation()!;
+    server.request.mockImplementation(async (method, p) => {
+      if (method === "thread/goal/set")
+        throw new Error(
+          "401 Unauthorized: Missing bearer or basic authentication in header",
+        );
+      return base(method, p);
+    });
+    await expect(host.setGoal(11, "anything")).rejects.toThrow(
+      /sign in again/,
+    );
+  });
+
+  it("adopts a continuation turn the app server started by itself", async () => {
+    const threadId = await bindThread(12);
+    server.emit("notification", "turn/started", {
+      threadId,
+      turn: { id: "01a0c051-997e-7b92-9f2e-472d1c429061", status: "inProgress" },
+    });
+    expect(adopted).toEqual([12]);
+    server.emit("notification", "item/started", {
+      threadId,
+      item: { id: "c1", type: "commandExecution", command: "yarn test" },
+    });
+    server.emit("notification", "item/completed", {
+      threadId,
+      item: { id: "m1", type: "agentMessage", text: "done.txt now says done." },
+    });
+    server.emit("notification", "turn/completed", {
+      threadId,
+      turn: { status: "completed" },
+    });
+    await vi.waitFor(() => expect(delivered).toHaveLength(1));
+    expect(cards).toEqual([{ name: "shell", status: "running" }]);
+    expect(delivered[0].replyText).toBe("done.txt now says done.");
+    expect(delivered[0].turnCompleted).toBe(true);
+    expect(delivered[0].threadId).toBe(threadId);
+  });
+
+  it("forks an invisible consult without asking for a deferred goal continuation", async () => {
+    const threadId = await bindThread(13);
+    const task = host.runDetached(13, "read only consult");
+    await vi.waitFor(() =>
+      expect(
+        server.request.mock.calls.some(
+          (c) => c[0] === "turn/start" && String(c[1].threadId).startsWith("fork-"),
+        ),
+      ).toBe(true),
+    );
+    const fork = server.request.mock.calls.find((c) => c[0] === "thread/fork")![1];
+    expect(fork.threadId).toBe(threadId);
+    expect(fork.ephemeral).toBe(true);
+    expect(fork).not.toHaveProperty("deferGoalContinuation");
+    server.finish(
+      String(
+        server.request.mock.calls.find(
+          (c) => c[0] === "turn/start" && String(c[1].threadId).startsWith("fork-"),
+        )![1].threadId,
+      ),
+      "consulted",
+    );
+    expect((await task).replyText).toBe("consulted");
+  });
+
+  it("leaves the owner's own fork exactly as it was", async () => {
+    const threadId = await bindThread(14);
+    const forked = await host.forkThread(14);
+    expect(forked).toMatch(/^fork-/);
+    expect(server.request).toHaveBeenLastCalledWith("thread/fork", {
+      threadId,
+      cwd: home,
+    });
   });
 });

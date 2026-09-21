@@ -17,7 +17,12 @@
  *     that arrives through either room carries the identical `timestamp`.
  *     That is what makes missionEventKey an exact dedupe key.
  */
-import type { MissionSnapshot, MissionOrigin, MissionStatus } from "./bgos-api.js";
+import type {
+  MissionEffort,
+  MissionSnapshot,
+  MissionOrigin,
+  MissionStatus,
+} from "./bgos-api.js";
 
 export const MISSION_EVENT_TYPES = [
   "mission_created",
@@ -103,6 +108,21 @@ function normalizeMiniGoals(v: unknown): MissionSnapshot["miniGoals"] {
   return goals;
 }
 
+/** The turn budget block, or undefined when the backend sent none. */
+function normalizeEffort(v: unknown): MissionEffort | undefined {
+  if (!isPlainObject(v)) return undefined;
+  return {
+    used: Number(v.used ?? 0),
+    budget: Number(v.budget ?? 0),
+    unit: "turns",
+  };
+}
+
+/** A boolean, or undefined when the field is absent. False is NOT absent. */
+function optionalBoolean(v: unknown): boolean | undefined {
+  return typeof v === "boolean" ? v : undefined;
+}
+
 function normalizeMission(raw: unknown): MissionSnapshot | null {
   if (!isPlainObject(raw)) return null;
   const id = positiveInt(raw.id);
@@ -123,6 +143,17 @@ function normalizeMission(raw: unknown): MissionSnapshot | null {
   const doneWhen = raw.doneWhen ?? raw.done_when;
   const updatedAt = raw.updatedAt ?? raw.updated_at;
   const miniGoals = normalizeMiniGoals(raw.miniGoals ?? raw.mini_goals);
+  // Stage 6. The owner's Keep working instruction and their turn limit reach
+  // the goal lane on the mission frame it already receives, so arming a
+  // native goal needs no extra read. Absent stays ABSENT rather than becoming
+  // false or twenty: a backend older than the columns has not said off, it
+  // has said nothing, and the lane fails closed on nothing.
+  // Read with `in` rather than `??`, because a null cap is a real answer
+  // (Keep working is off) and `??` would turn it back into absent.
+  const keepWorkingRaw =
+    "keepWorking" in raw ? raw.keepWorking : raw.keep_working;
+  const turnCapRaw = "turnCap" in raw ? raw.turnCap : raw.turn_cap;
+  const effort = normalizeEffort(raw.effort);
   return {
     id,
     assistantId: positiveInt(raw.assistantId ?? raw.assistant_id),
@@ -142,6 +173,13 @@ function normalizeMission(raw: unknown): MissionSnapshot | null {
     ...(typeof createdByAssistant === "boolean" ? { createdByAssistant } : {}),
     ...(miniGoals === undefined ? {} : { miniGoals }),
     ...(typeof updatedAt === "string" ? { updatedAt } : {}),
+    ...(effort === undefined ? {} : { effort }),
+    ...(optionalBoolean(keepWorkingRaw) === undefined
+      ? {}
+      : { keepWorking: keepWorkingRaw === true }),
+    ...(turnCapRaw === undefined
+      ? {}
+      : { turnCap: positiveInt(turnCapRaw) || null }),
   };
 }
 

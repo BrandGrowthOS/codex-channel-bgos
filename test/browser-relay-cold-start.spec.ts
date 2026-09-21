@@ -25,6 +25,8 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { CodexAdapter } from "../src/adapter.js";
 import { MeetingLane } from "../src/meeting-lane.js";
+import { MissionControlLane } from "../src/mission-control.js";
+import { normalizeMissionEvent } from "../src/mission-events.js";
 
 const SRC = join(fileURLToPath(new URL("../src", import.meta.url)));
 const TOKEN = "pair-cold-0123456789abcdefghij";
@@ -44,6 +46,17 @@ const THREAD_STARTERS: Record<string, string> = {
   "adapter.ts#executeAndReply": "runAndReply records the pair before queueing",
   "adapter.ts#handleControl": "handleControl records the pair before the ack",
   "meeting-lane.ts#run": "run calls deps.noteChat before the turn",
+  // The goal family. Every one of these reaches `ensureThread` too, because a
+  // goal lives on a thread, so each one can be the first thread a chat gets.
+  "adapter.ts#constructor": "wiring only: the lane calls the host, never this line",
+  "goal-lane.ts#setObjective":
+    "armFromMission: both doors record the pair first (codexDispatch, armGoal)",
+  "goal-lane.ts#pauseForChat": "/goal pause and the frame door, both recorded first",
+  "goal-lane.ts#resumeForChat": "/goal resume and the frame door, both recorded first",
+  "goal-lane.ts#clearForChat": "/goal clear, recorded by codexDispatch first",
+  "goal-lane.ts#clearGoal": "the frame door's clear, recorded by armGoal first",
+  "goal-lane.ts#noteClosed": "calls the private clearGoal above",
+  "native-commands.ts#runGoal": "bare /goal read, recorded by codexDispatch first",
 };
 
 function sourceFiles(dir: string): string[] {
@@ -60,7 +73,8 @@ function sourceFiles(dir: string): string[] {
  * pattern that only knows the plain form is one a new path slips past without
  * anyone meaning to (the reviewer's probe was `host?.runTurn?.(1)`).
  */
-const THREAD_START_CALL = /\.(runTurn|runDetached)\s*\??\.?\s*\(/;
+const THREAD_START_CALL =
+  /\.(runTurn|runDetached|setGoal|getGoal|clearGoal)\s*\??\.?\s*\(/;
 
 /** The nearest class-member declaration above a line, prettier-formatted. */
 function enclosingMethod(lines: string[], index: number): string {
@@ -156,7 +170,7 @@ function adapterFixture(overrides: Record<string, unknown> = {}) {
     },
     ...overrides,
   });
-  return { adapter, seen };
+  return { adapter, seen, askRelay };
 }
 
 function replyHandle() {
@@ -204,10 +218,16 @@ describe("the paths that can start a thread all name the agent first", () => {
       "  plain(chatId: number): void {",
       "    void this.host.runTurn(chatId);",
       "  }",
+      // A goal call starts a thread just as surely: setGoal, getGoal and
+      // clearGoal all go through ensureThread.
+      "  goal(chatId: number): void {",
+      "    void this.host.setGoal(chatId, \"ship it\");",
+      "  }",
       "}",
     ].join("\n");
     expect([...threadStarters("sneaky.ts", mutated).keys()].sort()).toEqual([
       "sneaky.ts#detach",
+      "sneaky.ts#goal",
       "sneaky.ts#plain",
       "sneaky.ts#sneak",
     ]);
@@ -293,6 +313,84 @@ describe("the paths that can start a thread all name the agent first", () => {
     });
     await lane.handle({ meetingId: 3 });
     expect(adapter.host.runTurn).toHaveBeenCalledTimes(1);
+    expect(seen).toEqual([{ chatId: COLD_CHAT, assistantId: 11 }]);
+  });
+
+  it("a typed /goal: the pair is known before the goal starts the thread", async () => {
+    const { adapter, seen, askRelay } = adapterFixture();
+    // `/goal <condition>` is answered by the native command router and never
+    // reaches runAndReply, and the lane behind it sets the goal, which is
+    // what creates this chat's thread.
+    adapter.nativeCommands = {
+      handle: vi.fn(async (args: { chatId: number }) => {
+        askRelay(args.chatId);
+        return true;
+      }),
+    };
+
+    await adapter.codexDispatch({
+      assistantId: 11,
+      chatId: COLD_CHAT,
+      text: "/goal the sign up page loads in under 2 seconds",
+      command: { name: "goal", args: "the sign up page loads in under 2 seconds" },
+      attachments: [],
+      userId: "user_1",
+      messageId: 5,
+      replyHandle: replyHandle(),
+    });
+
+    expect(adapter.nativeCommands.handle).toHaveBeenCalledTimes(1);
+    expect(seen).toEqual([{ chatId: COLD_CHAT, assistantId: 11 }]);
+  });
+
+  it("an owner's Keep working mission: the pair is known before the goal is armed", async () => {
+    const { adapter, seen, askRelay } = adapterFixture();
+    const frame = normalizeMissionEvent("mission_created", {
+      event_type: "mission_created",
+      user_id: "user_1",
+      assistant_id: 11,
+      chat_id: COLD_CHAT,
+      mission: {
+        id: 77,
+        assistantId: 11,
+        title: "Ship the migration",
+        status: "active",
+        origin: "owner",
+        doneWhen: "the migration is applied",
+        keepWorking: true,
+        turnCap: 20,
+      },
+      timestamp: "2026-09-20T12:00:00.000Z",
+    });
+    const lane = new MissionControlLane({
+      host: { steer: vi.fn(async () => {}) },
+      missionLane: {
+        notePaused: vi.fn(),
+        noteResumed: vi.fn(),
+        noteClosed: vi.fn(),
+      },
+      goalLane: {
+        // Arming asks the host to set the goal, which starts the thread.
+        armFromMission: vi.fn(async ({ chatId }: { chatId: number }) => {
+          askRelay(chatId);
+        }),
+        noteUpdated: vi.fn(async () => {}),
+        notePaused: vi.fn(async () => {}),
+        noteResumed: vi.fn(async () => {}),
+        noteClosed: vi.fn(async () => {}),
+      },
+      // A COPY of how the adapter wires the lane, so this case proves the lane
+      // calls the dep and nothing more. That the adapter actually passes it is
+      // pinned on the real constructor by test/adapter-mission-wiring.spec.ts,
+      // and by the type: the dep is required.
+      noteChat: (chatId: number, assistantId: number) =>
+        adapter.noteChatAssistant(chatId, assistantId),
+      chatsForAssistant: () => [],
+      isOwned: () => true,
+    });
+
+    await lane.handle(frame!);
+
     expect(seen).toEqual([{ chatId: COLD_CHAT, assistantId: 11 }]);
   });
 
