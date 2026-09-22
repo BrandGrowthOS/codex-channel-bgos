@@ -238,3 +238,40 @@ describe("BUNDLED_CAPABILITIES turn summary paragraph", () => {
     expect(BUNDLED_CAPABILITIES).not.toMatch(/[\u2013\u2014]/);
   });
 });
+
+/**
+ * Stage 8: the helper row paragraph, word for word against the served
+ * canon's CODEX_HELPERS_SENTENCE.
+ *
+ * Same reason as every describe above it: the bundled text is appended AFTER
+ * the served canon on every connect, so an agent reads both together and any
+ * drift between them is a contradiction it has to resolve by itself. Until
+ * this stage the bundled hints said nothing at all about child agents, so an
+ * agent falling back to them had no idea this host draws them.
+ *
+ * MUTATION PROOF: change one word of the paragraph in src/agent-hints.ts and
+ * the matching sentence below goes red.
+ */
+describe("BUNDLED_CAPABILITIES helper rows paragraph", () => {
+  const SERVED_TRUTH = [
+    "When you spawn a collab agent, this host draws each child as its own row on your tool card, keyed on the child's own thread, and fills that row from the collab item and the agent states it carries: the child's nickname or role as the name, the child's own status as the state, its elapsed time from this host's first sight of it, and its status message as the qualifier while it runs and as the result when it ends.",
+    "This protocol never tells the host which tool a child is using, so the row shows that status line instead of a tool name, and it carries no token count and no way to stop one child.",
+    "Do not narrate your helpers' progress in prose and do not repeat a helper's message in your answer, because the card already carries it.",
+  ];
+  const flat = BUNDLED_CAPABILITIES.replace(/\s+/g, " ");
+
+  it.each(SERVED_TRUTH)("says, word for word: %s", (sentence) => {
+    expect(flat).toContain(sentence);
+  });
+
+  it("promises no token count and no per child stop anywhere", () => {
+    // Both are things this protocol cannot give, and a hint that hinted at
+    // either would have the agent look for a control that is not there.
+    expect(flat).not.toContain("stop one helper");
+    expect(flat).not.toContain("tokens a helper used");
+  });
+
+  it("carries no em dash and no en dash", () => {
+    expect(BUNDLED_CAPABILITIES).not.toMatch(/[\u2013\u2014]/);
+  });
+});

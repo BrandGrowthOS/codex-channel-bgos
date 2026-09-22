@@ -524,6 +524,12 @@ export class BgosApi {
           exitCode?: number;
           linesAdded?: number;
           linesRemoved?: number;
+          // Stage 8 row fields: the row's own identity, the row's own start
+          // (ISO 8601, never the card's clock) and a child agent's last
+          // message, already masked and cut by the sender (types.ts).
+          id?: string;
+          startedAt?: string;
+          result?: string;
         }>;
       };
     },

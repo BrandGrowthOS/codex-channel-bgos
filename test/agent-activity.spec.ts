@@ -331,6 +331,199 @@ describe("the Codex host's activity events", () => {
     expect((await run("running", "interrupted")).length).toBe(0);
   });
   /**
+   * Stage 8: a collab tool call draws the call AND one row per child agent,
+   * and the child's row is keyed on the CHILD's own thread.
+   *
+   * MUTATION PROOFS:
+   *  - stop calling childRowsFromCollabItem in the item branch and the row
+   *    count case goes red
+   *  - key the per turn first sight map on the ITEM id and the second collab
+   *    item case goes red, because the wait call's own receipt replaces the
+   *    spawn call's and the elapsed jumps backwards
+   */
+  it("draws the collab call and one row per child, keyed on the child's thread", async () => {
+    const cards: any[] = [];
+    const task = host.runTurn(17, "delegate", {
+      onTool: (card, itemId) => {
+        cards.push({ card, itemId });
+      },
+    });
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.emit("notification", "item/started", {
+      threadId: "thread-1",
+      turnId: "turn-thread-1",
+      startedAtMs: 1789932968000,
+      item: {
+        id: "col1",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "inProgress",
+        prompt: "Check the migration\nand report back",
+        receiverThreadIds: ["t9"],
+        agentsStates: { t9: { status: "running", message: "Reading src/a.ts" } },
+      },
+    });
+    server.finish("thread-1", "Done");
+    await task;
+
+    expect(cards.map((c) => c.itemId)).toEqual(["col1", "t9"]);
+    // The call row is a tool the agent called, and the child is the only
+    // helper: a call row sent as a helper made the block's header count the
+    // spawn call, so one child read "2 helpers, 1 done".
+    expect(cards[0]!.card.kind).toBeUndefined();
+    expect(cards[0]!.card.args).toBe("Check the migration");
+    expect(cards.filter((c) => c.card.kind === "subagent")).toHaveLength(1);
+    expect(cards[1]!.card).toMatchObject({
+      kind: "subagent",
+      // Nothing has named this child: the fake answers no thread metadata.
+      name: "helper",
+      status: "running",
+      id: "t9",
+      args: "Check the migration",
+      detail: "Reading src/a.ts",
+      startedAt: new Date(1789932968000).toISOString(),
+    });
+    // Not a command row: no chevron, nothing to open, no counts.
+    expect(cards[1]!.card.output).toBeUndefined();
+    expect(cards[1]!.card.exitCode).toBeUndefined();
+  });
+
+  /**
+   * The two sources this plugin has for one child write to the SAME row, and
+   * the child rows are written over whatever was there. A child the runtime
+   * never nicknamed would therefore lose the name its agent path already
+   * gave it and be redrawn as the literal, which reads to the owner as a
+   * helper that changed identity halfway through.
+   *
+   * MUTATION PROOF: stop recording the subAgentActivity name and this goes
+   * red with "helper" where "reviewer.md" was.
+   */
+  /**
+   * A child row is recorded in the turn's row identity map like every other
+   * row, and for the same reason: a progress notification that arrives with
+   * that id afterwards must not re open a row this turn already settled.
+   *
+   * MUTATION PROOF: deliver the child rows without recording their identity
+   * and the refinement below draws a second, running row for the settled
+   * child, so this goes red.
+   */
+  it("never lets a later refinement re open a settled child's row", async () => {
+    const cards: any[] = [];
+    const task = host.runTurn(17, "delegate", {
+      onTool: (card, itemId) => {
+        cards.push({ card, itemId });
+      },
+    });
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.emit("notification", "item/completed", {
+      threadId: "thread-1",
+      turnId: "turn-thread-1",
+      completedAtMs: 1789932983000,
+      item: {
+        id: "col1",
+        type: "collabAgentToolCall",
+        tool: "wait",
+        status: "completed",
+        agentsStates: { t9: { status: "completed", message: "All good." } },
+      },
+    });
+    // A progress line carrying the settled child's own id. Nothing sends one
+    // today, and the row must survive one if anything ever does.
+    server.emit("notification", "item/fileChange/patchUpdated", {
+      threadId: "thread-1",
+      itemId: "t9",
+      changes: [{ path: "src/a.ts", kind: { type: "update" }, diff: "+x" }],
+    });
+    server.finish("thread-1", "Done");
+    await task;
+
+    const rows = cards.filter((c) => c.itemId === "t9");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.card).toMatchObject({ kind: "subagent", status: "done" });
+  });
+
+  it("keeps the name a subAgentActivity already gave a child", async () => {
+    const cards: any[] = [];
+    const task = host.runTurn(17, "delegate", {
+      onTool: (card, itemId) => {
+        cards.push({ card, itemId });
+      },
+    });
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.emit("notification", "item/started", {
+      threadId: "thread-1",
+      turnId: "turn-thread-1",
+      item: {
+        id: "sa1",
+        type: "subAgentActivity",
+        agentPath: "agents/reviewer.md",
+        agentThreadId: "t9",
+        kind: "started",
+      },
+    });
+    server.emit("notification", "item/started", {
+      threadId: "thread-1",
+      turnId: "turn-thread-1",
+      startedAtMs: 1789932968000,
+      item: {
+        id: "col1",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "inProgress",
+        agentsStates: { t9: { status: "running" } },
+      },
+    });
+    server.finish("thread-1", "Done");
+    await task;
+
+    // One row, two sources, one name: the fake here answers no thread
+    // metadata, so the agent path is all anything knows about this child.
+    const rows = cards.filter((c) => c.itemId === "t9");
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.card.name)).toEqual([
+      "reviewer.md",
+      "reviewer.md",
+    ]);
+  });
+
+  it("keeps a child's start at this host's FIRST sight of it", async () => {
+    const cards: any[] = [];
+    const task = host.runTurn(17, "delegate", {
+      onTool: (card, itemId) => {
+        cards.push({ card, itemId });
+      },
+    });
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    const collab = (id: string, startedAtMs: number, tool: string) => {
+      server.emit("notification", "item/started", {
+        threadId: "thread-1",
+        turnId: "turn-thread-1",
+        startedAtMs,
+        item: {
+          id,
+          type: "collabAgentToolCall",
+          tool,
+          status: "inProgress",
+          agentsStates: { t9: { status: "running" } },
+        },
+      });
+    };
+    // The spawn call, then the wait call twenty seconds later. Two items,
+    // one child: the collab item id changes and the child's thread does not.
+    collab("col1", 1789932968000, "spawnAgent");
+    collab("col2", 1789932988000, "wait");
+    server.finish("thread-1", "Done");
+    await task;
+
+    const children = cards.filter((c) => c.itemId === "t9");
+    expect(children).toHaveLength(2);
+    expect(children[1]!.card.startedAt).toBe(children[0]!.card.startedAt);
+    expect(children[0]!.card.startedAt).toBe(
+      new Date(1789932968000).toISOString(),
+    );
+  });
+
+  /**
    * Stage 7: the clock the card closes with is the runtime's own.
    *
    * MUTATION PROOF: leave the `Server` fake's `finish()` sending
@@ -515,6 +708,50 @@ describe("the adapter's activity wiring", () => {
     });
   });
 
+  /**
+   * Stage 8: a CHILD AGENT's row carries three fields no tool row does, and
+   * they reach the card through the same spread as everything else.
+   *
+   * MUTATION PROOF: drop one of the three conditional spreads from the
+   * ordinary turn's `onTool` body and this goes red naming that field.
+   */
+  it("hands a child agent row's own three fields to the card", async () => {
+    const { adapter, reply } = fixture(async (cb) => {
+      await cb.onTool?.(
+        {
+          icon: "\u{1F465}",
+          name: "reviewer",
+          args: "Check the migration",
+          status: "done",
+          kind: "subagent",
+          id: "thread-child-1",
+          startedAt: "2026-09-21T10:00:00.000Z",
+          result: "The migration is safe to apply.",
+          durationMs: 42000,
+        },
+        "thread-child-1",
+      );
+      return { error: null, replyText: "All done", turnCompleted: true };
+    });
+
+    await adapter.executeAndReply(10, 20, "Work", reply);
+
+    expect(adapter.toolProgress.sendToolStart).toHaveBeenCalledWith({
+      assistantId: 10,
+      chatId: 20,
+      toolName: "reviewer",
+      icon: "\u{1F465}",
+      args: "Check the migration",
+      itemId: "thread-child-1",
+      status: "done",
+      kind: "subagent",
+      durationMs: 42000,
+      id: "thread-child-1",
+      startedAt: "2026-09-21T10:00:00.000Z",
+      result: "The migration is safe to apply.",
+    });
+  });
+
   it("notes the turn's clock for the card, before the card is closed", async () => {
     const { adapter, reply } = fixture(async (cb) => {
       await cb.onTool?.({ icon: "⚡", name: "shell", status: "done" }, "cmd1");
@@ -538,6 +775,61 @@ describe("the adapter's activity wiring", () => {
       adapter.toolProgress.noteTurnMeta.mock.invocationCallOrder[0]!;
     const closed = reply.finalizeTurn.mock.invocationCallOrder[0]!;
     expect(noted).toBeLessThan(closed);
+  });
+
+  /**
+   * Stage 8: a helper that outlives the turn keeps the card open.
+   *
+   * A finished card folds, and a helper ticking behind a fold helps nobody,
+   * so the turn end neither closes the card nor writes the turn's minutes
+   * onto it while a child is still working.
+   *
+   * MUTATION PROOF: close the card at a turn end with a live child (drop the
+   * `helpersStillRunning` guard from publishTurnResult) and this goes red.
+   */
+  it("leaves the card open and unclocked while a helper is still working", async () => {
+    const { adapter, reply } = fixture(async (cb) => {
+      await cb.onTool?.(
+        { icon: "\u{1F465}", name: "reviewer", status: "running", kind: "subagent" },
+        "t9",
+      );
+      return {
+        error: null,
+        replyText: "All done",
+        turnCompleted: true,
+        turnStartedAtMs: 1789932968000,
+        turnFinishedAtMs: 1789932983000,
+        helpersStillRunning: true,
+      };
+    });
+
+    await adapter.executeAndReply(10, 20, "Work", reply);
+
+    // The owner still gets the answer; only the card is left running.
+    expect(reply.sendText).toHaveBeenCalledWith("All done");
+    expect(adapter.toolProgress.noteTurnMeta).not.toHaveBeenCalled();
+    expect(reply.finalizeTurn).not.toHaveBeenCalled();
+  });
+
+  it("closes the card as usual when every helper has settled", async () => {
+    const { adapter, reply } = fixture(async (cb) => {
+      await cb.onTool?.(
+        { icon: "\u{1F465}", name: "reviewer", status: "done", kind: "subagent" },
+        "t9",
+      );
+      return {
+        error: null,
+        replyText: "All done",
+        turnCompleted: true,
+        turnStartedAtMs: 1789932968000,
+        turnFinishedAtMs: 1789932983000,
+      };
+    });
+
+    await adapter.executeAndReply(10, 20, "Work", reply);
+
+    expect(adapter.toolProgress.noteTurnMeta).toHaveBeenCalled();
+    expect(reply.finalizeTurn).toHaveBeenCalled();
   });
 
   it("notes nothing when the runtime reported no clock for this turn", async () => {
@@ -681,6 +973,38 @@ describe("an adopted turn's card carries everything an ordinary turn's does", ()
     });
   });
 
+  it("hands a child agent row's three stage 8 fields to the card on the adopted path too", async () => {
+    const adapter = fixture();
+    const adopted = adapter.adoptGoalTurn(20)!;
+
+    await adopted.callbacks.onTool(
+      {
+        icon: "\u{1F465}",
+        name: "reviewer",
+        status: "running",
+        kind: "subagent",
+        id: "thread-child-1",
+        startedAt: "2026-09-21T10:00:00.000Z",
+        detail: "Reading the migration",
+      },
+      "thread-child-1",
+    );
+
+    expect(adapter.toolProgress.sendToolStart).toHaveBeenCalledWith({
+      assistantId: 10,
+      chatId: 20,
+      toolName: "reviewer",
+      icon: "\u{1F465}",
+      args: undefined,
+      itemId: "thread-child-1",
+      status: "running",
+      kind: "subagent",
+      detail: "Reading the migration",
+      id: "thread-child-1",
+      startedAt: "2026-09-21T10:00:00.000Z",
+    });
+  });
+
   it("notes an adopted turn's clock before it closes that turn's card", async () => {
     const adapter = fixture();
     const adopted = adapter.adoptGoalTurn(20)!;
@@ -719,9 +1043,18 @@ describe("an adopted turn's card carries everything an ordinary turn's does", ()
  * shape's own declaration deleted, which is the copy that matters, so it
  * guarded the one file it was there for least.
  *
- * MUTATION PROOF: delete one of the four fields from the declaring block of
- * any one of the three files and this goes red naming that file. Performed on
- * `ToolProgressEntry.output?: string` in src/tool-progress.ts.
+ * Stage 8 adds three more names and one scoping fix. The three copies are
+ * now read at the ROW's own block rather than at the whole `toolProgress`
+ * declaration, because the card's clock is called `startedAt` too: a row's
+ * `startedAt` deleted from `types.ts` would otherwise still be found on the
+ * card's clock two lines above it, and the guard would pass on the copy it
+ * was extended to cover.
+ *
+ * MUTATION PROOFS: delete one of the seven fields from the row block of any
+ * one of the three files and the field case goes red naming that file;
+ * delete a row's own `startedAt` from `types.ts` and the row clock case goes
+ * red while a whole file grep would have stayed green. Performed on
+ * `ToolProgressEntry.output?: string` and on `types.ts`'s row `startedAt?:`.
  */
 describe("the three hand written copies of the row shape agree", () => {
   const COPIES: [string, string][] = [
@@ -729,7 +1062,15 @@ describe("the three hand written copies of the row shape agree", () => {
     ["src/types.ts", "toolProgress?:"],
     ["src/bgos-api.ts", "toolProgress?:"],
   ];
-  const ROW_FIELDS = ["output", "exitCode", "linesAdded", "linesRemoved"];
+  const ROW_FIELDS = [
+    "output",
+    "exitCode",
+    "linesAdded",
+    "linesRemoved",
+    "id",
+    "startedAt",
+    "result",
+  ];
 
   /** The braced block the anchor opens, and nothing else in the file. */
   function declaringBlock(source: string, anchor: string): string {
@@ -748,6 +1089,19 @@ describe("the three hand written copies of the row shape agree", () => {
     throw new Error(`unbalanced block after ${anchor}`);
   }
 
+  /**
+   * The ROW's own block. In `tool-progress.ts` the declaring block IS the
+   * row; in the other two the row is the element type of `tools: Array<...>`
+   * nested inside the payload, and the payload carries the CARD's clock,
+   * which shares a name with a row field.
+   */
+  function rowBlock(source: string, anchor: string): string {
+    const block = declaringBlock(source, anchor);
+    return block.includes("tools: Array<")
+      ? declaringBlock(block, "tools: Array<")
+      : block;
+  }
+
   it("reads the wire shape alone, not the whole file that declares it", () => {
     const source = readFileSync("src/tool-progress.ts", "utf8");
     const block = declaringBlock(source, "export interface ToolProgressEntry");
@@ -763,8 +1117,8 @@ describe("the three hand written copies of the row shape agree", () => {
     }
   });
 
-  it.each(COPIES)("%s declares every stage 7 row field", (file, anchor) => {
-    const block = declaringBlock(readFileSync(file, "utf8"), anchor);
+  it.each(COPIES)("%s declares every optional row field", (file, anchor) => {
+    const block = rowBlock(readFileSync(file, "utf8"), anchor);
     const missing = ROW_FIELDS.filter(
       (field) => !new RegExp(`\\b${field}\\?:`).test(block),
     );
@@ -775,5 +1129,15 @@ describe("the three hand written copies of the row shape agree", () => {
     const block = declaringBlock(readFileSync(file, "utf8"), anchor);
     expect(block).toMatch(/\bstartedAt\?:/);
     expect(block).toMatch(/\bfinishedAt\?:/);
+  });
+
+  it.each(COPIES)("%s declares the ROW's own start, with no partner", (file, anchor) => {
+    const block = rowBlock(readFileSync(file, "utf8"), anchor);
+    // Exactly one, inside the row itself: the card's clock is not this.
+    expect(block.match(/\bstartedAt\?:/g) ?? []).toHaveLength(1);
+    // And no `finishedAt` beside it. A row's start is not half of a pair: a
+    // finished row reports `durationMs`, which is why the platform never
+    // sweeps a row start into the card's both ends or neither rule.
+    expect(block).not.toMatch(/\bfinishedAt\?:/);
   });
 });
