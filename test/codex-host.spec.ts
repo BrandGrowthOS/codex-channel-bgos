@@ -215,6 +215,79 @@ describe("native Codex host contracts", () => {
     expect(result.turnStartedAtMs).toBeUndefined();
     expect(result.turnFinishedAtMs).toBeUndefined();
   });
+  /**
+   * THE WATCHDOG IS A BUDGET FOR SILENCE, NOT FOR THE OWNER'S THINKING.
+   *
+   * An approval may now hold a turn for up to APPROVAL_HOLD_SECONDS (1800 s,
+   * interactions.ts), and this watchdog is armed for 30 minutes from TURN
+   * START, which is always earlier than the card. At the ceiling it therefore
+   * always won: the turn was interrupted, the request answered decline on the
+   * owner's behalf, and the longest wait the card advertises could never be
+   * served. So it pauses while a request is parked and resumes with what is
+   * left.
+   *
+   * MUTATION PROOFS, run by hand against this tree:
+   *  - calling `turn.callbacks.onRequest` in the host's `onRequest` without the
+   *    park/resume wrap turns the parked case red: the turn times out while the
+   *    owner is still holding it.
+   *  - making `resumeWatchdog` a no-op never re-arms the budget, so the parked
+   *    case fails on its own timeout instead of seeing the turn end.
+   *  - parking unconditionally, i.e. never resuming, turns the control case red
+   *    the same way: an ordinary turn would never time out again.
+   *  - parking on EVERY request instead of the owner-facing ones turns the tool
+   *    call case red: a call that never returns would wedge the turn forever.
+   */
+  /** Holds one request open from the moment the turn is registered, which is
+   *  the earliest a card could be raised, and hands back the release. */
+  function parkRequest(method: string) {
+    let release: (value: unknown) => void = () => {};
+    const held = new Promise<unknown>((resolve) => (release = resolve));
+    const base = server.request.getMockImplementation()!;
+    const parked: { promise: Promise<unknown> | null } = { promise: null };
+    server.request.mockImplementation(async (name: string, p: any) => {
+      if (name === "turn/start" && !parked.promise)
+        parked.promise = server.onRequest(method, { threadId: p.threadId });
+      return base(name, p);
+    });
+    const task = host.runDetached(
+      1,
+      "work",
+      { onRequest: () => held },
+      false,
+      50,
+    );
+    return { task, parked, release };
+  }
+
+  it("does not spend the turn's watchdog while the owner holds a request", async () => {
+    const { task, parked, release } = parkRequest(
+      "item/commandExecution/requestApproval",
+    );
+    let done = false;
+    void task.then(() => (done = true));
+    await vi.waitFor(() => expect(parked.promise).not.toBeNull());
+    // Five watchdogs' worth of wall clock with the owner still holding.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(done).toBe(false);
+    release({ decision: "decline" });
+    await parked.promise;
+    // Paused, not cancelled: the remaining budget runs again once the owner is
+    // no longer the thing being waited on.
+    expect((await task).error).toMatch(/timed out/);
+  });
+  it("still counts a tool call, because nobody is holding that one", async () => {
+    // The same never-answered request, with the one method that is the model
+    // talking to itself. A call that hangs is the silence this clock is for.
+    const { task, parked, release } = parkRequest("item/tool/call");
+    await vi.waitFor(() => expect(parked.promise).not.toBeNull());
+    expect((await task).error).toMatch(/timed out/);
+    release({});
+    await parked.promise;
+  });
+  it("still spends the watchdog on a turn with nothing parked", async () => {
+    const result = await host.runDetached(1, "work", {}, false, 50);
+    expect(result.error).toMatch(/timed out/);
+  });
   it("upgrades a legacy thread with tools without deleting its history", async () => {
     host.close();
     writeFileSync(

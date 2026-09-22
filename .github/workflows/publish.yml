@@ -43,8 +43,12 @@ jobs:
           # src/interactions.ts. Against a backend without that column, that
           # clamp and its migration, every Codex approval becomes a thirty
           # minute card for every owner with no setting anywhere to shorten it.
-          # Once that backend is live, drop the version from this list and
-          # promote the already published package by hand:
+          # This list is checked against the HELD-FROM-LATEST: <version> lines
+          # in src/interactions.ts, which are the source side of the same hold
+          # (test/publish-workflow.spec.ts). The two are edited together.
+          # Once that backend is live, drop the version from this list AND its
+          # HELD-FROM-LATEST line, then promote the already published package
+          # by hand:
           #   npm dist-tag add codex-channel-bgos@<version> latest
           HELD_FROM_LATEST="0.10.1"
           DIST_TAG=latest

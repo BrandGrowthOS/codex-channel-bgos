@@ -4,12 +4,36 @@ import {
   Interactions,
   POLL_FAST_MS,
   POLL_FAST_WINDOW_MS,
+  POLL_MAX_SPAN,
   POLL_SLOW_MS,
+  coalesceReads,
   pollIntervalMs,
+  retireOrphanedApprovals,
   storedWaitSeconds,
 } from "../src/interactions.js";
+import type {
+  PendingApprovalEntry,
+  PendingApprovalStore,
+} from "../src/pending-approvals-store.js";
 
 afterEach(() => vi.useRealTimers());
+/**
+ * The durable record of open cards, in memory. The daemon writes this to disk
+ * (pending-approvals-store.ts); a unit test must not, and the behaviour worth
+ * pinning here is what gets recorded and when it is forgotten.
+ */
+function memoryStore(seed: PendingApprovalEntry[] = []): PendingApprovalStore {
+  let entries = [...seed];
+  return {
+    load: () => [...entries],
+    record: (entry) => {
+      if (!entries.some((e) => e.id === entry.id)) entries.push(entry);
+    },
+    clear: (id) => {
+      entries = entries.filter((e) => e.id !== id);
+    },
+  };
+}
 /**
  * `created` is what the POST answers with, which is where the SERVER's own
  * stored wait comes back from. The default carries none, which is an older
@@ -27,10 +51,12 @@ function fixture(created: Record<string, unknown> = { id: 41 }) {
       ) => [] as any[],
     ),
   };
+  const store = memoryStore();
   return {
     c,
     api,
-    bridge: new Interactions(api as any),
+    store,
+    bridge: new Interactions(api as any, store),
     ctx: { assistantId: 9, chatId: 17, userId: "owner", signal: c.signal },
   };
 }
@@ -706,7 +732,7 @@ describe("the durable poll's cadence", () => {
         ) => [] as any[],
       ),
     };
-    const bridge = new Interactions(api as any);
+    const bridge = new Interactions(api as any, memoryStore());
     const ctx = {
       assistantId: 9,
       chatId: 17,
@@ -786,5 +812,239 @@ describe("the durable poll's cadence", () => {
     c.abort();
     await vi.runAllTimersAsync();
     await answer;
+  });
+});
+
+/**
+ * ONE READ FOR THE ROWS THAT FALL DUE TOGETHER.
+ *
+ * Pinning the durable read to its own row fixed a real defect (a row pushed off
+ * the tail page is a request whose dropped click can never heal) and cost one
+ * request per PENDING ROW. An ask carousel is up to four rows in one chat on
+ * one clock, so that was four times the traffic on the very path the backoff
+ * had just quietened. Their ids are consecutive, so one page covers them.
+ *
+ * MUTATION PROOFS, run by hand against this tree:
+ *  - going back to one read per row (calling readDue once per entry) turns the
+ *    carousel case red at four calls instead of one.
+ *  - sizing the page by the COUNT of due rows instead of their id span turns
+ *    the interleaved case red: the oldest question falls off the page.
+ *  - raising POLL_MAX_SPAN past the gap in the split case, or lowering it below
+ *    four, turns the grouping case red.
+ */
+describe("the durable poll coalesces the rows of one chat", () => {
+  it("covers consecutive rows with one read and splits distant ones", () => {
+    expect(coalesceReads([41, 42, 43, 44])).toEqual([[41, 42, 43, 44]]);
+    // Unsorted in, ascending out: the map's insertion order is not the ids'.
+    expect(coalesceReads([44, 41])).toEqual([[41, 44]]);
+    // A lone approval and a carousel in the same chat are not one page: the
+    // span between them is wider than any read should carry.
+    expect(coalesceReads([41, 900, 901])).toEqual([[41], [900, 901]]);
+    expect(coalesceReads([41, 41 + POLL_MAX_SPAN])).toEqual([
+      [41],
+      [41 + POLL_MAX_SPAN],
+    ]);
+    expect(coalesceReads([41, 41 + POLL_MAX_SPAN - 1])).toEqual([
+      [41, 41 + POLL_MAX_SPAN - 1],
+    ]);
+    expect(POLL_MAX_SPAN).toBe(12);
+  });
+
+  /** Four questions in one chat, with the ids a real carousel gets. */
+  function carouselFixture(ids: number[]) {
+    const c = new AbortController();
+    let next = 0;
+    const api = {
+      agentRequest: vi.fn(async () => ({ id: ids[next++] })),
+      getMessages: vi.fn(
+        async (
+          _chatId: number,
+          _userId: string,
+          _cursor?: { beforeId?: number; limit?: number },
+        ) => [] as any[],
+      ),
+    };
+    return {
+      c,
+      api,
+      bridge: new Interactions(api as any, memoryStore()),
+      ctx: { assistantId: 9, chatId: 17, userId: "owner", signal: c.signal },
+    };
+  }
+  const fourQuestions = [1, 2, 3, 4].map((n) => ({
+    text: `Q${n}`,
+    options: [{ label: "Blue", value: "blue" }],
+  }));
+
+  it("costs one request per tick for a four question carousel, not four", async () => {
+    vi.useFakeTimers();
+    const { bridge, ctx, api, c } = carouselFixture([41, 42, 43, 44]);
+    const answers = bridge.ask(ctx, fourQuestions);
+    await tick();
+    api.getMessages.mockClear();
+    await vi.advanceTimersByTimeAsync(POLL_FAST_MS);
+    expect(api.getMessages).toHaveBeenCalledTimes(1);
+    // Newest first from beforeId, four rows deep: the whole carousel.
+    expect(api.getMessages).toHaveBeenCalledWith(17, "owner", {
+      beforeId: 45,
+      limit: 4,
+    });
+    c.abort();
+    await vi.runAllTimersAsync();
+    await answers;
+  });
+
+  it("still reaches the oldest question when the chat interleaved a message", async () => {
+    vi.useFakeTimers();
+    // A message landed between the second and third question, so the four rows
+    // are no longer four ids wide. A page sized to the COUNT would stop at 43
+    // and leave question one unread for the rest of its life.
+    const { bridge, ctx, api, c } = carouselFixture([41, 42, 44, 45]);
+    const answers = bridge.ask(ctx, fourQuestions);
+    await tick();
+    api.getMessages.mockClear();
+    await vi.advanceTimersByTimeAsync(POLL_FAST_MS);
+    expect(api.getMessages).toHaveBeenCalledTimes(1);
+    expect(api.getMessages).toHaveBeenCalledWith(17, "owner", {
+      beforeId: 46,
+      limit: 5,
+    });
+    c.abort();
+    await vi.runAllTimersAsync();
+    await answers;
+  });
+});
+
+/**
+ * A RESTART TAKES THE TURN AND LEAVES THE CARD.
+ *
+ * The app server is a child of this daemon, so a restart mid wait ends the turn
+ * and the request together and nothing can ever answer the card. The backend
+ * refuses a late tap only by the row's `expired` flag, which its sweep sets at
+ * the row's own deadline: with a stored wait of up to half an hour that is up
+ * to half an hour of a live card for a turn that no longer exists. The owner
+ * taps Allow, the card says "You said yes, this once", and nothing runs.
+ *
+ * MUTATION PROOFS, run by hand against this tree:
+ *  - dropping the `store.record` call in approve() empties the recorded case.
+ *  - dropping the `store.clear` call after the wait leaves the entry behind and
+ *    the same case goes red on the second assertion.
+ *  - skipping the PATCH in retireOrphanedApprovals, or sending anything but
+ *    `options: []`, turns the boot case red.
+ *  - treating an answered or expired row as still open turns the settled case
+ *    red: it would strip the buttons off a card the owner already answered.
+ *  - clearing the entry when the PATCH throws turns the retry case red.
+ */
+describe("a restart retires the cards it can no longer answer", () => {
+  it("records the card while the owner holds it and forgets it when the wait ends", async () => {
+    vi.useFakeTimers();
+    const { bridge, ctx, store, c } = fixture({
+      id: 41,
+      approvalMeta: { wait_seconds: 600 },
+    });
+    const answer = bridge.approve(
+      ctx,
+      "item/commandExecution/requestApproval",
+      { command: "deploy" },
+    );
+    await tick();
+    expect(store.load()).toEqual([
+      {
+        id: 41,
+        chatId: 17,
+        assistantId: 9,
+        userId: "owner",
+        at: expect.any(Number),
+      },
+    ]);
+    c.abort();
+    await vi.runAllTimersAsync();
+    await answer;
+    // This process answered it, so nothing is left for a later boot to retire.
+    expect(store.load()).toEqual([]);
+  });
+
+  it("takes the buttons off a card nothing is listening to any more", async () => {
+    const api = {
+      agentRequest: vi.fn(async () => ({})),
+      getMessages: vi.fn(async () => [
+        { message: { id: 41, messageType: "approval_request" } },
+      ]),
+    };
+    const store = memoryStore([
+      { id: 41, chatId: 17, assistantId: 9, userId: "owner", at: Date.now() },
+    ]);
+    expect(await retireOrphanedApprovals(api as any, store)).toBe(1);
+    expect(api.getMessages).toHaveBeenCalledWith(17, "owner", {
+      beforeId: 42,
+      limit: 1,
+    });
+    expect(api.agentRequest).toHaveBeenCalledWith("PATCH", "messages/41", 9, {
+      options: [],
+    });
+    expect(store.load()).toEqual([]);
+  });
+
+  it("leaves a card the owner answered, or the server flagged, exactly as it is", async () => {
+    const rows: Record<number, any> = {
+      41: { id: 41, answeredAt: "now", answerPayload: { optionId: 7 } },
+      42: { id: 42, approvalMeta: { expired: true } },
+    };
+    const api = {
+      agentRequest: vi.fn(async () => ({})),
+      getMessages: vi.fn(
+        async (_chatId: number, _userId: string, cursor: any) => [
+          { message: rows[cursor.beforeId - 1] },
+        ],
+      ),
+    };
+    const store = memoryStore([
+      { id: 41, chatId: 17, assistantId: 9, userId: "owner", at: Date.now() },
+      { id: 42, chatId: 17, assistantId: 9, userId: "owner", at: Date.now() },
+    ]);
+    expect(await retireOrphanedApprovals(api as any, store)).toBe(0);
+    // An answered card keeps its record of what the owner chose, and an expired
+    // one already refuses a tap: a PATCH here would only rewrite history.
+    expect(api.agentRequest).not.toHaveBeenCalled();
+    expect(store.load()).toEqual([]);
+  });
+
+  it("keeps the entry when the retiring write fails, so the next boot tries again", async () => {
+    const api = {
+      agentRequest: vi.fn(async () => {
+        throw new Error("offline");
+      }),
+      getMessages: vi.fn(async () => {
+        throw new Error("offline");
+      }),
+    };
+    const store = memoryStore([
+      { id: 41, chatId: 17, assistantId: 9, userId: "owner", at: Date.now() },
+    ]);
+    expect(await retireOrphanedApprovals(api as any, store)).toBe(0);
+    // A row it could not read is treated as still open: retiring a card that
+    // was already answered costs nothing, a live card for a dead turn is the
+    // whole defect.
+    expect(api.agentRequest).toHaveBeenCalledTimes(1);
+    expect(store.load()).toHaveLength(1);
+  });
+
+  it("forgets a card too old for the server's own sweep to still be pending", async () => {
+    const api = {
+      agentRequest: vi.fn(async () => ({})),
+      getMessages: vi.fn(async () => []),
+    };
+    const store = memoryStore([
+      {
+        id: 41,
+        chatId: 17,
+        assistantId: 9,
+        userId: "owner",
+        at: Date.now() - 25 * 60 * 60 * 1000,
+      },
+    ]);
+    expect(await retireOrphanedApprovals(api as any, store)).toBe(0);
+    expect(api.getMessages).not.toHaveBeenCalled();
+    expect(store.load()).toEqual([]);
   });
 });

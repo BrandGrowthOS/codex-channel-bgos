@@ -56,7 +56,7 @@ import type { BrowserRelayCredentials } from "./browser-mcp.js";
 import { HOAI_TOOLS, HoaiTools, type ToolContext } from "./hoai-tools.js";
 import { BGOS_AGENT_HINTS } from "./agent-hints.js";
 import { DECLARED_CAPABILITIES } from "./declared-capabilities.js";
-import { unescapeButton } from "./interactions.js";
+import { retireOrphanedApprovals, unescapeButton } from "./interactions.js";
 import type { VoiceRpcFrame } from "./voice-rpc.js";
 import { VoiceRpcHandler } from "./hoai-shared/voice-rpc.js";
 import { buildCodexInput, type InboundFileForCodex } from "./inbound-input.js";
@@ -504,6 +504,11 @@ export class CodexAdapter {
     // agent's AGENTS.md (best-effort; falls back to the bundled copy).
     void this.loadServedCapabilities();
 
+    // Take the buttons off any approval card whose turn died with the last
+    // daemon. Best-effort and never awaited: a card left tappable is a real
+    // defect, a slow boot is a worse one.
+    void this.sweepOrphanedApprovals();
+
     const ok = await this.refreshIdentity();
     if (ok) {
       this.identityReady = true;
@@ -552,6 +557,31 @@ export class CodexAdapter {
       await this.commandsSync.flushAll();
     } catch {
       /* best-effort on shutdown */
+    }
+  }
+
+  /**
+   * The boot half of the approval restart contract (see the restart note in
+   * interactions.ts approve()). The app server is our child, so a restart takes
+   * the turn and the request with it and nothing can ever answer the card the
+   * owner is still looking at. This retires those cards. Never throws. Named
+   * apart from the imported sweep it calls, so the call below is unmistakably
+   * the module function and not this method.
+   */
+  private async sweepOrphanedApprovals(): Promise<void> {
+    try {
+      const retired = await retireOrphanedApprovals(this.api);
+      if (retired > 0)
+        // eslint-disable-next-line no-console
+        console.log(
+          `${LOG} retired ${retired} approval card(s) left open by a previous run`,
+        );
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `${LOG} could not retire approval cards from a previous run:`,
+        err instanceof Error ? err.message : String(err),
+      );
     }
   }
 
