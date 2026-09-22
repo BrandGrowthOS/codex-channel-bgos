@@ -862,6 +862,215 @@ describe("ToolProgressOrchestrator (stage 7: output, the exit code, the counts, 
   });
 });
 
+/**
+ * Stage 8 of the Mission program (C-34): a child agent is a row, so a row now
+ * carries its own identity, its own start and what the child finally said.
+ *
+ * MUTATION PROOFS, one per test below:
+ *  - dropping any one of the three copies in `sendToolStart` breaks the
+ *    "only when they are present" case
+ *  - adding `id` or `startedAt` to what `clearsDetail` deletes breaks the
+ *    sticky case, which is the one that matters live: a child reports a
+ *    state, then a terminal state with no qualifier, and its start must not
+ *    vanish with its state word
+ *  - counting every row in `buildSummary` turns "Used 3 tools" into
+ *    "Used 7 tools" and breaks the summary case
+ *  - dropping rows from the BACK in `clipToCap` breaks the cap case, because
+ *    the children are the newest rows on the card
+ */
+describe("ToolProgressOrchestrator (stage 8: a child agent's row)", () => {
+  let server: MockBgosServer;
+  let baseUrl: string;
+
+  beforeEach(async () => {
+    server = new MockBgosServer();
+    baseUrl = await server.start();
+  });
+  afterEach(async () => {
+    await server.stop();
+  });
+
+  /** The card's own PATCH bodies, newest last. */
+  function patches(cardId: number) {
+    return server.requests.filter(
+      (r) => r.method === "PATCH" && r.url.endsWith(`/api/v1/messages/${cardId}`),
+    );
+  }
+
+  it("carries the three stage 8 row fields, and only when they are present", async () => {
+    server.stage("POST", "/api/v1/messages", 201, { id: 9900 });
+    server.stage("PATCH", "/api/v1/messages/9900", 200, { id: 9900 });
+    const orch = new ToolProgressOrchestrator(makeApi(baseUrl), {
+      debounceMs: 0,
+    });
+
+    await orch.sendToolStart({
+      assistantId: 1,
+      chatId: 90,
+      toolName: "scout",
+      icon: "👥",
+      itemId: "thread-child-1",
+      status: "done",
+      kind: "subagent",
+      id: "thread-child-1",
+      startedAt: "2026-09-21T10:00:00.000Z",
+      result: "ran 42 tests, all green",
+      durationMs: 12000,
+    });
+    await orch.sendToolStart({
+      assistantId: 1,
+      chatId: 90,
+      toolName: "Read",
+      itemId: "rd1",
+      status: "done",
+    });
+
+    const first = (server.requests[0]!.body as any).toolProgress.tools[0];
+    expect(first).toEqual({
+      icon: "👥",
+      name: "scout",
+      status: "done",
+      kind: "subagent",
+      id: "thread-child-1",
+      startedAt: "2026-09-21T10:00:00.000Z",
+      result: "ran 42 tests, all green",
+      durationMs: 12000,
+    });
+    // An ordinary tool row carries none of the three, as an empty string or
+    // otherwise: absent means absent on this wire.
+    const second = (patches(9900).at(-1)!.body as any).toolProgress.tools[1];
+    expect(second).toEqual({ icon: "📖", name: "Read", status: "done" });
+  });
+
+  it("keeps a child row's id and start across a merge, and clears only its state word", async () => {
+    server.stage("POST", "/api/v1/messages", 201, { id: 9910 });
+    server.stage("PATCH", "/api/v1/messages/9910", 200, { id: 9910 });
+    const orch = new ToolProgressOrchestrator(makeApi(baseUrl), {
+      debounceMs: 0,
+    });
+
+    await orch.sendToolStart({
+      assistantId: 1,
+      chatId: 91,
+      toolName: "scout",
+      icon: "👥",
+      itemId: "thread-child-1",
+      status: "running",
+      kind: "subagent",
+      id: "thread-child-1",
+      startedAt: "2026-09-21T10:00:00.000Z",
+      detail: "reading the spec",
+    });
+    // The same child, now finished, with no qualifier left to report.
+    await orch.sendToolStart({
+      assistantId: 1,
+      chatId: 91,
+      toolName: "scout",
+      icon: "👥",
+      itemId: "thread-child-1",
+      status: "done",
+      kind: "subagent",
+      id: "thread-child-1",
+      startedAt: "2026-09-21T10:00:00.000Z",
+      result: "all green",
+      durationMs: 12000,
+    });
+
+    const row = (patches(9910).at(-1)!.body as any).toolProgress.tools[0];
+    expect(row).toEqual({
+      icon: "👥",
+      name: "scout",
+      status: "done",
+      kind: "subagent",
+      id: "thread-child-1",
+      startedAt: "2026-09-21T10:00:00.000Z",
+      result: "all green",
+      durationMs: 12000,
+    });
+  });
+
+  it("counts the agent's own tools in the summary, and never its helpers", async () => {
+    server.stage("POST", "/api/v1/messages", 201, { id: 9920 });
+    server.stage("PATCH", "/api/v1/messages/9920", 200, { id: 9920 });
+    const orch = new ToolProgressOrchestrator(makeApi(baseUrl), {
+      debounceMs: 5000,
+    });
+
+    for (const name of ["Bash", "Read", "Edit"]) {
+      await orch.sendToolStart({
+        assistantId: 1,
+        chatId: 92,
+        toolName: name,
+        itemId: `tool-${name}`,
+        status: "done",
+      });
+    }
+    for (let i = 1; i <= 4; i += 1) {
+      await orch.sendToolStart({
+        assistantId: 1,
+        chatId: 92,
+        toolName: "helper",
+        icon: "👥",
+        itemId: `child-${i}`,
+        status: "done",
+        kind: "subagent",
+        id: `child-${i}`,
+      });
+    }
+    await orch.finalizeTurn(92);
+
+    const body = patches(9920).at(-1)!.body as any;
+    // Seven rows on the card, three of them the agent's own work.
+    expect(body.toolProgress.tools).toHaveLength(7);
+    expect(body.text).toBe("Used 3 tools · Bash, Read, Edit");
+  });
+
+  it("holds the card inside the 50 row cap with child rows in the same array", async () => {
+    server.stage("POST", "/api/v1/messages", 201, { id: 9930 });
+    server.stage("PATCH", "/api/v1/messages/9930", 200, { id: 9930 });
+    const orch = new ToolProgressOrchestrator(makeApi(baseUrl), {
+      debounceMs: 5000,
+    });
+
+    for (let i = 1; i <= 48; i += 1) {
+      await orch.sendToolStart({
+        assistantId: 1,
+        chatId: 93,
+        toolName: `tool-${i}`,
+        itemId: `item-${i}`,
+        status: "done",
+      });
+    }
+    for (let i = 1; i <= 4; i += 1) {
+      await orch.sendToolStart({
+        assistantId: 1,
+        chatId: 93,
+        toolName: "helper",
+        icon: "👥",
+        itemId: `child-${i}`,
+        status: "running",
+        kind: "subagent",
+        id: `child-${i}`,
+        startedAt: "2026-09-21T10:00:00.000Z",
+      });
+    }
+    await orch.finalizeTurn(93);
+
+    const tools = (patches(9930).at(-1)!.body as any).toolProgress
+      .tools as Array<Record<string, unknown>>;
+    expect(tools).toHaveLength(50);
+    // The children are the newest rows, so the front drop keeps every one.
+    expect(tools.slice(-4).map((t) => t.id)).toEqual([
+      "child-1",
+      "child-2",
+      "child-3",
+      "child-4",
+    ]);
+    expect(tools[0]).toMatchObject({ name: "earlier", args: "3 earlier tools" });
+    expect(tools[1]!.name).toBe("tool-4");
+  });
+});
+
 /** Halves of a surrogate pair with no partner. Postgres refuses these. */
 function loneSurrogates(text: string): number {
   let lone = 0;
