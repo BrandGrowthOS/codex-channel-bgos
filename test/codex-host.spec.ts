@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CodexHost,
+  OWNER_BLOCKING_TOOLS,
   appServerInput,
+  waitsForOwner,
   type RunTurnResult,
 } from "../src/codex-host.js";
 import { verifyModel } from "../src/setup/verify-model.js";
@@ -236,17 +238,28 @@ describe("native Codex host contracts", () => {
    *    the same way: an ordinary turn would never time out again.
    *  - parking on EVERY request instead of the owner-facing ones turns the tool
    *    call case red: a call that never returns would wedge the turn forever.
+   *  - dropping ANY ONE entry from the park list (renaming it, typo'ing it,
+   *    deleting it) turns that entry's row of the table below red. The list was
+   *    trusted rather than enforced until then: only the approval method was
+   *    exercised, so the other three could be broken with the suite green.
+   *  - the `ask_user_input` row is the one that was WRONG rather than untested.
+   *    It is a HOAI tool, so it arrives as an ordinary `item/tool/call` and the
+   *    method-only gate let the watchdog run while the blocking carousel sat in
+   *    front of the owner for up to 600 s.
    */
   /** Holds one request open from the moment the turn is registered, which is
    *  the earliest a card could be raised, and hands back the release. */
-  function parkRequest(method: string) {
+  function parkRequest(method: string, extra: Record<string, unknown> = {}) {
     let release: (value: unknown) => void = () => {};
     const held = new Promise<unknown>((resolve) => (release = resolve));
     const base = server.request.getMockImplementation()!;
     const parked: { promise: Promise<unknown> | null } = { promise: null };
     server.request.mockImplementation(async (name: string, p: any) => {
       if (name === "turn/start" && !parked.promise)
-        parked.promise = server.onRequest(method, { threadId: p.threadId });
+        parked.promise = server.onRequest(method, {
+          threadId: p.threadId,
+          ...extra,
+        });
       return base(name, p);
     });
     const task = host.runDetached(
@@ -259,35 +272,87 @@ describe("native Codex host contracts", () => {
     return { task, parked, release };
   }
 
-  it("does not spend the turn's watchdog while the owner holds a request", async () => {
-    const { task, parked, release } = parkRequest(
-      "item/commandExecution/requestApproval",
-    );
-    let done = false;
-    void task.then(() => (done = true));
-    await vi.waitFor(() => expect(parked.promise).not.toBeNull());
-    // Five watchdogs' worth of wall clock with the owner still holding.
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    expect(done).toBe(false);
-    release({ decision: "decline" });
-    await parked.promise;
-    // Paused, not cancelled: the remaining budget runs again once the owner is
-    // no longer the thing being waited on.
-    expect((await task).error).toMatch(/timed out/);
-  });
-  it("still counts a tool call, because nobody is holding that one", async () => {
-    // The same never-answered request, with the one method that is the model
-    // talking to itself. A call that hangs is the silence this clock is for.
-    const { task, parked, release } = parkRequest("item/tool/call");
-    await vi.waitFor(() => expect(parked.promise).not.toBeNull());
-    expect((await task).error).toMatch(/timed out/);
-    release({});
-    await parked.promise;
-  });
+  it.each([
+    ["item/commandExecution/requestApproval", {}],
+    ["item/fileChange/requestApproval", {}],
+    ["item/permissions/requestApproval", {}],
+    ["item/tool/requestUserInput", {}],
+    ["mcpServer/elicitation/request", {}],
+    ["item/tool/call", { tool: "ask_user_input" }],
+  ] as Array<[string, Record<string, unknown>]>)(
+    "does not spend the turn's watchdog while the owner holds %s %j",
+    async (method, extra) => {
+      const { task, parked, release } = parkRequest(method, extra);
+      let done = false;
+      void task.then(() => (done = true));
+      await vi.waitFor(() => expect(parked.promise).not.toBeNull());
+      // Five watchdogs' worth of wall clock with the owner still holding.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      expect(done).toBe(false);
+      release({ decision: "decline" });
+      await parked.promise;
+      // Paused, not cancelled: the remaining budget runs again once the owner is
+      // no longer the thing being waited on.
+      expect((await task).error).toMatch(/timed out/);
+    },
+  );
+  it.each([[{}], [{ tool: "send_message" }]])(
+    "still counts a tool call %j, because nobody is holding that one",
+    async (extra) => {
+      // The same never-answered request, with the one method that is the model
+      // talking to itself. A call that hangs is the silence this clock is for.
+      const { task, parked, release } = parkRequest("item/tool/call", extra);
+      await vi.waitFor(() => expect(parked.promise).not.toBeNull());
+      expect((await task).error).toMatch(/timed out/);
+      release({});
+      await parked.promise;
+    },
+  );
   it("still spends the watchdog on a turn with nothing parked", async () => {
     const result = await host.runDetached(1, "work", {}, false, 50);
     expect(result.error).toMatch(/timed out/);
   });
+  /**
+   * The park list names ONE blocking HOAI tool, and the runtime hands the gate
+   * a tool name and nothing else, so the pairing is checked against the source
+   * that actually blocks: every `case` in `HoaiTools.call` that delegates to
+   * `this.interactions` must be in OWNER_BLOCKING_TOOLS. Add a second blocking
+   * tool there and forget the park list, and this goes red rather than the
+   * owner's carousel silently spending the watchdog again.
+   */
+  it("keeps OWNER_BLOCKING_TOOLS equal to the tools that block on a person", () => {
+    const source = readFileSync(
+      new URL("../src/hoai-tools.ts", import.meta.url),
+      "utf8",
+    );
+    const body = source.slice(source.indexOf("  async call("));
+    expect(body.length).toBeGreaterThan(0);
+    const blocking = new Set<string>();
+    let current: string | null = null;
+    for (const line of body.split("\n")) {
+      const label = /^\s*case "([a-z0-9_]+)":/.exec(line);
+      if (label) current = label[1];
+      if (line.includes("this.interactions.") && current) blocking.add(current);
+    }
+    expect([...blocking].sort()).toEqual([...OWNER_BLOCKING_TOOLS].sort());
+  });
+  it.each([
+    ["item/commandExecution/requestApproval", {}, true],
+    ["item/fileChange/requestApproval", {}, true],
+    ["item/permissions/requestApproval", {}, true],
+    ["item/tool/requestUserInput", {}, true],
+    ["mcpServer/elicitation/request", {}, true],
+    ["item/tool/call", { tool: "ask_user_input" }, true],
+    ["item/tool/call", { tool: "send_message" }, false],
+    ["item/tool/call", {}, false],
+    ["item/tool/call", { tool: 7 }, false],
+    ["turn/started", {}, false],
+  ] as Array<[string, Record<string, unknown>, boolean]>)(
+    "waitsForOwner(%s, %j) is %s",
+    (method, params, expected) => {
+      expect(waitsForOwner(method, params)).toBe(expected);
+    },
+  );
   it("upgrades a legacy thread with tools without deleting its history", async () => {
     host.close();
     writeFileSync(

@@ -221,6 +221,51 @@ interface ActiveTurn {
 }
 
 /**
+ * The HOAI tools that BLOCK on a PERSON, i.e. an `item/tool/call` whose answer
+ * is an owner's tap rather than the model's own work.
+ *
+ * Today that is exactly one: `ask_user_input`, BGOS's blocking modal carousel.
+ * It holds for up to 600 s (`Interactions.ask` clamps `timeout_seconds` to
+ * that, see interactions.ts), and it is the highest traffic owner facing wait
+ * this daemon has, so leaving it off the park list below is the difference
+ * between the turn waiting with the owner and the turn expiring with the modal
+ * still open in front of them.
+ *
+ * It is a NAME list because the runtime hands the park gate a tool name and
+ * nothing else. The list is enforced rather than trusted: a case in
+ * test/codex-host.spec.ts reads hoai-tools.ts and fails if a tool there
+ * delegates to `this.interactions` without appearing here.
+ */
+export const OWNER_BLOCKING_TOOLS = new Set(["ask_user_input"]);
+
+/**
+ * Does this app server request put a question in front of a PERSON?
+ *
+ * Four shapes do: an approval card (any method ending `/requestApproval`), the
+ * runtime's native ask carousel (`item/tool/requestUserInput`), an MCP
+ * elicitation, and a call to one of the OWNER_BLOCKING_TOOLS above. In all
+ * four the app server child is blocked on the RPC for as long as the answer
+ * takes, so the turn is not stalled, it is waiting on its owner, and that time
+ * is not the watchdog's to spend (see execute).
+ *
+ * Every OTHER tool call is the model talking to itself, and a call that never
+ * comes back is exactly the silence the watchdog exists to end.
+ */
+export function waitsForOwner(method: string, params: RpcObject): boolean {
+  if (
+    method.endsWith("/requestApproval") ||
+    method === "item/tool/requestUserInput" ||
+    method === "mcpServer/elicitation/request"
+  )
+    return true;
+  return (
+    method === "item/tool/call" &&
+    typeof params.tool === "string" &&
+    OWNER_BLOCKING_TOOLS.has(params.tool)
+  );
+}
+
+/**
  * The turn clock off the runtime's own `Turn`, in epoch milliseconds.
  *
  * `startedAt` and `completedAt` are UNIX SECONDS on this protocol and both are
@@ -435,18 +480,14 @@ export class CodexHost {
       const turn = this.active.get(params.threadId);
       if (turn?.callbacks.onRequest) {
         // Only the requests that put a question in front of a PERSON park the
-        // turn's watchdog: an approval card, an ask carousel, an MCP
-        // elicitation. The app server child is blocked on the RPC for as long
-        // as the answer takes, so the turn is not stalled, it is waiting on its
-        // owner, and that time is not the watchdog's to spend (see execute).
-        // A tool call is deliberately NOT in this list. Nobody is holding it,
-        // so a call that never comes back is exactly the silence the watchdog
-        // exists to end.
-        const waitsForOwner =
-          method.endsWith("/requestApproval") ||
-          method === "item/tool/requestUserInput" ||
-          method === "mcpServer/elicitation/request";
-        if (!waitsForOwner) return turn.callbacks.onRequest(method, params);
+        // turn's watchdog: an approval card, an ask carousel (the runtime's
+        // native one AND the `ask_user_input` HOAI tool, which arrives as an
+        // ordinary `item/tool/call`), an MCP elicitation. See waitsForOwner.
+        // An ordinary tool call is deliberately NOT parked. Nobody is holding
+        // it, so a call that never comes back is exactly the silence the
+        // watchdog exists to end.
+        if (!waitsForOwner(method, params))
+          return turn.callbacks.onRequest(method, params);
         turn.parkWatchdog?.();
         try {
           return await turn.callbacks.onRequest(method, params);
