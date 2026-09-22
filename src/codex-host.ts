@@ -205,12 +205,64 @@ interface ActiveTurn {
   childBaseName: Map<string, string>;
   finish: (result: RunTurnResult) => void;
   /**
+   * Stop and restart this turn's watchdog around a request that is parked in
+   * front of the owner. Only a turn this host RUNS owns a watchdog, so an
+   * adopted turn carries neither and both call sites are optional.
+   */
+  parkWatchdog?: () => void;
+  resumeWatchdog?: () => void;
+  /**
    * Present only on an ADOPTED turn: drop its bookkeeping without delivering
    * anything. A turn the owner asks for takes the same thread key (the app
    * server steers a running turn rather than starting a second one), and the
    * outcome then belongs to the turn that replaced it.
    */
   release?: () => void;
+}
+
+/**
+ * The HOAI tools that BLOCK on a PERSON, i.e. an `item/tool/call` whose answer
+ * is an owner's tap rather than the model's own work.
+ *
+ * Today that is exactly one: `ask_user_input`, BGOS's blocking modal carousel.
+ * It holds for up to 600 s (`Interactions.ask` clamps `timeout_seconds` to
+ * that, see interactions.ts), and it is the highest traffic owner facing wait
+ * this daemon has, so leaving it off the park list below is the difference
+ * between the turn waiting with the owner and the turn expiring with the modal
+ * still open in front of them.
+ *
+ * It is a NAME list because the runtime hands the park gate a tool name and
+ * nothing else. The list is enforced rather than trusted: a case in
+ * test/codex-host.spec.ts reads hoai-tools.ts and fails if a tool there
+ * delegates to `this.interactions` without appearing here.
+ */
+export const OWNER_BLOCKING_TOOLS = new Set(["ask_user_input"]);
+
+/**
+ * Does this app server request put a question in front of a PERSON?
+ *
+ * Four shapes do: an approval card (any method ending `/requestApproval`), the
+ * runtime's native ask carousel (`item/tool/requestUserInput`), an MCP
+ * elicitation, and a call to one of the OWNER_BLOCKING_TOOLS above. In all
+ * four the app server child is blocked on the RPC for as long as the answer
+ * takes, so the turn is not stalled, it is waiting on its owner, and that time
+ * is not the watchdog's to spend (see execute).
+ *
+ * Every OTHER tool call is the model talking to itself, and a call that never
+ * comes back is exactly the silence the watchdog exists to end.
+ */
+export function waitsForOwner(method: string, params: RpcObject): boolean {
+  if (
+    method.endsWith("/requestApproval") ||
+    method === "item/tool/requestUserInput" ||
+    method === "mcpServer/elicitation/request"
+  )
+    return true;
+  return (
+    method === "item/tool/call" &&
+    typeof params.tool === "string" &&
+    OWNER_BLOCKING_TOOLS.has(params.tool)
+  );
 }
 
 /**
@@ -426,8 +478,23 @@ export class CodexHost {
       if (method === "currentTime/read")
         return { currentTimeAt: Math.floor(Date.now() / 1000) };
       const turn = this.active.get(params.threadId);
-      if (turn?.callbacks.onRequest)
-        return turn.callbacks.onRequest(method, params);
+      if (turn?.callbacks.onRequest) {
+        // Only the requests that put a question in front of a PERSON park the
+        // turn's watchdog: an approval card, an ask carousel (the runtime's
+        // native one AND the `ask_user_input` HOAI tool, which arrives as an
+        // ordinary `item/tool/call`), an MCP elicitation. See waitsForOwner.
+        // An ordinary tool call is deliberately NOT parked. Nobody is holding
+        // it, so a call that never comes back is exactly the silence the
+        // watchdog exists to end.
+        if (!waitsForOwner(method, params))
+          return turn.callbacks.onRequest(method, params);
+        turn.parkWatchdog?.();
+        try {
+          return await turn.callbacks.onRequest(method, params);
+        } finally {
+          turn.resumeWatchdog?.();
+        }
+      }
       // Missing handlers never authorize a request by default.
       if (method.endsWith("/requestApproval"))
         return method.includes("permissions")
@@ -1050,7 +1117,29 @@ export class CodexHost {
     return new Promise<RunTurnResult>((resolveTurn) => {
       let finished = false;
       const tick = setInterval(() => callbacks.onTick?.(), 4000);
-      const watchdog = setTimeout(() => {
+      /**
+       * THE WATCHDOG DOES NOT COUNT TIME THE OWNER IS HOLDING.
+       *
+       * This clock exists for a turn that has stopped making progress, and a
+       * request parked in front of a person is the opposite of that: the app
+       * server child is blocked on the RPC, waiting for an answer this daemon
+       * offers to hold for up to APPROVAL_HOLD_SECONDS (interactions.ts). Left
+       * running, this timer always won that race, so the longest wait the card
+       * advertises could never actually be served: the turn was interrupted,
+       * `approve()` took its aborted branch and the owner's yes arrived at a
+       * turn that had already declined on their behalf.
+       *
+       * So the budget is PAUSED while any request of this turn is open and
+       * re-armed with what is left when the last one ends. It is a budget for
+       * the model's own silence, and nothing else. A request that is never
+       * answered cannot wedge the turn forever either: the daemon's own
+       * backstop ends the wait at the stored number plus slack, the request
+       * returns decline, and the remaining budget starts running again.
+       */
+      let remainingMs = timeoutMs;
+      let armedAt = Date.now();
+      let parked = 0;
+      const expire = () => {
         if (turn.id)
           void this.server
             .request("turn/interrupt", { threadId: id, turnId: turn.id })
@@ -1058,7 +1147,21 @@ export class CodexHost {
         turn.finish(
           this.result(id, turn, false, "Codex timed out. Retry your message."),
         );
-      }, timeoutMs);
+      };
+      let watchdog = setTimeout(expire, remainingMs);
+      // Counted, not a flag: a turn can hold an approval and an ask carousel at
+      // the same time, and the first one to come back must not restart the
+      // clock while the other is still in front of the owner.
+      const parkWatchdog = () => {
+        if (finished || parked++ > 0) return;
+        clearTimeout(watchdog);
+        remainingMs = Math.max(0, remainingMs - (Date.now() - armedAt));
+      };
+      const resumeWatchdog = () => {
+        if (finished || parked === 0 || --parked > 0) return;
+        armedAt = Date.now();
+        watchdog = setTimeout(expire, remainingMs);
+      };
       const turn: ActiveTurn = {
         callbacks,
         messages: new Map(),
@@ -1068,6 +1171,8 @@ export class CodexHost {
         childFirstSeen: new Map(),
         childState: new Map(),
         childBaseName: new Map(),
+        parkWatchdog,
+        resumeWatchdog,
         finish: (result) => {
           if (finished) return;
           finished = true;

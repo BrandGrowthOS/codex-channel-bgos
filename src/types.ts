@@ -148,6 +148,21 @@ export interface ApprovalMeta {
   agent_route: string;
   risk: "low" | "medium" | "high";
   request_id: string;
+  /**
+   * The longest this daemon can hold its own side of the request open, in
+   * seconds (APPROVAL_HOLD_SECONDS). It is an offer, not the real wait: the
+   * server stores the smaller of this and the owner's per-agent choice, its
+   * expiry sweep reads the row's stored value, and that stored number rides
+   * back on the created message. Absent means a backend older than the field,
+   * which gives the row the generic 60 s.
+   */
+  wait_seconds?: number;
+  /**
+   * Set by the SERVER's sweep once the row is past its deadline, and it is the
+   * only thing that makes a tap on the card refuse. The daemon reads it back
+   * off the row rather than running a clock of its own; see the two clocks
+   * note in interactions.ts approve().
+   */
   expired?: boolean;
 }
 
@@ -343,5 +358,12 @@ export interface BgosMessageEnvelope {
     text: string | null;
     messageType: string;
     createdAt: string;
+    /**
+     * Present on an `approval_request` row. `expired` is the server's verdict
+     * that the request is dead, and the durable poll in interactions.ts reads
+     * it here: it is why a daemon stops listening at the same moment the card
+     * stops accepting a tap, instead of a few minutes earlier.
+     */
+    approvalMeta?: ApprovalMeta;
   };
 }

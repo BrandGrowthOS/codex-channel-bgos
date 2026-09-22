@@ -401,15 +401,30 @@ export class BgosApi {
     return r.data;
   }
 
-  /** Fetch the recent message history for a chat - used by the daemon to
-   *  rebuild conversation context before dispatching to a stateless
-   *  gateway. Backend returns up to 100 entries ASC by created_at. */
+  /**
+   * Fetch the recent message history for a chat - used by the daemon to
+   * rebuild conversation context before dispatching to a stateless gateway.
+   *
+   * `cursor` pins the page to a row the caller already knows about. With no
+   * cursor the route answers with the NEWEST 50 rows, which is right for a
+   * transcript read and wrong for a poll waiting on ONE row: `beforeId` filters
+   * id < beforeId and the page is taken newest first, so beforeId = id + 1 puts
+   * that row first whatever else has landed since. `Interactions.readPending`
+   * is why this exists; see the trap written out there.
+   */
   async getMessages(
     chatId: number,
     userId: string,
+    cursor?: { beforeId?: number; limit?: number },
   ): Promise<BgosMessageEnvelope[]> {
     const r = await this.http.get(`chats/${chatId}/messages`, {
-      params: { userId },
+      params: {
+        userId,
+        ...(cursor?.beforeId === undefined
+          ? {}
+          : { beforeId: cursor.beforeId }),
+        ...(cursor?.limit === undefined ? {} : { limit: cursor.limit }),
+      },
     });
     const rows = r.data?.messages;
     return Array.isArray(rows) ? (rows as BgosMessageEnvelope[]) : [];

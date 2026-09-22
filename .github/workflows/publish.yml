@@ -34,6 +34,30 @@ jobs:
           else
             echo "publish=false" >> "$GITHUB_OUTPUT"
           fi
+          # Versions that must NOT be advertised as latest on npm. A version
+          # lands in this list when its own source needs a backend that is not
+          # deployed yet, so an install of latest would reach hosts too early.
+          # 0.10.1: the daemon offers APPROVAL_HOLD_SECONDS (1800 s) and relies
+          # on the BGOS backend clamping it to the owner's per agent choice.
+          # Read the RELEASE ORDER comment above APPROVAL_HOLD_SECONDS in
+          # src/interactions.ts. Against a backend without that column, that
+          # clamp and its migration, every Codex approval becomes a thirty
+          # minute card for every owner with no setting anywhere to shorten it.
+          # This list is checked against the HELD-FROM-LATEST: <version> lines
+          # in src/interactions.ts, which are the source side of the same hold
+          # (test/publish-workflow.spec.ts). The two are edited together.
+          # Once that backend is live, drop the version from this list AND its
+          # HELD-FROM-LATEST line, then promote the already published package
+          # by hand:
+          #   npm dist-tag add codex-channel-bgos@<version> latest
+          HELD_FROM_LATEST="0.10.1"
+          DIST_TAG=latest
+          for held in $HELD_FROM_LATEST; do
+            if [ "$CURRENT" = "$held" ]; then
+              DIST_TAG=next
+            fi
+          done
+          echo "dist_tag=$DIST_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Install
         if: steps.ver.outputs.publish == 'true'
@@ -49,9 +73,20 @@ jobs:
 
       - name: Publish
         if: steps.ver.outputs.publish == 'true'
-        run: npm publish --access public
+        run: npm publish --access public --tag "${{ steps.ver.outputs.dist_tag }}"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Held from latest
+        if: steps.ver.outputs.publish == 'true' && steps.ver.outputs.dist_tag != 'latest'
+        run: |
+          VERSION="${{ steps.ver.outputs.current }}"
+          TAG="${{ steps.ver.outputs.dist_tag }}"
+          echo "::warning::$VERSION was published under the npm dist tag $TAG, not latest."
+          echo "Nothing installs it by default. Promote it by hand once the BGOS"
+          echo "backend that clamps the approval hold is deployed, then remove the"
+          echo "version from HELD_FROM_LATEST in this workflow:"
+          echo "  npm dist-tag add codex-channel-bgos@$VERSION latest"
 
       - name: Tag release
         if: steps.ver.outputs.publish == 'true' && github.event_name == 'push'
