@@ -7,6 +7,7 @@ import type {
   InboundClickPayload,
 } from "./types.js";
 import type { RpcObject } from "./app-server.js";
+import { buildDiffForWire } from "./file-change-wire.js";
 import {
   diskPendingApprovals,
   type PendingApprovalStore,
@@ -86,8 +87,16 @@ interface Pending {
  * chips are codes the app has to relabel, and its plan mode chip reads a chat
  * column that does not exist yet. Published as latest ahead of the stage 3
  * backend it would ship the approval hold sideways AND draw a card nobody can
- * read. Retire BOTH lines together, in this order: stage 1 backend live, then
- * 0.10.1; stage 3 backend live, then 0.11.0.
+ * read.
+ *
+ * 0.12.0 INHERITS both and adds a third. Its file change card sends
+ * `approvalMeta.change_summary` and `approvalMeta.diff`, and the backend's
+ * `ApprovalMetaDto` strips a field it does not declare with a 201 and no
+ * error: against a backend without the stage 4 DTO this daemon would mask and
+ * cap a patch for nothing, the card would still read "Apply file changes",
+ * and nothing anywhere would say why. Retire the THREE lines one at a time,
+ * in this order: stage 1 backend live, then 0.10.1; stage 3 backend live,
+ * then 0.11.0; stage 4 backend live, then 0.12.0.
  *
  * The lines below are the machine readable half of that hold, and the publish
  * workflow's HELD_FROM_LATEST list must agree with them exactly
@@ -96,6 +105,7 @@ interface Pending {
  *
  * HELD-FROM-LATEST: 0.10.1
  * HELD-FROM-LATEST: 0.11.0
+ * HELD-FROM-LATEST: 0.12.0
  */
 export const APPROVAL_HOLD_SECONDS = 1800;
 
@@ -577,6 +587,7 @@ export class Interactions {
     params: RpcObject,
   ): Promise<unknown> {
     const permissions = method.includes("permissions");
+    const fileChange = method.includes("fileChange");
     const denied = permissions
       ? { permissions: {}, scope: "turn" }
       : { decision: "decline" };
@@ -591,6 +602,12 @@ export class Interactions {
           : { decision: "accept" },
       ],
     ];
+    // THE FALLBACK IS THE DESIGN FOR A FILE CHANGE, not an oversight. A live
+    // probe on app server 0.154.0 shows `availableDecisions` ABSENT on every
+    // `item/fileChange/requestApproval`, so `!available` is what puts the
+    // session chip on that card, and it is the right chip: the runtime's own
+    // schema lists acceptForSession among a file change's decisions. Reading a
+    // field that is never sent would silently cost the owner the tier.
     const available = params.availableDecisions;
     if (permissions || !available || available.includes("acceptForSession"))
       choices.push([
@@ -628,13 +645,42 @@ export class Interactions {
       callbackData: `ea:${value}:${id}`,
       style: value === "deny" ? "danger" : "success",
     }));
-    const command = String(
-      params.command ??
-        params.reason ??
-        (permissions
-          ? JSON.stringify(params.permissions)
-          : "Apply file changes"),
-    );
+    // WHAT THIS CARD IS ASKING, in the owner's words rather than the wire's.
+    //
+    // The host joins the `fileChange` item the runtime announced on
+    // `item/started` onto these params by `itemId` (codex-host.ts,
+    // withFileChanges). The join can MISS: nothing in the protocol orders the
+    // notification in front of the request, ten milliseconds was measured on a
+    // live probe and not promised, and a miss must never hold this RPC. So a
+    // null wire is not an error, it is this method exactly as it behaved
+    // before stage 4, down to the literal below.
+    const wire = fileChange
+      ? buildDiffForWire(params.changes, {
+          cwd: typeof params.cwd === "string" ? params.cwd : undefined,
+        })
+      : null;
+    // `tool` is the file list, one `path (kind)` per line, and `text` below is
+    // the ask sentence. They differ on purpose: an app that predates this
+    // stage draws the ask as the title and the list in its mono panel, which
+    // is already better than "Apply file changes" over nothing.
+    const command = wire
+      ? wire.tool
+      : String(
+          params.command ??
+            params.reason ??
+            (permissions
+              ? JSON.stringify(params.permissions)
+              : "Apply file changes"),
+        );
+    // The runtime's own sentence wins whenever it fills one. The live probe
+    // saw `reason: null` on every file change request, EXPLICITLY null rather
+    // than absent, which `??` also falls through, and no run had a signed in
+    // model in it; so the fallback is what the owner reads today and the ask
+    // sentence is what they read from here on.
+    const reasonText =
+      typeof params.reason === "string" && params.reason.trim().length > 0
+        ? params.reason
+        : null;
     // Typed, so the compiler actually checks the wire names. `agentRequest`
     // takes an `unknown` body, so an object literal inlined below would let a
     // camelCase `waitSeconds` through and the backend would silently strip it:
@@ -652,6 +698,15 @@ export class Interactions {
       request_id: id,
       wait_seconds: APPROVAL_HOLD_SECONDS,
     };
+    // The same typing argument, for the same reason: `change_summary` and
+    // `diff` are fields on ApprovalMeta and never an inline literal, because
+    // the backend's whitelist drops an undeclared or misspelled key with a
+    // 201 and no error. `diff` is left off entirely when nothing survived the
+    // mask and the cap; the plain line ships either way.
+    if (wire) {
+      approvalMeta.change_summary = wire.change_summary;
+      if (wire.diff) approvalMeta.diff = wire.diff;
+    }
     const result = await this.api.agentRequest(
       "POST",
       "messages",
@@ -660,7 +715,9 @@ export class Interactions {
         assistantId: context.assistantId,
         chatId: context.chatId,
         sender: "assistant",
-        text: params.reason ?? "Codex needs your approval to continue.",
+        text: wire
+          ? (reasonText ?? wire.ask)
+          : (params.reason ?? "Codex needs your approval to continue."),
         messageType: "approval_request",
         options,
         approvalMeta,

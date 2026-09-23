@@ -167,6 +167,68 @@ export interface MessageOption {
   style?: "default" | "success" | "danger" | "primary";
 }
 
+/**
+ * The five words a file change kind reaches the wire as. `rename` is the one
+ * the change word alone does not tell you: the app server sends it as an
+ * `update` carrying a `move_path`.
+ */
+export type ChangeKind = "add" | "update" | "delete" | "rename" | "binary";
+
+/** Whether `diff.files` carries an entry for this file, and why not. */
+export type PreviewState = "ok" | "binary" | "too_large";
+
+export interface ChangeSummaryFile {
+  /**
+   * `shortenPath` form, at most 200 characters, and UNIQUE across the rows of
+   * one card: the app pairs a row to its patch by this string, so the daemon
+   * widens a collision back out (or numbers it) before it reaches the wire.
+   */
+  path: string;
+  kind: ChangeKind;
+  /** Lines this file's own patch added and removed, from `countDiffLines`. */
+  added: number;
+  removed: number;
+  preview: PreviewState;
+}
+
+/**
+ * The plain line every file change card carries, whatever the owner's "Show
+ * technical details" switch says. The app draws it from these numbers, so
+ * they are the one part of this stage that is never gated and never cut: at
+ * most 20 rows, with a 21st file counted in `file_count` and in the totals.
+ */
+export interface ChangeSummary {
+  file_count: number;
+  total_added: number;
+  total_removed: number;
+  files: ChangeSummaryFile[];
+}
+
+export interface DiffWireFile {
+  path: string;
+  /** Unified patch text, masked whole and then cut at its HEAD. */
+  patch: string;
+  truncated: boolean;
+  /**
+   * Lines the CAP did not deliver from the end of this file, counting a line
+   * the cut landed INSIDE: a line that arrived in pieces did not arrive, and
+   * the card's cut note is drawn from this number alone.
+   */
+  omitted_lines: number;
+  /** Lines the REDACTOR rewrote or removed in this file. */
+  hidden_lines: number;
+}
+
+export interface DiffWire {
+  /**
+   * Any file cut short, dropped for budget, unreadable (binary or no body),
+   * or past the 20 row limit: in other words, the panels here are not the
+   * whole change.
+   */
+  truncated: boolean;
+  files: DiffWireFile[];
+}
+
 export interface ApprovalMeta {
   tool: string;
   agent_route: string;
@@ -188,6 +250,25 @@ export interface ApprovalMeta {
    * note in interactions.ts approve().
    */
   expired?: boolean;
+  /**
+   * WHAT THE OWNER IS BEING ASKED TO AUTHORIZE, on a file change card only.
+   *
+   * Both fields are DECLARED HERE for the same reason every other field is:
+   * `agentRequest` takes an `unknown` body and the backend's whitelist strips
+   * anything its DTO does not declare, silently, with a 201. An inline object
+   * literal would let `changeSummary` or a misspelled key through this side
+   * and be dropped on that side, and the owner would keep reading "Apply file
+   * changes" with nothing anywhere saying why.
+   *
+   * `change_summary` rides every file change card whose item this daemon saw;
+   * `diff` rides beside it only when a patch body survived the mask and the
+   * cap, and the app shows it only with the agent's own "Show technical
+   * details" switch on. Both ride the CREATE and never a PATCH: the backend's
+   * update path replaces the whole column and four of its fields are
+   * required, so a diff only PATCH is a 400 and a full one resends the wait.
+   */
+  change_summary?: ChangeSummary;
+  diff?: DiffWire;
 }
 
 /**
@@ -282,7 +363,9 @@ export interface OutboundMessagePayload {
        * older backend drops what it does not know and an older app draws the
        * row as before. `kind` absent reads as "tool". The last four are what
        * a command printed, the code it exited with and the lines an edit
-       * moved; a diff BODY still never leaves the machine.
+       * moved; a diff BODY never leaves the machine on a ROW. The one case it
+       * does is the file change approval card: see rule 2 in
+       * `activity-markers.ts` and `ApprovalMeta.diff` above.
        *
        * This is the SECOND of three hand written copies of this row shape
        * (`ToolProgressEntry` in tool-progress.ts and the inline type in
