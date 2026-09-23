@@ -392,13 +392,31 @@ export class HoaiTools {
                     // knows one and neutral otherwise, so an older client
                     // loses nothing by us sending it.
                     //
-                    // NORMALIZED, never passed through. The declaration's enum
-                    // is advisory and nothing at runtime holds a model to it,
-                    // and the backend's CreateMessageOptionDto carries an
-                    // `@IsIn` that 400s the WHOLE reply over one bad value:
-                    // the text, the files and every other chip go with it. So
-                    // an unknown tier is dropped with a line in the log, which
-                    // is what the sibling plugin does for the same reason.
+                    // NORMALIZED HERE BECAUSE NOTHING ELSE MAY REFUSE IT, and
+                    // the declaration is written to match. THIS runtime
+                    // validates: `HoaiTools.call` runs `validateToolInput`
+                    // over the declared schema before this handler is reached
+                    // (see the `validateToolInput(raw, definition.inputSchema)`
+                    // line at the top of `call`), and that walk throws on the
+                    // first `enum` miss, which fails the WHOLE tool call. An
+                    // `enum` on a cosmetic optional field would therefore cost
+                    // a model that writes "warning", "blue" or a capitalised
+                    // "Success" its entire reply: the text, the files and
+                    // every other chip. So `reply`'s `buttons[].style` carries
+                    // NO enum in tool-declarations.ts (a deliberate divergence
+                    // from the sibling plugin, whose MCP schema really is
+                    // advisory because nothing on its daemon side checks it),
+                    // the four tiers are named in the field's description, and
+                    // this line is the only gate.
+                    //
+                    // WHAT IT DOES: lower cases and trims, returns one of the
+                    // four tiers the backend's `CreateMessageOptionDto` spells
+                    // with `@IsIn`, and returns null for anything else. The
+                    // null is DROPPED with a line in the log rather than sent,
+                    // because the backend's `@IsIn` 400s the whole reply over
+                    // one bad value, so the message would be lost at the other
+                    // end instead of at this one. Neutral is what every client
+                    // drew before tiers existed.
                     const style = normalizeButtonStyle(b.style);
                     if (style === null && b.style !== undefined)
                       // eslint-disable-next-line no-console
