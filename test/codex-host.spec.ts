@@ -369,6 +369,30 @@ describe("native Codex host contracts", () => {
     expect(result.sawPlanProposal).toBe(true);
   });
 
+  it("ignores a plan item's OPENER even when the runtime fills its text", async () => {
+    // The `!started` half of the guard, which nothing held: the existing case
+    // opens with an EMPTY text, so `item.text.trim()` carried it alone. A
+    // runtime that ever put the whole plan on `item/started` as well would
+    // post two cards for one plan, the second superseding the first, for no
+    // reason the owner could see.
+    const seen: string[] = [];
+    const task = host.runTurn(1, "plan it", {
+      onPlanProposal: (signal) => {
+        seen.push(signal.text);
+      },
+    });
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.emit("notification", "item/started", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { id: "turn-1-plan", type: "plan", text: "## Add retry\n\n1. Add the helper" },
+    });
+    server.finish("thread-1", "Here is the plan.");
+    const result = await task;
+    expect(seen).toEqual([]);
+    expect(result.sawPlanProposal).toBeUndefined();
+  });
+
   it("says nothing about a plan on a turn that proposed none", async () => {
     const seen: string[] = [];
     const task = host.runTurn(1, "just answer", {

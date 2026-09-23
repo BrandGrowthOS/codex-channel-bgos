@@ -127,6 +127,91 @@ describe("the plan lane", () => {
     });
   });
 
+  it("reads the ARMED composer's custom click on the open card as Change the plan", async () => {
+    // THE SHAPE THE WIRE ACTUALLY CARRIES. The app never posts the
+    // `plan:change` option: it arms the composer and Send posts
+    // `{ sentinel: "custom", customText }`, which the backend stamps as
+    // `__custom__`. A lane that only knew `plan:change` read this as no plan
+    // answer at all.
+    const { api, lane: plans } = lane();
+    await plans.propose({ assistantId: 7, chatId: 9, plan: PLAN });
+    const decision = await plans.answer({
+      assistantId: 7,
+      chatId: 9,
+      messageId: 101,
+      callbackData: "__custom__",
+      customText: "Skip the second step.",
+    });
+    expect(decision?.answer).toBe("change");
+    expect(decision?.customText).toBe("Skip the second step.");
+    expect(api.setStatus).toHaveBeenLastCalledWith(7, { statusText: null });
+  });
+
+  it("leaves an ordinary custom reply on some OTHER message alone", async () => {
+    const { api, lane: plans } = lane();
+    await plans.propose({ assistantId: 7, chatId: 9, plan: PLAN });
+    api.setStatus.mockClear();
+    expect(
+      await plans.answer({
+        assistantId: 7,
+        chatId: 9,
+        messageId: 999,
+        callbackData: "__custom__",
+        customText: "no, the other one",
+      }),
+    ).toBeNull();
+    // The plan is untouched and the waiting line stays up.
+    expect(plans.openPlan(9)?.messageId).toBe(101);
+    expect(api.setStatus).not.toHaveBeenCalled();
+  });
+
+  it("keeps the card open on Change, so the revision that follows IS a revision", async () => {
+    const { api, lane: plans } = lane();
+    await plans.propose({ assistantId: 7, chatId: 9, plan: PLAN });
+    const first = api.postMessage.mock.calls[0]![0] as any;
+    await plans.answer({
+      assistantId: 7,
+      chatId: 9,
+      messageId: 101,
+      callbackData: "__custom__",
+      customText: "Skip the second step.",
+    });
+    expect(plans.openPlan(9)?.messageId).toBe(101);
+    await plans.propose({
+      assistantId: 7,
+      chatId: 9,
+      plan: { ...PLAN, title: "Add retry, without step two" },
+    });
+    const second = api.postMessage.mock.calls[1]![0] as any;
+    expect(second.eventMeta.payload.revision).toBe(2);
+    expect(second.eventMeta.payload.plan_id).toBe(first.eventMeta.payload.plan_id);
+    expect(second.eventMeta.payload.supersedes).toBe(101);
+    expect(second.eventMeta.title).toBe("Plan \u00b7 revised");
+    // Exactly one supersede PATCH, and it dims the card the owner answered.
+    const patches = api.agentRequest.mock.calls.filter((c) => c[0] === "PATCH");
+    expect(patches).toHaveLength(1);
+    expect(patches[0]![1]).toBe("messages/101");
+    expect((patches[0]![3] as any).eventMeta.payload.state).toBe("superseded");
+  });
+
+  it("retires the chips of a card the model names but this process no longer holds", async () => {
+    // A restart loses the payload, so the full supersede PATCH (which needs
+    // it) cannot be written. The chips still have to come off, or the old row
+    // stays answerable for ever.
+    const { api, lane: plans } = lane();
+    await plans.propose({
+      assistantId: 7,
+      chatId: 9,
+      plan: { ...PLAN, supersedes: 88 },
+    });
+    expect(api.agentRequest).toHaveBeenCalledWith("PATCH", "messages/88", 7, {
+      options: [],
+    });
+    expect(
+      (api.postMessage.mock.calls[0]![0] as any).eventMeta.payload.supersedes,
+    ).toBe(88);
+  });
+
   it("carries the owner's typed words off the click, never a second message", async () => {
     const { lane: plans } = lane();
     await plans.propose({ assistantId: 7, chatId: 9, plan: PLAN });

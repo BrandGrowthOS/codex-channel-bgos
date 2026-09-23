@@ -26,6 +26,7 @@ import {
   buildPlanCardMessage,
   planCardPayload,
   parsePlanChip,
+  PLAN_CUSTOM_SENTINEL,
   supersedePlanCardPatch,
   type PlanAnswer,
   type PlanCardInput,
@@ -105,7 +106,11 @@ export class PlanLane {
       ...input.plan,
       planId: previous?.payload.plan_id ?? newPlanId(),
       revision: (previous?.payload.revision ?? 0) + 1,
-      ...(previous ? { supersedes: previous.messageId } : {}),
+      ...(previous
+        ? { supersedes: previous.messageId }
+        : typeof input.plan.supersedes === "number"
+          ? { supersedes: input.plan.supersedes }
+          : {}),
     });
     if (previous) {
       this.open.delete(chatId);
@@ -118,6 +123,24 @@ export class PlanLane {
         )
         .catch(() => {
           // A card that keeps its chips is a worse card, never a broken turn.
+        });
+    } else if (typeof payload.supersedes === "number") {
+      // THE MODEL NAMED A CARD THIS PROCESS NO LONGER HOLDS (a restart, or a
+      // plan proposed by an earlier daemon). Without this the older row keeps
+      // its three live chips for ever: `supersedes` in the new payload tells
+      // the NEW card about the old one, and tells the old row nothing.
+      //
+      // Only the chips come off. The full supersede PATCH also dims the row
+      // and writes `state: "superseded"` into its `eventMeta`, and that needs
+      // the old payload, which is exactly what was lost. Retiring the chips is
+      // the honest half: the card cannot be answered any more, and it keeps
+      // every step the owner already read.
+      await this.api
+        .agentRequest("PATCH", `messages/${payload.supersedes}`, assistantId, {
+          options: [],
+        })
+        .catch(() => {
+          // Same reason as above: never a broken turn.
         });
     }
     const posted = await this.api.postMessage(
@@ -139,13 +162,43 @@ export class PlanLane {
   }
 
   /**
+   * Is this click the armed composer answering the card this chat has open?
+   *
+   * "Change the plan" and a step's "Comment" NEVER arrive as `plan:change`.
+   * The app arms the composer instead of posting the option, and Send posts
+   * `POST /messages/:id/callback { sentinel: "custom", customText }`, which the
+   * backend stamps as `callbackData: "__custom__"` whatever the option said
+   * (message.service.ts, the custom branch). So the only thing that tells a
+   * plan revision apart from an ordinary custom reply is the MESSAGE ID: the
+   * card this chat is waiting on. It is exported as a predicate because the
+   * adapter has to make the same call SYNCHRONOUSLY, before it decides whether
+   * a click belongs to the plan path or the generic one.
+   */
+  isChangeClick(click: {
+    chatId: number;
+    messageId?: number;
+    callbackData?: string;
+  }): boolean {
+    if ((click.callbackData ?? "").trim() !== PLAN_CUSTOM_SENTINEL) return false;
+    const known = this.open.get(click.chatId);
+    return !!known && !!click.messageId && known.messageId === click.messageId;
+  }
+
+  /**
    * Read a click as a plan answer, or return null when it is not one.
    *
-   * The card is forgotten here, whatever the answer, so a second tap on a
-   * settled card cannot start a second turn. `plan:no` also retires the chips,
-   * because nothing else will: the app collapses them on the answer it already
-   * wrote, and a daemon restart would otherwise find a live looking card
-   * nobody is waiting on.
+   * A SETTLED card is forgotten here, so a second tap cannot start a second
+   * turn. `change` is the exception and has to be: the revision the owner just
+   * asked for has to come back as a REVISION, and `propose` reads the plan's
+   * identity (`plan_id`, the next `revision`, the row to supersede) from this
+   * map and nowhere else. Dropping the entry here made the next card a brand
+   * new plan at revision 1, with the old row left live and undimmed. A second
+   * tap while it is still open is harmless: the backend forwards only the
+   * first accepted answer of a message (the single announce contract).
+   *
+   * `plan:no` also retires the chips, because nothing else will: the app
+   * collapses them on the answer it already wrote, and a daemon restart would
+   * otherwise find a live looking card nobody is waiting on.
    */
   async answer(click: {
     assistantId: number;
@@ -154,7 +207,9 @@ export class PlanLane {
     callbackData?: string;
     customText?: string;
   }): Promise<PlanDecision | null> {
-    const answer = parsePlanChip(click.callbackData);
+    const answer = this.isChangeClick(click)
+      ? "change"
+      : parsePlanChip(click.callbackData);
     if (!answer) return null;
     const known = this.open.get(click.chatId) ?? null;
     // A tap on an OLDER card of this chat is still a plan answer: the daemon
@@ -164,7 +219,7 @@ export class PlanLane {
       known && (!click.messageId || known.messageId === click.messageId)
         ? known
         : null;
-    if (plan) this.open.delete(click.chatId);
+    if (plan && answer !== "change") this.open.delete(click.chatId);
     await this.api
       .setStatus(click.assistantId, { statusText: null })
       .catch(() => {});

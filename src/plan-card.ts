@@ -116,6 +116,17 @@ export interface PlanCardPayload extends Record<string, unknown> {
  */
 export const CODEX_PLAN_MODE_ENFORCED = false;
 
+/**
+ * What the wire carries when the owner answers through the ARMED composer.
+ *
+ * "Change the plan" and a step's "Comment" do not post their option: the app
+ * arms the composer and Send posts the custom sentinel with the typed words,
+ * which the backend stamps as this code whatever the option's own
+ * `callbackData` said. So `plan:change` is a code the daemon SENDS and never a
+ * code it receives, and the plan path has to recognise this one too.
+ */
+export const PLAN_CUSTOM_SENTINEL = "__custom__";
+
 export const PLAN_CHIP_GO = "plan:go";
 export const PLAN_CHIP_CHANGE = "plan:change";
 export const PLAN_CHIP_NO = "plan:no";

@@ -33,6 +33,7 @@ function fixture(runTurn: (callbacks: any) => Promise<unknown>) {
   Object.assign(adapter, {
     turnControllers: new Map(),
     planDoorHint: new Map(),
+    planCardFailures: new Set(),
     lastInput: new Map(),
     lastNativeOptions: new Map(),
     ownerId: "owner-1",
@@ -249,6 +250,61 @@ describe("the owner's answer to a plan card", () => {
     });
   });
 
+  it("reads the armed composer's custom click on the card as Change the plan", async () => {
+    // THE SHAPE THE WIRE CARRIES, end to end. Pressing "Change the plan" does
+    // not post the option: the app arms the composer and Send posts
+    // `{ sentinel: "custom", customText }`, which the backend stamps
+    // `__custom__`. Routed on `parsePlanChip` alone, this arrived as an
+    // ordinary typed reply: a plain coding turn on the owner's words, the
+    // waiting line left up for its whole day, and no revised plan ever asked
+    // for.
+    const f = await armed();
+    f.adapter.tools = { interactions: { handleClick: () => false } };
+    f.adapter.handleInboundClick({
+      assistantId: 10,
+      chatId: 20,
+      messageId: 501,
+      optionId: 1,
+      callbackData: "__custom__",
+      customText: "Skip the second step.",
+      userId: "owner-1",
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(f.api.setStatus).toHaveBeenCalledWith(10, { statusText: null });
+    expect(f.adapter.host.updateSettings).not.toHaveBeenCalled();
+    expect(f.api.reportSessionMode).toHaveBeenCalledWith(10, 20, {
+      mode: "plan",
+      enforced: false,
+    });
+    expect(f.adapter.runAndReply).toHaveBeenCalledTimes(1);
+    const input = JSON.stringify(f.adapter.runAndReply.mock.calls[0]![2]);
+    expect(input).toContain("Skip the second step.");
+    // The revision prompt, not "The user selected: ...".
+    expect(input).toContain("propose_plan");
+    expect(input).toContain("supersedes");
+  });
+
+  it("leaves a custom reply on some OTHER message on the generic path", async () => {
+    const f = await armed();
+    f.adapter.tools = { interactions: { handleClick: () => false } };
+    f.adapter.handleInboundClick({
+      assistantId: 10,
+      chatId: 20,
+      messageId: 777,
+      optionId: 2,
+      callbackData: "__custom__",
+      customText: "just a typed reply",
+      userId: "owner-1",
+    });
+    await new Promise((r) => setImmediate(r));
+    const input = JSON.stringify(f.adapter.runAndReply.mock.calls[0]![2]);
+    expect(input).toContain("just a typed reply");
+    expect(input).not.toContain("propose_plan");
+    // The plan is still waiting: nothing answered it.
+    expect(f.adapter.planLane.openPlan(20)?.messageId).toBe(501);
+    expect(f.api.setStatus).not.toHaveBeenCalledWith(10, { statusText: null });
+  });
+
   it("takes the three chips before the generic click path", async () => {
     const f = await armed();
     f.adapter.handlePlanClick = vi.fn(async () => {});
@@ -261,6 +317,123 @@ describe("the owner's answer to a plan card", () => {
       userId: "owner-1",
     });
     expect(f.adapter.handlePlanClick).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("a plan the AGENT decided to propose, in a chat that is not in plan mode", () => {
+  /**
+   * The `decided` door is `propose_plan` under a plan policy, raised inside an
+   * ordinary coding chat. Answering it must not write a mode the chat never
+   * had: `chats.session_mode` is PERSISTED, the app draws the Plan chip and
+   * the gold pill off it, and `reportStoredPlanModes` only ever reports
+   * `plan`, so a restart would not undo the lie either.
+   */
+  async function decided(answer: "go" | "no" | "change") {
+    const f = fixture(async () => ({ error: null, replyText: "", turnCompleted: true }));
+    f.adapter.runAndReply = vi.fn(async () => {});
+    await f.adapter.planLane.propose({
+      assistantId: 10,
+      chatId: 20,
+      plan: {
+        title: "Add retry",
+        steps: [{ text: "Add the helper" }],
+        door: "decided" as const,
+        enforced: false,
+      },
+    });
+    f.api.setStatus.mockClear();
+    await f.adapter.handlePlanClick({
+      assistantId: 10,
+      chatId: 20,
+      messageId: 501,
+      callbackData: answer === "change" ? "__custom__" : `plan:${answer}`,
+      ...(answer === "change" ? { customText: "Skip step two." } : {}),
+      userId: "owner-1",
+    });
+    return f;
+  }
+
+  it("Go ahead starts the work without touching the mode or announcing a switch", async () => {
+    const f = await decided("go");
+    expect(f.adapter.host.updateSettings).not.toHaveBeenCalled();
+    expect(f.api.reportSessionMode).not.toHaveBeenCalled();
+    expect(f.adapter.outbound.sendText).not.toHaveBeenCalled();
+    // The work still starts, and the waiting line still clears.
+    expect(f.adapter.runAndReply).toHaveBeenCalledTimes(1);
+    expect(f.api.setStatus).toHaveBeenCalledWith(10, { statusText: null });
+  });
+
+  it("Change the plan never reports a plan mode this chat is not in", async () => {
+    const f = await decided("change");
+    expect(f.api.reportSessionMode).not.toHaveBeenCalled();
+    expect(f.adapter.runAndReply).toHaveBeenCalledTimes(1);
+  });
+
+  it("Don't do this settles the card and leaves the mode alone", async () => {
+    const f = await decided("no");
+    expect(f.adapter.host.updateSettings).not.toHaveBeenCalled();
+    expect(f.api.reportSessionMode).not.toHaveBeenCalled();
+    expect(f.adapter.runAndReply).not.toHaveBeenCalled();
+  });
+
+  it("still flips the mode when the chat IS in plan mode, whatever the door says", async () => {
+    // A model already in plan mode that calls `propose_plan` without naming a
+    // door gets `decided` by default, so the payload alone is not enough: the
+    // host's own persisted setting is the second half of the answer.
+    const f = fixture(async () => ({ error: null, replyText: "", turnCompleted: true }));
+    f.adapter.runAndReply = vi.fn(async () => {});
+    f.adapter.host.planModeChats = vi.fn(() => [20]);
+    await f.adapter.planLane.propose({
+      assistantId: 10,
+      chatId: 20,
+      plan: {
+        title: "Add retry",
+        steps: [{ text: "Add the helper" }],
+        door: "decided" as const,
+        enforced: false,
+      },
+    });
+    await f.adapter.handlePlanClick({
+      assistantId: 10,
+      chatId: 20,
+      messageId: 501,
+      callbackData: "plan:go",
+      userId: "owner-1",
+    });
+    expect(f.adapter.host.updateSettings).toHaveBeenCalledWith(20, {
+      mode: "default",
+    });
+    expect(f.adapter.outbound.sendText).toHaveBeenCalled();
+  });
+});
+
+describe("a plan card that could not be posted", () => {
+  it("never leaves the turn silent", async () => {
+    const f = fixture(async (cb) => {
+      await cb.onPlanProposal?.({ turnId: "t1", itemId: "p", text: PLAN });
+      return { error: null, replyText: "", turnCompleted: true, sawPlanProposal: true };
+    });
+    f.api.postMessage.mockRejectedValue(new Error("503"));
+    await f.adapter.executeAndReply(10, 20, "Plan it", f.reply);
+    // `sawPlanProposal` says the runtime RAISED a plan, never that the card
+    // reached the chat. Trusting it meant total silence.
+    expect(f.reply.sendText).toHaveBeenCalledWith(
+      expect.stringContaining("could not be posted"),
+    );
+  });
+
+  it("keeps the plan in the text when the fallback's post fails", async () => {
+    const f = fixture(async () => ({
+      error: null,
+      replyText: `Here it is.\n\n<proposed_plan>\n${PLAN}\n</proposed_plan>`,
+      turnCompleted: true,
+    }));
+    f.api.postMessage.mockRejectedValue(new Error("503"));
+    await f.adapter.executeAndReply(10, 20, "Plan it", f.reply);
+    // Stripping the block after a failed post threw the plan away entirely.
+    const said = f.reply.sendText.mock.calls.map((c: any[]) => String(c[0])).join("\n");
+    expect(said).toContain("Add retry");
+    expect(said).toContain("Wrap the call");
   });
 });
 
