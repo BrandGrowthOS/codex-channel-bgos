@@ -652,3 +652,110 @@ describe("the two strings the daemon writes", () => {
     expect(toolLines(rows.slice(0, 1), 1)).toBe("f0.txt (add)");
   });
 });
+
+/**
+ * THE TWO SHAPES THE BACKEND NOW REFUSES OUTRIGHT, PINNED ON THIS SIDE TOO.
+ *
+ * The server's `ApprovalMetaDto` gained two constraints after this stage's
+ * review: `DiffRidesWithSummary` refuses a `diff.files[]` entry whose `path`
+ * is not on a summary row whose `preview` is `ok`, and
+ * `SummaryPathsAreDistinct` refuses two rows naming one file. Both were
+ * already this builder's rules and neither was checked anywhere; both are now
+ * a 400, and a 400 costs the owner the whole card, so what used to be a card
+ * that drew oddly is now a card that does not arrive.
+ *
+ * Asserted as an INVARIANT over cards built by the paths that can actually
+ * break it rather than as one more example, because the shape that would break
+ * it is the byte cap's `dropLast`: it pops the last diff entry and flips the
+ * last `ok` row to `too_large`, so a drop that moved one and not the other
+ * leaves exactly the orphan the server refuses.
+ */
+describe("every card this builder writes is one the server will accept", () => {
+  const drawable = (wire: FileChangeWire) => {
+    const paths = wire.change_summary.files.map((f) => f.path);
+    // SummaryPathsAreDistinct: the app pairs a row to its patch with a find on
+    // this string, so two rows sharing one open the same change twice.
+    expect(new Set(paths).size).toBe(paths.length);
+    const openable = new Set(
+      wire.change_summary.files.filter((f) => f.preview === "ok").map((f) => f.path),
+    );
+    // DiffRidesWithSummary: a patch whose path is on no openable row has no
+    // button anywhere on the card, so it is bytes nothing can reach.
+    for (const file of wire.diff?.files ?? []) expect(openable.has(file.path)).toBe(true);
+    // And the other direction, which is this builder's own rule rather than
+    // the server's: an `ok` row promises a patch, so the two lists pair up
+    // exactly and neither side carries a name the other does not.
+    expect(wire.diff?.files.map((f) => f.path) ?? []).toEqual([...openable]);
+  };
+
+  const big = (lines: number) => {
+    const body = ["@@ -1,400 +1,400 @@"];
+    for (let i = 0; i < lines; i++) body.push(`+${"\u00e9".repeat(160)}`);
+    return body.join("\n");
+  };
+
+  it("a plain two file card", () => {
+    drawable(
+      buildDiffForWire(
+        [
+          change(`${CWD}/calc.py`, { type: "update" }, HUNK),
+          change(`${CWD}/notes.md`, { type: "add" }, "@@ -0,0 +1 @@\n+one\n"),
+        ],
+        ctx,
+      )!,
+    );
+  });
+
+  it("a card with a binary row, which offers no entry at all", () => {
+    drawable(
+      buildDiffForWire(
+        [
+          change("logo.png", { type: "update" }, "GIT binary patch\nliteral 1234\nzcmZ\n"),
+          change("notes.md", { type: "update" }, HUNK),
+        ],
+        ctx,
+      )!,
+    );
+  });
+
+  it("a card the BYTE cap dropped files from, which is the shape that can orphan one", () => {
+    // Four heavy files: the loop drops from the end until the block fits, and
+    // every drop has to flip its row to `too_large` in the same step.
+    const wire = buildDiffForWire(
+      Array.from({ length: 4 }, (_, i) => change(`${CWD}/f${i}.txt`, "update", big(200))),
+      ctx,
+    )!;
+    expect(wire.change_summary.files.some((f) => f.preview === "too_large")).toBe(true);
+    expect(approvalMetaBytes(wire)).toBeLessThanOrEqual(APPROVAL_META_BYTES_MAX);
+    drawable(wire);
+  });
+
+  it("a card whose rows were disambiguated, including the numbered one", () => {
+    drawable(
+      buildDiffForWire(
+        [
+          change("/repo-one/src/index.ts", { type: "update" }, "@@ -1 +1 @@\n-one\n+ONE\n"),
+          change("/repo-two/src/index.ts", { type: "update" }, "@@ -1 +1 @@\n-two\n+TWO\n"),
+          change(`${CWD}/a.ts`, { type: "update" }, "@@ -1 +1 @@\n-first\n+FIRST\n"),
+          change(
+            `${CWD}/a.ts`,
+            { type: "update", move_path: "b.ts" },
+            "@@ -1 +1 @@\n-second\n+SECOND\n",
+          ),
+        ],
+        { home: "/home/owner", cwd: CWD },
+      )!,
+    );
+  });
+
+  it("a card with more files than either list may carry", () => {
+    drawable(
+      buildDiffForWire(
+        Array.from({ length: DIFF_FILES_MAX + 3 }, (_, i) =>
+          change(`${CWD}/f${i}.ts`, "update", "@@ -1 +1 @@\n-a\n+A\n"),
+        ),
+        ctx,
+      )!,
+    );
+  });
+});
