@@ -76,11 +76,37 @@ export interface PlanDecision {
 
 export class PlanLane {
   private readonly open = new Map<number, OpenPlan>();
-  constructor(private readonly api: PlanLaneApi) {}
+  /**
+   * `enforced` is a QUESTION asked per chat, not a constant.
+   *
+   * It used to be `CODEX_PLAN_MODE_ENFORCED = false`, which was the right
+   * answer while plan mode moved nothing but the model's instructions. Now
+   * `/plan` also holds the chat's sandbox read only, so the answer is "yes,
+   * while that sandbox is on" and it differs between two chats of the same
+   * daemon: one planning under the lock, one proposing a plan it decided on
+   * inside an ordinary coding chat. The resolver reads the host's store, and
+   * a connection with no host (the tools' no-op poster) answers false, which
+   * is the honest direction.
+   */
+  constructor(
+    private readonly api: PlanLaneApi,
+    private readonly enforced: (chatId: number) => boolean = () => false,
+  ) {}
 
   /** The card this chat is waiting on, if this process posted it. */
   openPlan(chatId: number): OpenPlan | null {
     return this.open.get(chatId) ?? null;
+  }
+
+  /** Is this chat's plan wait actually held by a read only sandbox? */
+  enforcedIn(chatId: number): boolean {
+    try {
+      return this.enforced(chatId) === true;
+    } catch {
+      // A resolver that throws is a daemon that cannot prove the lock, and an
+      // unprovable lock is reported as no lock.
+      return false;
+    }
   }
 
   /**

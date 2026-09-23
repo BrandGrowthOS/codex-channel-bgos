@@ -91,6 +91,49 @@ convention. The only real lock available to this daemon is the one it already
 owns: `permission: "read-only"`, which is the only thing that makes
 `nativeSettings` emit `sandboxPolicy: { type: "readOnly" }`.
 
+**6. COUPLE THE READ ONLY SANDBOX AND THE WAIT IS REAL. Re-probed the same
+day, with `--sandbox=readonly`.** Finding 5 is the reason lane A5b exists, and
+the answer it points at had to be measured too rather than assumed. The probe
+grew a `--sandbox=readonly` path that sends what `nativeSettings({ mode:
+"plan", permission: "read-only" })` emits, VERBATIM, on both hops:
+
+```
+thread/start            { sandbox: "read-only", approvalPolicy: "on-request", ... }
+thread/settings/update  { collaborationMode: { mode: "plan", ... },
+                          approvalPolicy: "on-request",
+                          sandboxPolicy: { type: "readOnly" } }
+turn/start              the same spread
+```
+
+`thread/settings/updated` echoes `sandboxPolicy: { type: "readOnly",
+networkAccess: false }` BESIDE the 9 KB plan prompt, so the two knobs are
+genuinely independent and genuinely both on. The stub then called
+`exec_command` with the same `echo touched > must-not-change.txt`, and this
+time:
+
+```
+commandOutputs[0] = { status: "failed", exitCode: 1,
+  output: "out-file : Access to the path '...\must-not-change.txt' is denied." }
+guardFileContent  = "original"     guardFileChanged = false
+sawPlanItem       = true           lastAgentMessage = "I explored the uploader. Here is the plan.\n\n"
+```
+
+Two things worth having in writing. **The sandbox DENIES, it does not
+escalate.** `approvalPolicy: "on-request"` was live and `requestMethods` is
+still empty: a write under `readOnly` comes back as a failed command with an
+OS level access error, never as a `requestApproval` the owner could wave
+through. So "the agent asks you instead" is not what happens, and copy that
+promises it would be wrong. **Planning still works under the lock**: the `plan`
+item arrived exactly as in the unlocked run, so nothing about the read only
+sandbox interferes with the thing plan mode is for.
+
+Logs: `plan5-readonly.log` (coupled, the write denied) and `plan6-control.log`
+(the same app server, mode alone, the write succeeds with exit code 0). The
+control was re-run because the vendored binary had been reinstalled between
+the two sessions; `wire_api = "chat"` is no longer accepted by app server
+0.154.0 (`failed to load configuration: wire_api = "chat" is no longer
+supported`), so both runs now pass `--wire=responses`.
+
 ## How to apply next time
 
 - Capture a Codex plan on `item/completed` where `item.type === "plan"`, before
@@ -107,13 +150,45 @@ owns: `permission: "read-only"`, which is the only thing that makes
 - When the copy says what a mode guarantees, check the SANDBOX, not the mode
   name. `collaborationMode` and `sandboxPolicy` are independent knobs and only
   the second one refuses anything.
+- Move them TOGETHER, and remember what you took. `/plan` sets `mode: "plan"`
+  and `permission: "read-only"` and stores the chat's previous permission in
+  `permissionBeforePlan`; `/code`, Go ahead and Don't do this restore it;
+  Change the plan keeps both, because the revision is explored under the same
+  lock. Restoring a hardcoded `workspace` instead would silently WIDEN a chat
+  the owner had narrowed by hand, and the memory is on disk because a daemon
+  that restarts mid plan otherwise has no way back: the only permission it can
+  see is the one plan mode itself wrote.
+- Report `enforced` from what was SAVED, never from the intent.
+  `updateSettings` rolls the whole patch back and throws if the runtime refuses
+  it, so `setPlanMode` retries as the mode alone and comes back with
+  `enforced: false`. A plan mode with no lock is fine; claiming a lock it does
+  not have is not, because the app words the chip off that bit.
+- The two knobs can come apart BY HAND, so watch every door that moves one of
+  them. `/permissions` inside plan mode changes the sandbox and leaves the mode
+  alone, so nothing on the mode path reports it and the chip goes on reading
+  `read only until you answer` over a chat whose files have just been handed
+  back. It reports separately (`onPlanEnforcement`), and deliberately NOT
+  through the mode callback, which would clear the typed door a `/plan <task>`
+  left behind. The same command also spends the remembered permission, because
+  a level the owner chose by hand must outlive the restore.
+- Re-run the CONTROL when you re-run the probe. The vendored binary moves under
+  you, and a coupled run that refuses a write proves nothing without a same
+  day run on the same binary that allows one.
 
 **Regression guard:** `test/plan-card.spec.ts` pins the capture on an
 `item/completed` `plan` item and pins the `<proposed_plan>` fallback (including
 that a plan mode message WITHOUT the block yields no card);
 `test/codex-host.spec.ts` keeps `propose_plan` out of `OWNER_BLOCKING_TOOLS`,
-which is the shape finding 5 forces (nothing blocks, so nothing parks). Findings
-1 and 5 are prose only, because they are facts about a vendored binary and no
-test of ours can hold the runtime to them: re-run
-`_tools-p2/probes/codex-plan-probe.js --mode=plan` after a `@openai/codex` bump
-instead.
+which is the shape finding 5 forces (nothing blocks, so nothing parks). Finding
+6 has real guards on OUR half of it: `test/plan-mode.spec.ts` pins the pair and
+the remembered permission, `test/session-settings.spec.ts` drives
+`setPlanMode` through the real host (the sandbox goes on with the mode, the
+access comes back, the memory survives a restart, a refused sandbox leaves plan
+mode on and reports `enforced: false`), and `test/plan-card-wiring.spec.ts`
+pins that every card and every session mode report carries the lock the host
+measured rather than a constant. Findings 1 and 5 stay prose only, because they
+are facts about a vendored binary and no test of ours can hold the runtime to
+them: re-run BOTH
+`_tools-p2/probes/codex-plan-probe.js --mode=plan --wire=responses` and the
+same command with `--sandbox=readonly` after a `@openai/codex` bump, and expect
+the first to write the guard file and the second to be denied.

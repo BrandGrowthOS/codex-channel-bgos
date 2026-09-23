@@ -20,11 +20,12 @@ describe("propose_plan", () => {
    */
   it("posts through the lane and returns pending at once", async () => {
     const propose = vi.fn(async () => ({ messageId: 501 }));
+    const enforcedIn = vi.fn(() => false);
     const tools = new HoaiTools(
       {} as any,
       () => "canon",
       undefined,
-      { propose } as any,
+      { propose, enforcedIn } as any,
     );
     const result: any = await tools.handleRequest(
       "item/tool/call",
@@ -58,11 +59,14 @@ describe("propose_plan", () => {
         // The DEFAULT door is the agent deciding for itself: a tool call is
         // not the owner typing /plan, and it is not plan mode either.
         door: "decided",
-        // Nothing on this channel locks the sandbox in plan mode, so a plan
-        // the model decided to propose is never enforced.
+        // ASKED OF THE LANE, per chat, and false here because this chat is
+        // not holding the read only sandbox. It used to be the constant
+        // `CODEX_PLAN_MODE_ENFORCED`, which could not tell a plan proposed
+        // under `/plan` apart from one the model decided on mid coding.
         enforced: false,
       }),
     });
+    expect(enforcedIn).toHaveBeenCalledWith(17);
     expect(propose.mock.calls[0]![0].plan.steps).toEqual([
       { text: "Add the helper", file: "src/upload.ts" },
       { text: "Wrap the call", check: "the new test fails without it" },
@@ -72,13 +76,49 @@ describe("propose_plan", () => {
     expect(propose.mock.calls[0]![0].plan).not.toHaveProperty("revision");
   });
 
+  it("stamps the card with the LOCK THIS CHAT HAS, not a channel constant", () => {
+    // The whole point of retiring `CODEX_PLAN_MODE_ENFORCED`. One daemon
+    // plans under the read only sandbox in chat 17 and, at the same moment,
+    // answers a plan it decided on inside the ordinary coding chat 18. A
+    // constant gets one of those two wrong whichever value it takes, and the
+    // wrong one is a sentence the app puts in front of the owner.
+    return (async () => {
+      const propose = vi.fn(async () => ({ messageId: 504 }));
+      const enforcedIn = vi.fn((chatId: number) => chatId === 17);
+      const tools = new HoaiTools(
+        {} as any,
+        () => "canon",
+        undefined,
+        { propose, enforcedIn } as any,
+      );
+      const call = (chatId: number): Promise<any> =>
+        tools.handleRequest(
+          "item/tool/call",
+          {
+            tool: "propose_plan",
+            arguments: {
+              chat_id: String(chatId),
+              title: "Add retry",
+              steps: [{ text: "Add the helper" }],
+            },
+          },
+          { ...context(), chatId },
+        );
+      expect((await call(17)).success).toBe(true);
+      expect((await call(18)).success).toBe(true);
+      expect(propose.mock.calls[0]![0].plan.enforced).toBe(true);
+      expect(propose.mock.calls[1]![0].plan.enforced).toBe(false);
+    })();
+  });
+
   it("carries a revision's supersedes, note and per step tags", async () => {
     const propose = vi.fn(async () => ({ messageId: 502 }));
+    const enforcedIn = vi.fn(() => false);
     const tools = new HoaiTools(
       {} as any,
       () => "canon",
       undefined,
-      { propose } as any,
+      { propose, enforcedIn } as any,
     );
     await tools.handleRequest(
       "item/tool/call",
@@ -108,11 +148,12 @@ describe("propose_plan", () => {
 
   it("refuses a plan with no steps at the schema, before anything is posted", async () => {
     const propose = vi.fn(async () => ({ messageId: 503 }));
+    const enforcedIn = vi.fn(() => false);
     const tools = new HoaiTools(
       {} as any,
       () => "canon",
       undefined,
-      { propose } as any,
+      { propose, enforcedIn } as any,
     );
     const result: any = await tools.handleRequest(
       "item/tool/call",
@@ -672,13 +713,21 @@ describe("the shared tool declarations", () => {
     expect(schema.properties.door.enum).toEqual(["typed", "decided", "mode"]);
   });
 
-  it("tells the model the tool does not block and that nothing enforces the wait", () => {
+  it("tells the model the tool does not block, and which chats the wait is real in", () => {
     // Both are load bearing. A model that waits on this tool wedges its turn;
-    // a model told the wait is enforced would believe a lock that does not
-    // exist (see CODEX_PLAN_MODE_ENFORCED).
+    // a model told the wait is always enforced would believe a lock it does
+    // not have in a coding chat, and one told it NEVER is would be surprised
+    // by a denied write inside plan mode. The answer is per chat and the
+    // description now says which is which (see src/plan-mode.ts).
     expect(propose!.description).toMatch(/RETURNS IMMEDIATELY/);
     expect(propose!.description).toMatch(/end your turn/i);
-    expect(propose!.description).toMatch(/Nothing in this plugin enforces that/);
+    expect(propose!.description).toMatch(/WHETHER THAT IS ENFORCED DEPENDS ON THE CHAT/);
+    expect(propose!.description).toMatch(/holds your files read only/);
+    expect(propose!.description).toMatch(
+      /ordinary coding chat nothing enforces the wait at all/,
+    );
+    // And it never claims the blanket lock the probe refused.
+    expect(propose!.description).not.toMatch(/plan mode prevents/i);
   });
 
   it("offers an optional style on reply buttons, as the canon has promised", () => {

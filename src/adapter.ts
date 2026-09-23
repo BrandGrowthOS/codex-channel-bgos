@@ -68,7 +68,6 @@ import {
 } from "./plan-lane.js";
 import { turnDirectiveLines } from "./turn-directives.js";
 import {
-  CODEX_PLAN_MODE_ENFORCED,
   parsePlanChip,
   parseProposedPlan,
   planCardFromMarkdown,
@@ -284,7 +283,12 @@ export class CodexAdapter {
     // typed tools write is stamped here, so a backend that sends no
     // `cleared_by` cannot make the agent's own last tick come back looking
     // like its owner marking the mission done.
-    this.planLane = new PlanLane(this.api);
+    // The lane answers `enforced` per chat by asking the host what sandbox
+    // that chat's next turn runs under. Lazy on purpose: this reads `this.host`
+    // at call time, so neither construction order nor a later re-pair matters.
+    this.planLane = new PlanLane(this.api, (chatId) =>
+      this.host.planWaitEnforcedIn(chatId),
+    );
     this.tools = new HoaiTools(
       this.api,
       () => this.capabilityText,
@@ -306,13 +310,30 @@ export class CodexAdapter {
       // mission has to exist and the lane has to be watching before the goal
       // is set, because setting one starts a turn at once.
       goalLane: this.goalLane,
-      onSessionMode: async (args, mode, typedTask) => {
+      onSessionMode: async (args, mode, typedTask, enforced) => {
         // `/plan <task>` is the typed door; `/plan` on its own just turns the
         // mode on, and a plan that comes out of it came through the mode.
         if (mode === "plan" && typedTask)
           this.planDoorHint.set(args.chatId, "typed");
         else this.planDoorHint.delete(args.chatId);
-        await this.reportSessionMode(args.assistantId, args.chatId, mode);
+        await this.reportSessionMode(
+          args.assistantId,
+          args.chatId,
+          mode,
+          enforced,
+        );
+      },
+      // The MODE did not move, only the lock did: `/permissions` inside plan
+      // mode. Re-reported so the chip stops promising a read only chat the
+      // owner has just handed its files back to, and the door hint is left
+      // exactly where it was, because a typed plan is still a typed plan.
+      onPlanEnforcement: async (args, enforced) => {
+        await this.reportSessionMode(
+          args.assistantId,
+          args.chatId,
+          "plan",
+          enforced,
+        );
       },
       run: async (args, prompt, options = {}) => {
         const files = args.attachments.map((a) => ({
@@ -1384,7 +1405,16 @@ export class CodexAdapter {
     for (const chatId of this.host.planModeChats()) {
       const assistantId = this.assistantForChat(chatId);
       if (!assistantId) continue;
-      await this.reportSessionMode(assistantId, chatId, "plan");
+      // Per chat, from the store that just came off disk. A chat left in plan
+      // mode was left with its read only sandbox too, and both halves are in
+      // the same file, so a restart restores the lock and reports it rather
+      // than downgrading every recovered chat to the convention.
+      await this.reportSessionMode(
+        assistantId,
+        chatId,
+        "plan",
+        this.host.planWaitEnforcedIn(chatId),
+      );
     }
   }
 
@@ -1396,15 +1426,17 @@ export class CodexAdapter {
    * door, which is the truthful answer for a plan the runtime raised without
    * the owner typing anything.
    *
-   * `enforced` is FALSE, and that is not a shortcut. A live probe on
+   * `enforced` is ASKED, per chat, and never a constant. A live probe on
    * 2026-09-23 ran a workspace write with `collaborationMode: plan` on the
    * thread and on the turn, and it succeeded with no approval raised, because
    * the mode sets `developer_instructions` and leaves `sandboxPolicy` exactly
-   * where it was (docs/learnings/codex-plan-mode-wire.md). Plan mode is a
-   * strict convention the runtime states in the model's own instructions, and
-   * the only lock this daemon owns is `permission: read-only`, which is a
-   * different setting the owner chose separately. Saying `enforced: true` here
-   * would put a promise on the card that the sandbox does not keep.
+   * where it was (docs/learnings/codex-plan-mode-wire.md). So the mode alone
+   * proves nothing and this used to report a flat false. `/plan` now turns the
+   * chat's read only sandbox on WITH the mode, which the same probe, re-run
+   * coupled, shows the runtime does refuse writes under, so the answer is true
+   * for a chat under that pair and false for a chat where a model decided to
+   * propose a plan inside an ordinary coding session. Both happen on one
+   * daemon, which is why it is a question and not a setting.
    */
   private async postPlanCard(
     assistantId: number,
@@ -1419,7 +1451,10 @@ export class CodexAdapter {
         chatId,
         plan: planCardFromMarkdown(markdown, {
           door,
-          enforced: CODEX_PLAN_MODE_ENFORCED,
+          // The host is the one source: the lane's own `enforcedIn` (which
+          // `propose_plan` uses) is a thin wrapper of this very call, so both
+          // doors stamp the card from the same store.
+          enforced: this.host.planWaitEnforcedIn(chatId),
         }),
       });
       this.planCardFailures.delete(chatId);
@@ -1473,18 +1508,28 @@ export class CodexAdapter {
     const inPlanMode = this.planModeChat(click.chatId, decision.plan);
     const toDefault = decision.answer !== "change";
     if (inPlanMode) {
+      // Change the plan keeps BOTH halves, so the lock the card was proposed
+      // under is still the lock the revision is written under, and the report
+      // says so off the store rather than off the answer.
+      let enforced = this.host.planWaitEnforcedIn(click.chatId);
       if (toDefault) {
         // Persisted before it is announced, exactly as `/code` does it: a mode
         // BGOS shows that the daemon did not manage to store would survive a
-        // restart as a lie.
-        await this.host
-          .updateSettings(click.chatId, { mode: "default" })
-          .catch(() => {});
+        // restart as a lie. `setPlanMode` also GIVES THE ACCESS BACK: Go ahead
+        // has to leave the chat able to do the work it just approved, at the
+        // permission the owner had before `/plan` took it read only.
+        const applied = await this.host
+          .setPlanMode(click.chatId, false)
+          .catch(() => null);
+        // A restore that failed leaves the chat read only, and the honest
+        // report of a chat that is still locked is the one it already had.
+        enforced = applied ? applied.enforced : enforced;
       }
       await this.reportSessionMode(
         click.assistantId,
         click.chatId,
         toDefault ? "default" : "plan",
+        enforced,
       );
     }
     const replyHandle = buildReplyHandle(
@@ -1547,19 +1592,22 @@ export class CodexAdapter {
    * both. Swallowed on every failure, including the 404 an older backend
    * answers: a chip the app cannot draw is never worth a turn.
    *
-   * `enforced` is false on this channel for the reason `postPlanCard` gives:
-   * plan mode is a strict instruction, not a sandbox.
+   * `enforced` IS PASSED IN, from whatever actually happened. It was a
+   * constant `false` while plan mode moved nothing but the model's
+   * instructions; now `/plan` couples the read only sandbox to it, so the
+   * answer is "true while that sandbox is on" and every caller hands over the
+   * value the host gave back rather than a hope. A `default` mode always
+   * arrives here as false, because `setPlanMode(false)` restored the
+   * permission and `planWaitEnforced` needs both halves.
    */
   private async reportSessionMode(
     assistantId: number,
     chatId: number,
     mode: "plan" | "default",
+    enforced: boolean,
   ): Promise<void> {
     await this.api
-      .reportSessionMode(assistantId, chatId, {
-        mode,
-        enforced: CODEX_PLAN_MODE_ENFORCED,
-      })
+      .reportSessionMode(assistantId, chatId, { mode, enforced })
       .catch(() => {});
   }
 

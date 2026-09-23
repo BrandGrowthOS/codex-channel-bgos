@@ -107,26 +107,26 @@ export interface PlanCardPayload extends Record<string, unknown> {
  * does not, and Arabic is the app's job and never the daemon's.
  */
 /**
- * Does Codex's plan mode ENFORCE the wait on this channel?
+ * WHERE `enforced` COMES FROM, NOW THAT IT IS NOT A CONSTANT HERE.
  *
- * No, and this constant exists so that answer lives in ONE place and can be
- * flipped in one edit if it ever changes. A live probe on 2026-09-23 ran a
- * workspace write while `collaborationMode: { mode: "plan" }` was set on both
- * the thread and the turn: the command executed, exit code 0, the file changed,
- * and no approval was raised. `thread/settings/updated` shows why, and it is
- * not subtle: plan mode fills `developer_instructions` with a strict 9 KB
+ * This file used to export `CODEX_PLAN_MODE_ENFORCED = false`, because the
+ * live probe of 2026-09-23 ran a workspace write while
+ * `collaborationMode: { mode: "plan" }` was set on both the thread and the
+ * turn: the command executed, exit code 0, the file changed, and no approval
+ * was raised. Plan mode fills `developer_instructions` with a strict 9 KB
  * "Plan Mode (Conversational)" prompt and leaves `sandboxPolicy` and
- * `approvalPolicy` exactly as they were. See
- * docs/learnings/codex-plan-mode-wire.md.
+ * `approvalPolicy` exactly as they were.
  *
- * So plan mode on Codex is a STRONGER convention than Claude Code's, which has
- * no mode at all and where the runtime does not even refuse `update_plan`, and
- * it is still a convention. The only real lock this daemon owns is the chat's
- * own `permission: "read-only"`, which the owner sets separately and which
- * would make this a different question. Until then the card and the chip must
- * not tell the owner the agent CANNOT change a file, because it can.
+ * `/plan` now turns the chat's read only sandbox on WITH the mode, and that
+ * sandbox is refused by the runtime, so the answer became per chat rather than
+ * per channel: true for a chat holding the pair, false for a chat where the
+ * model decided to propose a plan inside an ordinary coding session, and false
+ * again if the runtime would not take the setting. It lives in
+ * `src/plan-mode.ts` (`planWaitEnforced`), is read through
+ * `CodexHost.planWaitEnforcedIn` and reaches a card through
+ * `PlanLane.enforcedIn`. See docs/learnings/codex-plan-mode-wire.md for both
+ * probe runs.
  */
-export const CODEX_PLAN_MODE_ENFORCED = false;
 
 /**
  * What the wire carries when the owner answers through the ARMED composer.

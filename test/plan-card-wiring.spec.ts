@@ -61,7 +61,12 @@ function fixture(runTurn: (callbacks: any) => Promise<unknown>) {
       sendButtons: vi.fn(async () => ({ id: 1 })),
     },
     api,
-    planLane: new PlanLane(api as never),
+    // Wired exactly as the adapter wires it, resolver and all: the lane's
+    // `enforcedIn` is what `propose_plan` stamps a card with, and a fixture
+    // that left it at its default would test a lane the daemon never builds.
+    planLane: new PlanLane(api as never, (chatId: number) =>
+      adapter.host.planWaitEnforcedIn(chatId),
+    ),
     tools: { handleRequest: vi.fn(async () => ({})) },
     host: {
       runTurn: vi.fn(async (_chatId: number, _input: unknown, cb: any) =>
@@ -69,6 +74,12 @@ function fixture(runTurn: (callbacks: any) => Promise<unknown>) {
       ),
       updateSettings: vi.fn(async () => ({})),
       planModeChats: vi.fn(() => []),
+      // The chat under test is planning under the read only sandbox, which is
+      // the pair `/plan` now sets and the only thing that makes the wait real.
+      planWaitEnforcedIn: vi.fn(() => true),
+      setPlanMode: vi.fn(async (_chatId: number, on: boolean) => ({
+        enforced: on,
+      })),
     },
   });
   const reply = {
@@ -111,6 +122,31 @@ describe("the plan a Codex turn proposes reaches the chat", () => {
     ]);
     // The turn's own sentence still lands, under the card.
     expect(reply.sendText).toHaveBeenCalledWith("I explored it. Here is the plan.");
+  });
+
+  it("stamps the card with the lock the HOST has, not a channel constant", async () => {
+    // `enforced` was `CODEX_PLAN_MODE_ENFORCED = false` while plan mode moved
+    // nothing but the model's instructions. `/plan` now couples the read only
+    // sandbox to it, so the card asks the host per chat: true where the pair
+    // is on, false where a model decided to propose a plan mid coding.
+    const locked = fixture(async (cb) => {
+      await cb.onPlanProposal?.({ turnId: "t1", itemId: "p", text: PLAN });
+      return { error: null, replyText: "", turnCompleted: true, sawPlanProposal: true };
+    });
+    await locked.adapter.executeAndReply(10, 20, "Plan it", locked.reply);
+    expect(
+      (locked.api.postMessage.mock.calls[0]![0] as any).eventMeta.payload.enforced,
+    ).toBe(true);
+
+    const loose = fixture(async (cb) => {
+      await cb.onPlanProposal?.({ turnId: "t1", itemId: "p", text: PLAN });
+      return { error: null, replyText: "", turnCompleted: true, sawPlanProposal: true };
+    });
+    loose.adapter.host.planWaitEnforcedIn = vi.fn(() => false);
+    await loose.adapter.executeAndReply(10, 20, "Plan it", loose.reply);
+    expect(
+      (loose.api.postMessage.mock.calls[0]![0] as any).eventMeta.payload.enforced,
+    ).toBe(false);
   });
 
   it("spends the typed door that /plan <task> left behind, once", async () => {
@@ -195,9 +231,11 @@ describe("the owner's answer to a plan card", () => {
       callbackData: "plan:go",
       userId: "owner-1",
     });
-    expect(f.adapter.host.updateSettings).toHaveBeenCalledWith(20, {
-      mode: "default",
-    });
+    // GIVES THE ACCESS BACK, not just the mode. `/plan` took the chat read
+    // only, so a Go ahead that flipped the mode alone would approve work the
+    // sandbox then refuses to let the agent do.
+    expect(f.adapter.host.setPlanMode).toHaveBeenCalledWith(20, false);
+    expect(f.adapter.host.updateSettings).not.toHaveBeenCalled();
     expect(f.api.reportSessionMode).toHaveBeenCalledWith(10, 20, {
       mode: "default",
       enforced: false,
@@ -221,10 +259,14 @@ describe("the owner's answer to a plan card", () => {
       customText: "Skip the second step.",
       userId: "owner-1",
     });
+    // KEEPS BOTH HALVES. The revision is explored under the same read only
+    // sandbox the first plan was, so nothing is restored and the report says
+    // the lock is still on.
+    expect(f.adapter.host.setPlanMode).not.toHaveBeenCalled();
     expect(f.adapter.host.updateSettings).not.toHaveBeenCalled();
     expect(f.api.reportSessionMode).toHaveBeenCalledWith(10, 20, {
       mode: "plan",
-      enforced: false,
+      enforced: true,
     });
     expect(f.adapter.runAndReply).toHaveBeenCalledTimes(1);
     const input = JSON.stringify(f.adapter.runAndReply.mock.calls[0]![2]);
@@ -240,9 +282,7 @@ describe("the owner's answer to a plan card", () => {
       callbackData: "plan:no",
       userId: "owner-1",
     });
-    expect(f.adapter.host.updateSettings).toHaveBeenCalledWith(20, {
-      mode: "default",
-    });
+    expect(f.adapter.host.setPlanMode).toHaveBeenCalledWith(20, false);
     expect(f.adapter.runAndReply).not.toHaveBeenCalled();
     // The chips come off: nothing else will take them off.
     expect(f.api.agentRequest).toHaveBeenCalledWith("PATCH", "messages/501", 10, {
@@ -271,10 +311,10 @@ describe("the owner's answer to a plan card", () => {
     });
     await new Promise((r) => setImmediate(r));
     expect(f.api.setStatus).toHaveBeenCalledWith(10, { statusText: null });
-    expect(f.adapter.host.updateSettings).not.toHaveBeenCalled();
+    expect(f.adapter.host.setPlanMode).not.toHaveBeenCalled();
     expect(f.api.reportSessionMode).toHaveBeenCalledWith(10, 20, {
       mode: "plan",
-      enforced: false,
+      enforced: true,
     });
     expect(f.adapter.runAndReply).toHaveBeenCalledTimes(1);
     const input = JSON.stringify(f.adapter.runAndReply.mock.calls[0]![2]);
@@ -400,9 +440,7 @@ describe("a plan the AGENT decided to propose, in a chat that is not in plan mod
       callbackData: "plan:go",
       userId: "owner-1",
     });
-    expect(f.adapter.host.updateSettings).toHaveBeenCalledWith(20, {
-      mode: "default",
-    });
+    expect(f.adapter.host.setPlanMode).toHaveBeenCalledWith(20, false);
     expect(f.adapter.outbound.sendText).toHaveBeenCalled();
   });
 });
@@ -452,6 +490,31 @@ describe("chats left in plan mode", () => {
     // 21 is skipped rather than reported against a guessed agent.
     expect(f.api.reportSessionMode).toHaveBeenCalledTimes(1);
     expect(f.api.reportSessionMode).toHaveBeenCalledWith(10, 20, {
+      mode: "plan",
+      // THE LOCK SURVIVES THE RESTART TOO. The remembered permission and the
+      // mode are in the same file on disk, so a chat that comes back in plan
+      // mode comes back read only, and reporting a flat false here would
+      // downgrade every recovered chat to the convention it is not in.
+      enforced: true,
+    });
+  });
+
+  it("reports the recovered chat's own lock, chat by chat", async () => {
+    // Two chats, one daemon: 20 was planning under the sandbox and 21 was in
+    // plan mode with the sandbox refused. A constant gets one of them wrong.
+    const f = fixture(async () => ({}));
+    f.adapter.host.planModeChats = vi.fn(() => [20, 21]);
+    f.adapter.host.planWaitEnforcedIn = vi.fn((chatId: number) => chatId === 20);
+    f.adapter.chatToAssistant = new Map([
+      [20, 10],
+      [21, 10],
+    ]);
+    await f.adapter.reportStoredPlanModes();
+    expect(f.api.reportSessionMode).toHaveBeenNthCalledWith(1, 10, 20, {
+      mode: "plan",
+      enforced: true,
+    });
+    expect(f.api.reportSessionMode).toHaveBeenNthCalledWith(2, 10, 21, {
       mode: "plan",
       enforced: false,
     });

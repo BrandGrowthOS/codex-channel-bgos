@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  CODEX_PLAN_MODE_ENFORCED,
   PLAN_CHIP_CHANGE,
   PLAN_CHIP_GO,
   PLAN_CHIP_NO,
@@ -171,11 +170,21 @@ describe("the plan card payload", () => {
     expect((patch.eventMeta?.payload as { steps: unknown[] }).steps).toHaveLength(2);
   });
 
-  it("says plan mode is not enforced on this channel", () => {
-    // A live probe wrote a workspace file with collaborationMode plan set and
-    // raised no approval. If this ever flips to true, the probe has to say so
-    // first.
-    expect(CODEX_PLAN_MODE_ENFORCED).toBe(false);
+  it("carries the enforcement its caller measured, and never a constant", () => {
+    // THE SHAPE THAT REPLACED `CODEX_PLAN_MODE_ENFORCED`. The card used to
+    // hardcode false here, which was right while plan mode moved nothing but
+    // the model's instructions and wrong the moment `/plan` started holding
+    // the chat's sandbox read only. The payload now just carries what the
+    // caller measured, so one daemon can post a locked card in the chat it is
+    // planning in and an unlocked one in the chat beside it.
+    expect(planCardPayload({ ...base, enforced: true }).enforced).toBe(true);
+    expect(planCardPayload({ ...base, enforced: false }).enforced).toBe(false);
+    expect(
+      planCardFromMarkdown("## Title\n\n1. Step one", {
+        door: "mode",
+        enforced: true,
+      }).enforced,
+    ).toBe(true);
   });
 });
 

@@ -8,6 +8,17 @@ export interface SessionSettings {
   mode?: "default" | "plan";
   personality?: "none" | "friendly" | "pragmatic";
   permission?: "workspace" | "read-only";
+  /**
+   * The permission this chat had before plan mode took it read only.
+   *
+   * Plan mode is the only thing that writes this. It is stored rather than
+   * assumed because `/code` and Go ahead have to give back what the OWNER
+   * chose, not a hardcoded "workspace" that would quietly widen a chat they
+   * had narrowed on purpose. On disk with the rest, so a daemon that restarts
+   * mid plan still knows what to restore. Never sent to the runtime: see
+   * `nativeSettings`, which does not read it.
+   */
+  permissionBeforePlan?: "workspace" | "read-only";
   serviceTier?: string | null;
 }
 
@@ -43,6 +54,14 @@ function clean(value: unknown): SessionSettings {
     out.personality = v.personality;
   if (v.permission === "workspace" || v.permission === "read-only")
     out.permission = v.permission;
+  // Whitelisted like every other field: a value this function does not name is
+  // dropped on the next write, so an un-whitelisted memory would survive in
+  // memory and vanish on restart, which is the worst of both.
+  if (
+    v.permissionBeforePlan === "workspace" ||
+    v.permissionBeforePlan === "read-only"
+  )
+    out.permissionBeforePlan = v.permissionBeforePlan;
   if (
     v.serviceTier === null ||
     (typeof v.serviceTier === "string" && /^[\w-]{1,50}$/.test(v.serviceTier))

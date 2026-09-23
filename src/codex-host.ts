@@ -47,6 +47,11 @@ import {
   type SessionSettings,
   type CodexModel,
 } from "./session-settings.js";
+import {
+  planModeOff,
+  planModeOn,
+  planWaitEnforced,
+} from "./plan-mode.js";
 
 export interface DynamicTool {
   type: "function";
@@ -662,6 +667,60 @@ export class CodexHost {
       .filter(([, value]) => value.mode === "plan")
       .map(([chatId]) => chatId)
       .filter((chatId) => Number.isSafeInteger(chatId) && chatId > 0);
+  }
+  /**
+   * Is this chat's plan wait actually ENFORCED right now?
+   *
+   * Read straight off the store, synchronously, because every caller needs the
+   * answer at the moment it posts a card or reports a mode and none of them
+   * can afford `sessionSettings()`, which awaits the model catalog. The store
+   * is also the honest source: `ensureThread` builds the sandbox from it and
+   * `run()` spreads `nativeSettings()` of it onto every `turn/start`, so what
+   * is stored is what the NEXT turn will run under.
+   */
+  planWaitEnforcedIn(chatId: number): boolean {
+    return planWaitEnforced(this.settings.get(chatId));
+  }
+  /**
+   * Turn plan mode on or off for one chat, with the sandbox that makes it mean
+   * something, and say whether the lock actually took.
+   *
+   * ONE SEAM ON PURPOSE. `/plan`, `/code` and the owner answering a plan card
+   * all move the same pair of settings, and a second place to compute the pair
+   * is a second place to restore the wrong permission. It returns what the
+   * daemon may honestly report as `enforced`, which is never an assumption:
+   * `planWaitEnforced` reads the settings that were actually SAVED, after the
+   * runtime accepted them.
+   *
+   * A REFUSED SANDBOX STILL LEAVES THE MODE ON. `updateSettings` rolls the
+   * whole patch back and throws if the runtime rejects it, and losing plan
+   * mode because a sandbox could not be applied would be worse than a plan
+   * mode with no lock, which is exactly what this channel had until today. So
+   * the pair is retried as the mode alone, and the honest `enforced: false`
+   * that comes back is the same one the app already knows how to word.
+   *
+   * THE SAME RETRY ON THE WAY OFF leaves the chat read only with the mode
+   * already default, which is the one state where the app shows no chip over a
+   * chat that still refuses writes. It is deliberately not worse than that: the
+   * retry does not carry `permissionBeforePlan`, so the memory survives and the
+   * next `/code` or Go ahead restores the access, and `/permissions workspace`
+   * gets there in one step. Reporting is still truthful throughout, because
+   * `planWaitEnforced` needs the mode too and answers false.
+   */
+  async setPlanMode(
+    chatId: number,
+    on: boolean,
+  ): Promise<{ enforced: boolean }> {
+    const stored = this.settings.get(chatId);
+    const both = on ? planModeOn(stored) : planModeOff(stored);
+    try {
+      return { enforced: planWaitEnforced(await this.updateSettings(chatId, both)) };
+    } catch {
+      const modeOnly = await this.updateSettings(chatId, {
+        mode: on ? "plan" : "default",
+      });
+      return { enforced: planWaitEnforced(modeOnly) };
+    }
   }
   async sessionSettings(chatId: number): Promise<SessionSettings> {
     const settings = { model: this.opts.model, ...this.settings.get(chatId) };

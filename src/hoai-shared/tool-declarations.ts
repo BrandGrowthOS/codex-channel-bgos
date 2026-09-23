@@ -280,9 +280,13 @@ export const HOAI_TOOL_DECLARATIONS = [
         'end your turn after calling it. The answer arrives as an ordinary click ' +
         'event that starts your NEXT turn, so there is no timeout and the owner ' +
         'can answer tomorrow. ' +
-        'Change nothing on disk between proposing and Go ahead. Nothing in this ' +
-        'plugin enforces that; the card tells the owner so, and it is the one ' +
-        'promise this tool is for. ' +
+        'Change nothing on disk between proposing and Go ahead. WHETHER THAT IS ' +
+        'ENFORCED DEPENDS ON THE CHAT: when the owner typed /plan, this host ' +
+        'also holds your files read only until they answer, so a write comes ' +
+        'back denied rather than queued for approval; when you propose on your ' +
+        'own inside an ordinary coding chat nothing enforces the wait at all, ' +
+        'and the card tells the owner which of the two they are looking at. ' +
+        'Either way it is the one promise this tool is for. ' +
         'Call it when the owner typed /plan, when their per-agent plan policy ' +
         'asks you to (it arrives on the turn framing), or when a job touches ' +
         'several files or would be hard to undo. After Go ahead, do the work and ' +

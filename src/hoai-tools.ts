@@ -36,7 +36,6 @@ import {
   listRenderableKinds,
   validateComponentPayload,
 } from "./hoai-shared/renderables.js";
-import { CODEX_PLAN_MODE_ENFORCED } from "./plan-card.js";
 import type { PlanCardInput, PlanDoor } from "./plan-card.js";
 import {
   buildMissionActivePath,
@@ -80,11 +79,22 @@ export interface PlanCardPoster {
     chatId: number;
     plan: Omit<PlanCardInput, "planId" | "revision">;
   }): Promise<{ messageId: number }>;
+  /**
+   * Is this chat's plan wait actually held by a read only sandbox?
+   *
+   * Asked per chat rather than read off a constant, because one daemon can be
+   * planning under the lock in one chat and proposing a plan it decided on in
+   * an ordinary coding chat at the same time. The card's `enforced` bit is the
+   * sentence the app puts in front of the owner, so it is a fact and never an
+   * assumption.
+   */
+  enforcedIn(chatId: number): boolean;
 }
 const NO_PLAN_CARDS: PlanCardPoster = {
   async propose() {
     throw new Error("Plan cards are not available on this connection.");
   },
+  enforcedIn: () => false,
 };
 
 export interface MissionSelfWrites {
@@ -405,10 +415,14 @@ export class HoaiTools {
               : {}),
             ...(args.check ? { check: String(args.check) } : {}),
             door,
-            // A plan the MODEL decided to propose has no mode behind it at
-            // all, and even plan mode does not lock the sandbox on this
-            // channel. See CODEX_PLAN_MODE_ENFORCED.
-            enforced: CODEX_PLAN_MODE_ENFORCED,
+            // ASKED, NEVER ASSUMED. Plan mode by itself locks nothing (it
+            // rewrites the model's instructions and leaves `sandboxPolicy`
+            // alone), so what makes the wait real is the read only sandbox
+            // `/plan` now turns on with it. A plan the MODEL decided to
+            // propose inside an ordinary coding chat has neither, and this
+            // answers false for exactly that chat while answering true for
+            // the one next to it. See src/plan-mode.ts.
+            enforced: this.plans.enforcedIn(chatId),
             ...(typeof args.supersedes === "number"
               ? { supersedes: positive(args.supersedes, "supersedes") }
               : {}),
