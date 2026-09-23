@@ -62,6 +62,22 @@ describe("the plan card payload", () => {
     expect(payload.files).toHaveLength(30);
   });
 
+  it("clips a STEP's check at 200, which is not the card's 300", () => {
+    // The two caps are different in the served schema
+    // (backend/src/renderables/renderables-manifest.ts: steps.items.check is
+    // maxLength 200, the card's own check is 300) and this builder used one
+    // number for both, so a long per step check shipped a payload the served
+    // schema calls invalid. Nothing on screen showed it, which is why it needs
+    // a test rather than a look.
+    const payload = planCardPayload({
+      ...base,
+      check: "C".repeat(400),
+      steps: [{ text: "Rewrite it", check: "V".repeat(400) }],
+    });
+    expect(payload.steps[0]!.check).toHaveLength(200);
+    expect(payload.check).toHaveLength(300);
+  });
+
   it("refuses a plan with no title and one with no usable step", () => {
     expect(() => planCardPayload({ ...base, title: "   " })).toThrow(/title/i);
     expect(() =>
@@ -239,7 +255,31 @@ describe("the <proposed_plan> fallback", () => {
 });
 
 describe("the owner's plan level on the turn framing", () => {
-  it("says something the model can act on for each level", () => {
+  /**
+   * WHAT THE WIRE ACTUALLY CARRIES, copied from the backend that sends it
+   * (backend/src/services/plan-policy.ts: PLAN_POLICY_PREFIX plus the level's
+   * own sentence). It is NOT the bare enum, and the key is absent entirely at
+   * the default level, so these two strings and `undefined` are the only
+   * three things a real envelope can hand this function.
+   */
+  const WIRE_RISKY =
+    "Your owner's setting for when you show a plan before you change anything. " +
+    "It applies in every chat and on every channel. Typing /plan always shows a " +
+    "plan whatever this says, and this is a request about how you work rather " +
+    "than something the platform can enforce: decide on your own to show a plan " +
+    "first when a job touches several files or would be hard to undo, and " +
+    "otherwise get on with the work.";
+
+  it("passes the server's own labelled sentence through to the model", () => {
+    // THE REGRESSION THIS PINS: the function switched on `risky_jobs` and
+    // answered `undefined` for everything else, so the sentence above, which
+    // is the only thing the wire sends, reached no turn at all.
+    const line = planPolicySentence(WIRE_RISKY);
+    expect(line).toContain("decide on your own to show a plan first");
+    expect(line).toContain("propose_plan");
+  });
+
+  it("still says something the model can act on for a bare level", () => {
     expect(planPolicySentence("only_when_asked")).toMatch(/only when the owner asks/i);
     expect(planPolicySentence("risky_jobs")).toMatch(/propose_plan/);
     expect(planPolicySentence("always")).toMatch(/before you change a single file/i);
@@ -248,6 +288,6 @@ describe("the owner's plan level on the turn framing", () => {
   it("omits a level it was not given, rather than inventing one", () => {
     expect(planPolicySentence(undefined)).toBeUndefined();
     expect(planPolicySentence("")).toBeUndefined();
-    expect(planPolicySentence("aggressive")).toBeUndefined();
+    expect(planPolicySentence("   ")).toBeUndefined();
   });
 });

@@ -32,7 +32,18 @@ export type PlanDoor = "typed" | "decided" | "mode";
 export type PlanStepTag = "unchanged" | "changed" | "dropped";
 export type PlanCardState = "proposed" | "superseded";
 
-/** Caps from spec section 4. Clipped here, never refused for length. */
+/**
+ * Caps from spec section 4 and the renderables manifest. Clipped here, never
+ * refused for length.
+ *
+ * `check` and `stepCheck` ARE TWO DIFFERENT CAPS and the manifest is where
+ * that is decided: the card's own check line is 300, a per STEP check is 200,
+ * the same 200 every other string on a step gets. This file clipped a step's
+ * check at 300 for both, which is not a crash and not visible on screen; it
+ * is a payload the served schema (GET /api/v1/renderables) says is invalid,
+ * so the one reader that does validate would refuse a card no test here
+ * would have rejected.
+ */
 export const PLAN_CAPS = {
   title: 120,
   summary: 500,
@@ -41,6 +52,7 @@ export const PLAN_CAPS = {
   files: 30,
   filePath: 200,
   check: 300,
+  stepCheck: 200,
   note: 300,
 } as const;
 
@@ -168,7 +180,7 @@ export function planCardPayload(input: PlanCardInput): PlanCardPayload {
       const out: PlanCardStep = { text };
       const file = clip(step.file, PLAN_CAPS.filePath);
       if (file) out.file = file;
-      const check = clip(step.check, PLAN_CAPS.check);
+      const check = clip(step.check, PLAN_CAPS.stepCheck);
       if (check) out.check = check;
       if (step.tag) out.tag = step.tag;
       return out;
@@ -440,22 +452,46 @@ export function planCardFromMarkdown(
   };
 }
 
+/** The prefix this daemon puts in front of the server's own sentence. */
+export const PLAN_POLICY_PREFIX = "Plan policy:";
+
+/** The tail that names the tool, because the server's sentence cannot. */
+export const PLAN_POLICY_TOOL_TAIL =
+  "Call propose_plan when it applies, and change nothing until the owner answers.";
+
 /**
  * The owner's per agent plan level, as a sentence for the turn framing.
  *
- * It rides the inbound envelope and is rendered beside the share guardrail, so
- * the daemon never reads the assistant row: the server decides, the daemon
- * repeats. An unknown value is omitted rather than guessed.
+ * IT IS A PASS THROUGH, and that is the whole correction. `planPolicy` on the
+ * inbound envelope is NOT the bare enum: the backend ships the LABELLED
+ * SENTENCE (backend/src/services/plan-policy.ts, buildPlanPolicyField), which
+ * is the prefix "Your owner's setting for when you show a plan ..." followed
+ * by the level's own words, and it OMITS the key entirely at the default
+ * level. This function used to switch on `only_when_asked` / `risky_jobs` /
+ * `always`, three values the wire never carries, so every real envelope fell
+ * through to `undefined` and the owner's level reached no Codex turn at all.
+ * Nothing was red: the unit tests fed it the enum, which is the shape it was
+ * written against rather than the shape it is sent.
+ *
+ * So the server's words are used as sent, with the tool named after them
+ * because the canon's sentence is framework neutral and cannot say
+ * `propose_plan`. The three bare enum values are still mapped, as a courtesy
+ * to any caller that has one in hand; they are not what the wire delivers.
+ *
+ * The daemon never reads the assistant row: the server decides, the daemon
+ * repeats. An EMPTY value is omitted rather than guessed.
  */
 export function planPolicySentence(policy: string | undefined): string | undefined {
-  switch ((policy ?? "").trim()) {
+  const value = (policy ?? "").trim();
+  if (value === "") return undefined;
+  switch (value) {
     case "only_when_asked":
-      return "Plan policy: only when the owner asks. Do not propose a plan unless they type /plan.";
+      return `${PLAN_POLICY_PREFIX} only when the owner asks. Do not propose a plan unless they type /plan.`;
     case "risky_jobs":
-      return "Plan policy: bigger or risky jobs. Call propose_plan before you start when the job touches several files or would be hard to undo, and change nothing until they answer.";
+      return `${PLAN_POLICY_PREFIX} bigger or risky jobs. Call propose_plan before you start when the job touches several files or would be hard to undo, and change nothing until they answer.`;
     case "always":
-      return "Plan policy: always first. Call propose_plan and wait for Go ahead before you change a single file.";
+      return `${PLAN_POLICY_PREFIX} always first. Call propose_plan and wait for Go ahead before you change a single file.`;
     default:
-      return undefined;
+      return `${PLAN_POLICY_PREFIX} ${value} ${PLAN_POLICY_TOOL_TAIL}`;
   }
 }

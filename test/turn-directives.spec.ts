@@ -27,8 +27,25 @@ describe("the lines a turn carries above the owner's words", () => {
     );
   });
 
-  it("omits a level it does not recognise rather than guessing one", () => {
-    expect(turnDirectiveLines({ planPolicy: "whenever" })).toBe("");
+  it("carries the labelled sentence the backend really sends", () => {
+    // The wire value is the server's whole sentence, not one of three enum
+    // words. A framing that dropped it was the shipped defect.
+    const lines = turnDirectiveLines({
+      planPolicy:
+        "Your owner's setting for when you show a plan before you change " +
+        "anything. It applies in every chat and on every channel. Typing " +
+        "/plan always shows a plan whatever this says, and this is a request " +
+        "about how you work rather than something the platform can enforce: " +
+        "show a plan first, every time, before you change a single file.",
+    });
+    expect(lines).toContain("show a plan first, every time");
+    expect(lines).toContain("propose_plan");
+    expect(lines.endsWith("\n")).toBe(true);
+  });
+
+  it("omits a level it was not given rather than inventing one", () => {
+    expect(turnDirectiveLines({ planPolicy: "" })).toBe("");
+    expect(turnDirectiveLines({ planPolicy: "   " })).toBe("");
   });
 });
 

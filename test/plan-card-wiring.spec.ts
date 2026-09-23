@@ -493,10 +493,29 @@ describe("the owner's plan level reaches the model", () => {
   });
 
   it("says nothing about plans when the server sent no level", async () => {
+    // ABSENT IS THE DEFAULT LEVEL. The backend omits the key entirely on
+    // `only_when_asked` (buildPlanPolicyField returns undefined), so a turn
+    // with no key is a turn that says nothing about plans.
     expect(await framingFor()).not.toContain("Plan policy");
+    expect(await framingFor("   ")).not.toContain("Plan policy");
   });
 
-  it("invents nothing from a level it does not know", async () => {
-    expect(await framingFor("aggressive")).not.toContain("Plan policy");
+  it("carries the server's own labelled sentence, which is what the wire sends", async () => {
+    // WHAT THIS REPLACED, and why: the case here used to assert that an
+    // unrecognised value produced nothing, which read as caution and was in
+    // fact the defect. The envelope never carries `always`; it carries the
+    // whole sentence below (backend/src/services/plan-policy.ts), so "a level
+    // it does not know" described every real delivery and the owner's setting
+    // reached no turn.
+    const framing = await framingFor(
+      "Your owner's setting for when you show a plan before you change " +
+        "anything. It applies in every chat and on every channel. Typing " +
+        "/plan always shows a plan whatever this says, and this is a request " +
+        "about how you work rather than something the platform can enforce: " +
+        "show a plan first, every time, before you change a single file.",
+    );
+    expect(framing).toContain("Plan policy");
+    expect(framing).toContain("show a plan first, every time");
+    expect(framing).toContain("propose_plan");
   });
 });
