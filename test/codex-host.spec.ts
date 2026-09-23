@@ -6,7 +6,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CodexHost,
   OWNER_BLOCKING_TOOLS,
+  ROW_CHANGES_MAX,
   appServerInput,
+  rememberChanges,
   waitsForOwner,
   type RunTurnResult,
 } from "../src/codex-host.js";
@@ -670,6 +672,166 @@ describe("native Codex host contracts", () => {
       /runtime needs an update/,
     );
     expect(server.listenerCount("notification")).toBe(1); // only the host listener remains
+  });
+
+  /**
+   * The file change join: the item that says WHICH files, met with the approval
+   * request that asks about them.
+   *
+   * A live probe on app server 0.154.0 (four runs) settles the ordering this
+   * rests on: `item/started` carries `changes[{path, kind, diff}]` complete and
+   * arrives about ten milliseconds BEFORE `item/fileChange/requestApproval`, and
+   * `params.itemId` equals `item.id` exactly. It also settles what cannot be
+   * leaned on: `item/fileChange/patchUpdated` fired ZERO times, so the branch
+   * that writes the cache from it is a courtesy and never the source.
+   *
+   * Ten milliseconds is a measurement, not a guarantee: the two arrive on the
+   * same pipe from the same process, one a notification and one a request, and
+   * nothing in the protocol orders them. So the join tolerates a miss and never
+   * holds the RPC.
+   *
+   * THE HOST enriches the params rather than handing interactions a lookup,
+   * because that is one edit here against three at the adapter's `onRequest`
+   * call sites, and it covers the adopted goal turn for free.
+   *
+   * MUTATION PROOFS, run by hand against this tree:
+   *  - forwarding `params` instead of the enriched object turns the first case
+   *    red.
+   *  - keeping the entry past `item/completed` turns the second case red.
+   *  - overwriting a `changes` the runtime itself sent turns the third case red.
+   *  - dropping the ROW_CHANGES_MAX eviction turns the bound case red.
+   */
+  describe("a file change approval is joined to the item that announced it", () => {
+    const CHANGES = [
+      {
+        path: "/work/project/calc.py",
+        kind: { type: "update", move_path: null },
+        diff: "@@ -1 +1 @@\n-old\n+new\n",
+      },
+    ];
+    function startEdit(id = "call_3") {
+      server.emit("notification", "item/started", {
+        threadId: "thread-1",
+        startedAtMs: 1790152546803,
+        item: {
+          id,
+          type: "fileChange",
+          status: "inProgress",
+          cwd: "/work/project",
+          changes: CHANGES,
+        },
+      });
+    }
+
+    it("hands the approval the change list and the thread's working directory", async () => {
+      const seen: Array<{ method: string; params: any }> = [];
+      const task = host.runTurn(1, "edit", {
+        onRequest: async (method, params) => {
+          seen.push({ method, params });
+          return { decision: "decline" };
+        },
+      });
+      await vi.waitFor(() => expect(server.next).toBe(1));
+      startEdit();
+      expect(
+        await server.onRequest("item/fileChange/requestApproval", {
+          threadId: "thread-1",
+          turnId: "turn-thread-1",
+          itemId: "call_3",
+          startedAtMs: 1790152546803,
+          reason: null,
+          grantRoot: null,
+        }),
+      ).toEqual({ decision: "decline" });
+      expect(seen).toHaveLength(1);
+      expect(seen[0]!.params.changes).toEqual(CHANGES);
+      expect(seen[0]!.params.cwd).toBe("/work/project");
+      // Nothing the runtime sent is lost in the enrichment.
+      expect(seen[0]!.params.itemId).toBe("call_3");
+      expect(seen[0]!.params.reason).toBeNull();
+      server.finish("thread-1", "done");
+      await task;
+    });
+
+    it("forgets the change list the moment the item settles, and never blocks on a miss", async () => {
+      const seen: any[] = [];
+      const task = host.runTurn(1, "edit", {
+        onRequest: async (_method, params) => {
+          seen.push(params);
+          return { decision: "decline" };
+        },
+      });
+      await vi.waitFor(() => expect(server.next).toBe(1));
+      startEdit();
+      server.emit("notification", "item/completed", {
+        threadId: "thread-1",
+        item: {
+          id: "call_3",
+          type: "fileChange",
+          status: "completed",
+          changes: CHANGES,
+        },
+      });
+      // By now the owner has answered or nobody ever asked them, so the body is
+      // dropped rather than kept for the rest of the turn.
+      await server.onRequest("item/fileChange/requestApproval", {
+        threadId: "thread-1",
+        itemId: "call_3",
+      });
+      // And an item this turn never saw is simply a miss: the params go through
+      // untouched and the card posts as it did before this stage.
+      await server.onRequest("item/fileChange/requestApproval", {
+        threadId: "thread-1",
+        itemId: "never-seen",
+      });
+      expect(seen).toHaveLength(2);
+      for (const params of seen) {
+        expect(params).not.toHaveProperty("changes");
+        expect(JSON.stringify(params)).not.toContain("+new");
+      }
+      server.finish("thread-1", "done");
+      await task;
+    });
+
+    it("never overwrites a change list the runtime itself sent", async () => {
+      const seen: any[] = [];
+      const task = host.runTurn(1, "edit", {
+        onRequest: async (_method, params) => {
+          seen.push(params);
+          return { decision: "decline" };
+        },
+      });
+      await vi.waitFor(() => expect(server.next).toBe(1));
+      startEdit();
+      const own = [{ path: "other.ts", kind: "add", diff: "+x\n" }];
+      await server.onRequest("item/fileChange/requestApproval", {
+        threadId: "thread-1",
+        itemId: "call_3",
+        changes: own,
+        cwd: "/elsewhere",
+      });
+      expect(seen[0]!.changes).toEqual(own);
+      expect(seen[0]!.cwd).toBe("/elsewhere");
+      server.finish("thread-1", "done");
+      await task;
+    });
+
+    it("holds at most ROW_CHANGES_MAX change lists, oldest evicted", () => {
+      // The one thing a cache of patch BODIES must not do is grow. It is also
+      // never written to disk: a restart takes the child app server, the turn
+      // and the RPC together, so there is nothing a store could replay.
+      const turn = { rowChanges: new Map<string, unknown[]>() };
+      for (let i = 0; i < ROW_CHANGES_MAX + 4; i++)
+        rememberChanges(turn, `call_${i}`, [{ path: `f${i}`, diff: "+x" }]);
+      expect(turn.rowChanges.size).toBe(ROW_CHANGES_MAX);
+      expect(turn.rowChanges.has("call_0")).toBe(false);
+      expect(turn.rowChanges.has(`call_${ROW_CHANGES_MAX + 3}`)).toBe(true);
+      // Nothing to remember is not an entry.
+      rememberChanges(turn, "call_empty", []);
+      rememberChanges(turn, "", CHANGES);
+      expect(turn.rowChanges.has("call_empty")).toBe(false);
+      expect(turn.rowChanges.has("")).toBe(false);
+    });
   });
 });
 

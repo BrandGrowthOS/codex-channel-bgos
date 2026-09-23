@@ -1048,3 +1048,185 @@ describe("a restart retires the cards it can no longer answer", () => {
     expect(store.load()).toEqual([]);
   });
 });
+
+/**
+ * The file change card, after stage 4: it says WHICH files.
+ *
+ * Today a Codex file change ask is two generic sentences and three chips.
+ * `params.command` is absent on a file change request and `params.reason`
+ * arrives as an explicit `null` (a live probe on app server 0.154.0, four
+ * runs), which `??` also falls through, so the owner reads "Codex needs your
+ * approval to continue." over the literal "Apply file changes" and nothing in
+ * the row names a file. The host joins the item that announced the change onto
+ * these params by `itemId` (codex-host.ts, withFileChanges) and this method
+ * turns the join into the ask sentence, the file list and the two capped,
+ * masked fields on `approvalMeta`.
+ *
+ * MUTATION PROOFS, run by hand against this tree:
+ *  - dropping `change_summary` / `diff` off the typed ApprovalMeta and
+ *    inlining them in the POST body leaves the fields on the wire and the
+ *    compiler silent, which is the defect the typed interface exists to
+ *    prevent; assign them under a camelCase name instead and the "carries the
+ *    two fields" case goes red.
+ *  - building the wire for every approval method rather than the file change
+ *    one turns the command case red.
+ *  - letting a miss hold or fail the RPC, instead of posting as before, turns
+ *    the "join that missed" case red.
+ *  - letting `reason` lose to the ask sentence turns the "reason wins" case
+ *    red.
+ */
+describe("a file change approval names the files it is asking about", () => {
+  const CHANGES = [
+    {
+      path: "/work/project/calc.py",
+      kind: { type: "update", move_path: null },
+      diff: "@@ -3,3 +3,4 @@\n alpha\n-beta\n+beta (edited)\n+delta\n gamma\n",
+    },
+    {
+      path: "/work/project/CHANGELOG.md",
+      kind: { type: "add" },
+      diff: "@@ -0,0 +1 @@\n+entry\n",
+    },
+  ];
+
+  it("carries the two fields, the ask sentence and the file list", async () => {
+    vi.useFakeTimers();
+    const { bridge, ctx, api, c } = fixture();
+    const answer = bridge.approve(ctx, "item/fileChange/requestApproval", {
+      threadId: "t1",
+      turnId: "turn-1",
+      itemId: "call_3",
+      startedAtMs: 1790152546803,
+      reason: null,
+      grantRoot: null,
+      // What the host joined on, off the `item/started` notification.
+      changes: CHANGES,
+      cwd: "/work/project",
+    });
+    await tick();
+    const body = (api.agentRequest.mock.calls[0] as any)[3];
+    expect(body.text).toBe("Change calc.py and 1 more file");
+    expect(body.approvalMeta.tool).toBe("calc.py (update)\nCHANGELOG.md (add)");
+    expect(body.approvalMeta.change_summary).toEqual({
+      file_count: 2,
+      total_added: 3,
+      total_removed: 1,
+      files: [
+        { path: "calc.py", kind: "update", added: 2, removed: 1, preview: "ok" },
+        { path: "CHANGELOG.md", kind: "add", added: 1, removed: 0, preview: "ok" },
+      ],
+    });
+    expect(body.approvalMeta.diff.truncated).toBe(false);
+    expect(body.approvalMeta.diff.files[0]).toEqual({
+      path: "calc.py",
+      patch: "@@ -3,3 +3,4 @@\n alpha\n-beta\n+beta (edited)\n+delta\n gamma",
+      truncated: false,
+      omitted_lines: 0,
+      hidden_lines: 0,
+    });
+    // Stage 1's fields are exactly as stage 1 left them.
+    expect(body.approvalMeta).toMatchObject({
+      agent_route: "codex-9",
+      risk: "high",
+      wait_seconds: APPROVAL_HOLD_SECONDS,
+    });
+    // The session chip still arrives, through the `!availableDecisions`
+    // fallback, because the runtime sends no such field on this method.
+    expect(body.options.map((o: any) => o.text)).toEqual([
+      "Allow once",
+      "Allow for session",
+      "Deny",
+    ]);
+    c.abort();
+    await vi.runAllTimersAsync();
+    await answer;
+  });
+
+  it("posts exactly as it did before stage 4 when the join missed", async () => {
+    vi.useFakeTimers();
+    const { bridge, ctx, api, c } = fixture();
+    // Nothing in the protocol orders `item/started` in front of the request.
+    // Ten milliseconds was measured, not promised, so a miss is an ordinary
+    // outcome and it must never hold or fail the RPC.
+    const answer = bridge.approve(ctx, "item/fileChange/requestApproval", {
+      itemId: "call_3",
+      reason: null,
+      grantRoot: null,
+    });
+    await tick();
+    const body = (api.agentRequest.mock.calls[0] as any)[3];
+    expect(body.text).toBe("Codex needs your approval to continue.");
+    expect(body.approvalMeta.tool).toBe("Apply file changes");
+    expect(body.approvalMeta).not.toHaveProperty("change_summary");
+    expect(body.approvalMeta).not.toHaveProperty("diff");
+    c.abort();
+    await vi.runAllTimersAsync();
+    await answer;
+  });
+
+  it("lets the runtime's own sentence win when it fills one", async () => {
+    vi.useFakeTimers();
+    const { bridge, ctx, api, c } = fixture();
+    const answer = bridge.approve(ctx, "item/fileChange/requestApproval", {
+      itemId: "call_3",
+      reason: "This patch writes outside your workspace.",
+      changes: CHANGES,
+      cwd: "/work/project",
+    });
+    await tick();
+    const body = (api.agentRequest.mock.calls[0] as any)[3];
+    expect(body.text).toBe("This patch writes outside your workspace.");
+    // The list is still the list: the title and the mono panel are two
+    // strings and the reason only ever replaces the title.
+    expect(body.approvalMeta.tool).toBe("calc.py (update)\nCHANGELOG.md (add)");
+    expect(body.approvalMeta.change_summary.file_count).toBe(2);
+    c.abort();
+    await vi.runAllTimersAsync();
+    await answer;
+  });
+
+  it("leaves a command approval and a permissions approval untouched", async () => {
+    vi.useFakeTimers();
+    const { bridge, ctx, api, c } = fixture();
+    const answer = bridge.approve(
+      ctx,
+      "item/commandExecution/requestApproval",
+      { command: "rm -rf build", changes: CHANGES },
+    );
+    await tick();
+    const body = (api.agentRequest.mock.calls[0] as any)[3];
+    expect(body.approvalMeta.tool).toBe("rm -rf build");
+    expect(body.approvalMeta).not.toHaveProperty("change_summary");
+    expect(body.approvalMeta).not.toHaveProperty("diff");
+    // And no patch body rode along on a card that is not a file change.
+    expect(JSON.stringify(body)).not.toContain("beta (edited)");
+    c.abort();
+    await vi.runAllTimersAsync();
+    await answer;
+  });
+
+  it("masks a secret in the patch before the card is created", async () => {
+    vi.useFakeTimers();
+    const { bridge, ctx, api, c } = fixture();
+    const answer = bridge.approve(ctx, "item/fileChange/requestApproval", {
+      itemId: "call_4",
+      reason: null,
+      changes: [
+        {
+          path: "/work/project/.env",
+          kind: { type: "update" },
+          diff: "@@ -1 +1 @@\n+API_KEY=9f2b7c4a1e8d3f6b0c5a2e7d4b1f8c3a\n",
+        },
+      ],
+      cwd: "/work/project",
+    });
+    await tick();
+    const body = (api.agentRequest.mock.calls[0] as any)[3];
+    expect(JSON.stringify(body)).not.toContain("9f2b7c4a1e8d3f6b0c5a2e7d4b1f8c3a");
+    expect(body.approvalMeta.diff.files[0].hidden_lines).toBe(1);
+    expect(body.text).toBe("Change .env");
+    c.abort();
+    await vi.runAllTimersAsync();
+    await answer;
+  });
+});

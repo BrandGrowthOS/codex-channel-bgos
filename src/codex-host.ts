@@ -223,6 +223,23 @@ interface ActiveTurn {
   /** `startedAtMs` per item id, so a completed item can carry a duration. */
   rowStartedAt: Map<string, number>;
   /**
+   * The `changes[{path, kind, diff}]` array a `fileChange` item announced,
+   * per item id, so the approval request that follows it can say WHICH files
+   * it is asking about. Written on `item/started` (and on
+   * `item/fileChange/patchUpdated` should it ever fire; a live probe on app
+   * server 0.154.0 never saw it), dropped on `item/completed`, and gone with
+   * the turn.
+   *
+   * It lives HERE and not beside `cwdByThread`, and never on disk, for one
+   * reason each: on the turn it is cleared with the turn and the adopted goal
+   * turn gets the join for free, while a host level map would hold patch
+   * BODIES for the life of the process; and a restart takes the child app
+   * server, the turn and the RPC together, so there is nothing a disk store
+   * could ever replay. Bounded at ROW_CHANGES_MAX with the oldest evicted,
+   * because the one thing a cache of patch bodies must not do is grow.
+   */
+  rowChanges: Map<string, unknown[]>;
+  /**
    * This host's FIRST sight of each child agent, keyed on the CHILD's own
    * thread id and never on the collab item's, because the spawn call, the
    * wait call and the close call are three items about one child: keyed on
@@ -297,6 +314,35 @@ export const OWNER_BLOCKING_TOOLS = new Set(["ask_user_input"]);
  * Every OTHER tool call is the model talking to itself, and a call that never
  * comes back is exactly the silence the watchdog exists to end.
  */
+/**
+ * Item ids whose change list one turn keeps in hand at a time. Sixteen is far
+ * past any real patch burst and small enough that a forgotten delete cannot
+ * turn into a leak: each entry holds a full patch body.
+ */
+export const ROW_CHANGES_MAX = 16;
+
+/**
+ * Remember what a `fileChange` item said it would change, so the approval
+ * request that follows it by about ten milliseconds can name the files.
+ *
+ * Nothing here reads the diff. The body is held exactly as the runtime sent
+ * it and is masked and cut in `file-change-wire.ts`, at the one gate, on the
+ * way to the card.
+ */
+export function rememberChanges(
+  turn: { rowChanges: Map<string, unknown[]> },
+  itemId: string,
+  changes: unknown,
+): void {
+  if (!itemId || !Array.isArray(changes) || changes.length === 0) return;
+  turn.rowChanges.set(itemId, changes);
+  while (turn.rowChanges.size > ROW_CHANGES_MAX) {
+    const oldest = turn.rowChanges.keys().next();
+    if (oldest.done) break;
+    turn.rowChanges.delete(oldest.value);
+  }
+}
+
 export function waitsForOwner(method: string, params: RpcObject): boolean {
   if (
     method.endsWith("/requestApproval") ||
@@ -532,11 +578,12 @@ export class CodexHost {
         // An ordinary tool call is deliberately NOT parked. Nobody is holding
         // it, so a call that never comes back is exactly the silence the
         // watchdog exists to end.
+        const forwarded = this.withFileChanges(turn, method, params);
         if (!waitsForOwner(method, params))
-          return turn.callbacks.onRequest(method, params);
+          return turn.callbacks.onRequest(method, forwarded);
         turn.parkWatchdog?.();
         try {
-          return await turn.callbacks.onRequest(method, params);
+          return await turn.callbacks.onRequest(method, forwarded);
         } finally {
           turn.resumeWatchdog?.();
         }
@@ -1282,6 +1329,7 @@ export class CodexHost {
         pending: [],
         rowIdentity: new Map(),
         rowStartedAt: new Map(),
+        rowChanges: new Map(),
         childFirstSeen: new Map(),
         childState: new Map(),
         childBaseName: new Map(),
@@ -1509,6 +1557,13 @@ export class CodexHost {
       }
       if (started && itemKey && typeof params.startedAtMs === "number")
         turn.rowStartedAt.set(itemKey, params.startedAtMs);
+      // The change list, for the approval that may be ten milliseconds behind
+      // this notification. Dropped the moment the item settles: by then the
+      // owner has answered or nobody ever asked them.
+      if (itemKey && item.type === "fileChange") {
+        if (started) rememberChanges(turn, itemKey, item.changes);
+        else turn.rowChanges.delete(itemKey);
+      }
       const phase: ItemPhase = started ? "started" : "completed";
       const ctx: ItemContext = {
         ...this.itemContext(String(params.threadId ?? "")),
@@ -1547,6 +1602,13 @@ export class CodexHost {
       method === "item/fileChange/patchUpdated" ||
       method === "item/mcpToolCall/progress"
     ) {
+      // Should `patchUpdated` ever fire, the newer change list replaces the
+      // one `item/started` left. It did not fire once across four live probe
+      // runs on app server 0.154.0 (the schema lists
+      // `apply_patch_streaming_events` as under development), so NOTHING here
+      // may depend on it: the join's only proven source is `item/started`.
+      if (method === "item/fileChange/patchUpdated")
+        rememberChanges(turn, String(params.itemId ?? ""), params.changes);
       const row = rowFromProgressNotification(
         method,
         params,
@@ -1555,6 +1617,19 @@ export class CodexHost {
       );
       if (row) this.deliverRow(turn, row);
     }
+    // TWO NOTIFICATIONS DELIBERATELY LEFT UNHANDLED, both seen on the live
+    // probe and both easy to mistake for this stage's business.
+    //
+    // `turn/diff/updated` carries a whole turn `diff --git` document with
+    // index hashes and absolute paths, and it fired three times in the probe
+    // AFTER the owner had already answered. It is a bigger leak surface than
+    // the per item diff and it arrives too late to help anyone decide, so it
+    // belongs to the "here is what this turn changed" card and not to a
+    // question. `thread/status/changed` carries the runtime's own
+    // `activeFlags: ["waitingOnApproval"]`, raised at the ask and cleared at
+    // the answer, which is a cheaper and more honest source for the status
+    // line than this daemon's own bookkeeping, and changing where that line
+    // comes from is its own decision and not a side effect of a diff panel.
   }
 
   /**
@@ -1788,6 +1863,41 @@ export class CodexHost {
     return { cwd: this.cwdByThread.get(threadId) ?? this.workdir };
   }
 
+  /**
+   * A file change approval, joined to the item that announced it.
+   *
+   * THE HOST enriches the params, rather than handing `interactions.approve` a
+   * lookup through its context, because that is ONE edit here against three at
+   * the `onRequest` call sites in adapter.ts, and three call sites that have
+   * to stay in step is the exact failure the comment beside them already
+   * warns about. It also covers the adopted goal turn for free.
+   *
+   * The join TOLERATES A MISS and never waits for one. `item/started` arrived
+   * about ten milliseconds ahead of the request in every live probe run, on
+   * the same pipe from the same process, but nothing in the protocol orders a
+   * notification in front of a request, so a missing entry simply leaves the
+   * params alone and the card posts exactly as it did before stage 4.
+   *
+   * Nothing the runtime itself sent is overwritten: if a later protocol
+   * version starts carrying `changes` or `cwd` on the request, its own values
+   * win.
+   */
+  private withFileChanges(
+    turn: ActiveTurn,
+    method: string,
+    params: RpcObject,
+  ): RpcObject {
+    if (method !== "item/fileChange/requestApproval") return params;
+    const itemId = typeof params.itemId === "string" ? params.itemId : "";
+    const changes = itemId ? turn.rowChanges.get(itemId) : undefined;
+    if (!changes) return params;
+    const enriched: RpcObject = { ...params };
+    if (!Array.isArray(enriched.changes)) enriched.changes = changes;
+    if (typeof enriched.cwd !== "string" || enriched.cwd.length === 0)
+      enriched.cwd = this.itemContext(String(params.threadId ?? "")).cwd;
+    return enriched;
+  }
+
   /** True when the marker reached a sink. False means nobody took it. */
   private deliverMarker(turn: ActiveTurn, marker: ActivityMarker): boolean {
     const handler = turn.callbacks.onActivityMarker;
@@ -1882,6 +1992,7 @@ export class CodexHost {
       pending: [],
       rowIdentity: new Map(),
       rowStartedAt: new Map(),
+      rowChanges: new Map(),
       childFirstSeen: new Map(),
       childState: new Map(),
       childBaseName: new Map(),
