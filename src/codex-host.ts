@@ -314,6 +314,20 @@ export const OWNER_BLOCKING_TOOLS = new Set(["ask_user_input"]);
  * Every OTHER tool call is the model talking to itself, and a call that never
  * comes back is exactly the silence the watchdog exists to end.
  */
+export function waitsForOwner(method: string, params: RpcObject): boolean {
+  if (
+    method.endsWith("/requestApproval") ||
+    method === "item/tool/requestUserInput" ||
+    method === "mcpServer/elicitation/request"
+  )
+    return true;
+  return (
+    method === "item/tool/call" &&
+    typeof params.tool === "string" &&
+    OWNER_BLOCKING_TOOLS.has(params.tool)
+  );
+}
+
 /**
  * Item ids whose change list one turn keeps in hand at a time. Sixteen is far
  * past any real patch burst and small enough that a forgotten delete cannot
@@ -341,20 +355,6 @@ export function rememberChanges(
     if (oldest.done) break;
     turn.rowChanges.delete(oldest.value);
   }
-}
-
-export function waitsForOwner(method: string, params: RpcObject): boolean {
-  if (
-    method.endsWith("/requestApproval") ||
-    method === "item/tool/requestUserInput" ||
-    method === "mcpServer/elicitation/request"
-  )
-    return true;
-  return (
-    method === "item/tool/call" &&
-    typeof params.tool === "string" &&
-    OWNER_BLOCKING_TOOLS.has(params.tool)
-  );
 }
 
 /**

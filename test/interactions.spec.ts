@@ -1074,6 +1074,10 @@ describe("a restart retires the cards it can no longer answer", () => {
  *    the "join that missed" case red.
  *  - letting `reason` lose to the ask sentence turns the "reason wins" case
  *    red.
+ *  - dropping META_RESERVE_BYTES to 0 in file-change-wire.ts turns the "posts
+ *    an approvalMeta the server's byte cap accepts" case red: it weighs the
+ *    posted block, which is what the server weighs, and not the three keys
+ *    the daemon's own cut measures.
  */
 describe("a file change approval names the files it is asking about", () => {
   const CHANGES = [
@@ -1225,6 +1229,43 @@ describe("a file change approval names the files it is asking about", () => {
     expect(JSON.stringify(body)).not.toContain("9f2b7c4a1e8d3f6b0c5a2e7d4b1f8c3a");
     expect(body.approvalMeta.diff.files[0].hidden_lines).toBe(1);
     expect(body.text).toBe("Change .env");
+    c.abort();
+    await vi.runAllTimersAsync();
+    await answer;
+  });
+
+  it("posts an approvalMeta the server's byte cap accepts, measured on the WHOLE block", async () => {
+    // The daemon weighs `{change_summary, diff, tool}` and adds a 1,024 byte
+    // reserve as a stand in for the four stage 1 fields. Nothing measured the
+    // block the SERVER measures, so the reserve going stale (the next field
+    // added to ApprovalMeta) would show up as a 400 in production and as
+    // green here, and a 400 costs the owner the whole card. This case weighs
+    // the real posted body, off the mock, on a patch cut to the cap exactly.
+    vi.useFakeTimers();
+    const { bridge, ctx, api, c } = fixture();
+    const answer = bridge.approve(ctx, "item/fileChange/requestApproval", {
+      itemId: "call_5",
+      reason: null,
+      // One line, inside the unit cap and twice the byte cap, so the byte
+      // cut lands on the limit and the stage 1 fields have nowhere to hide.
+      changes: [
+        {
+          path: "/work/project/bundle.min.js",
+          kind: { type: "update" },
+          diff: `+${"\u0639".repeat(60_000)}`,
+        },
+      ],
+      cwd: "/work/project",
+    });
+    await tick();
+    const body = (api.agentRequest.mock.calls[0] as any)[3];
+    expect(
+      Buffer.byteLength(JSON.stringify(body.approvalMeta), "utf8"),
+    ).toBeLessThanOrEqual(98_304);
+    // Under the cap AND still a panel: an absent diff satisfies a byte cap
+    // trivially, and the cut says how much of the file did not arrive.
+    expect(body.approvalMeta.diff.files[0].patch.length).toBeGreaterThan(0);
+    expect(body.approvalMeta.diff.files[0].omitted_lines).toBeGreaterThan(0);
     c.abort();
     await vi.runAllTimersAsync();
     await answer;

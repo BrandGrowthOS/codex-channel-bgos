@@ -223,11 +223,22 @@ function tailOf(full: string, count: number): string {
  * separate, are numbered. Both lists take the SAME string, because both are
  * written from this one row.
  *
- * Exactly one parent, and never past a `~`: widening is a privacy cost as
- * well as a fix, since the segments above a file carry the account name on
- * every desktop, which is the whole reason `shortenPath` cut them off. One
- * segment separates two checkouts, which is the case this actually fires for,
- * and a `~` path is already relative to a home the wire refuses to name.
+ * ONE SEGMENT AT A TIME, as far as it takes, and never past a `~` or as far
+ * as the root: widening is a privacy cost as well as a fix, since the
+ * segments above a file carry the account name on every desktop, which is the
+ * whole reason `shortenPath` cut them off, so each step is paid for by a
+ * collision that is still unresolved. It used to widen by exactly ONE parent
+ * and then fall through to the numbering, which is wrong for a case that is
+ * not exotic at all: three checkouts of one repo (`/a/proj/src/i.ts`,
+ * `/b/proj/src/i.ts`, `/c/proj/src/i.ts`) gave `src/i.ts`, `proj/src/i.ts`
+ * and `src/i.ts (2)`, so two DIFFERENT files read on the card as two changes
+ * to one file. The numbering is reserved for what its own sentence says: two
+ * changes to the SAME file, which no tail could ever separate, and a
+ * collision no widening resolved.
+ *
+ * The walk stops before the root separator, so an absolute path never arrives
+ * whole (`/c/proj/src/i.ts` widens at most to `c/proj/src/i.ts`), and it
+ * stops at a `~` segment, which names a home the wire refuses to name.
  */
 function distinctPath(
   short: string,
@@ -236,8 +247,14 @@ function distinctPath(
   used: Map<string, string>,
 ): string {
   if (!sameFile && !short.startsWith("~")) {
-    const wider = tailOf(full, 3);
-    if (wider && wider !== short && !used.has(wider)) return wider;
+    const parts = segmentsOf(full);
+    for (let count = 3; count <= parts.length; count += 1) {
+      const added = parts[parts.length - count]!;
+      if (added.startsWith("~")) break;
+      const wider = tailOf(full, count);
+      if (!wider || wider === short) continue;
+      if (!used.has(wider)) return wider;
+    }
   }
   const base = clipText(short, PATH_MAX - 8);
   for (let n = 2; n <= DIFF_FILES_MAX + 1; n += 1) {
@@ -273,8 +290,19 @@ function byteLength(text: string): number {
  * guard is the one that matters: Postgres refuses a lone surrogate in JSONB.
  * False when not even one readable character fits, and the caller then drops
  * the file as before.
+ *
+ * EITHER cut counts, and the cut INSIDE a line counts too. There are two
+ * places a file is cut inside a line on this wire, this one and the unit cap
+ * in `buildDiffForWire`, and a count only the other one bumps leaves this one
+ * SILENT: the app draws "Cut short: {n} more lines not sent" from
+ * `omitted_lines` alone, so a minified file that fits the unit cap and not
+ * the byte cap shipped `truncated: true` with a zero beside it and fell back
+ * to the weaker, countless note. A line that arrived in pieces did not
+ * arrive, which is what the wire type's own docblock says the count means, so
+ * it is counted ONCE however many byte passes the cut takes.
  */
 function cutFileToBytes(file: DiffWireFile, over: () => number): boolean {
+  let countedInsideCut = false;
   for (let guard = 0; guard < 64 && over() > 0; guard += 1) {
     const lines = file.patch.split("\n");
     if (lines.length > 1) {
@@ -308,6 +336,10 @@ function cutFileToBytes(file: DiffWireFile, over: () => number): boolean {
     if (cut.length === 0) return false;
     file.patch = cut;
     file.truncated = true;
+    if (!countedInsideCut) {
+      file.omitted_lines += 1;
+      countedInsideCut = true;
+    }
   }
   return over() <= 0;
 }

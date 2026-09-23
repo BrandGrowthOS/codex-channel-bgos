@@ -49,11 +49,21 @@
  *    "draws the cut note on a minified file" goes red
  *  - stop setting `anyLeftOut` on a binary row -> "says a binary file was left
  *    out of the panels" goes red
+ *  - drop the `omitted_lines += 1` from cutFileToBytes's inside-a-line branch
+ *    -> "counts the line the BYTE cap cut inside" goes red, which is the same
+ *    silence the unit cap's own bump exists to prevent
+ *  - widen a path collision by exactly ONE parent and then number it ->
+ *    "keeps widening past one parent" goes red, and two checkouts of one repo
+ *    read as two changes to one file
+ *  - drop META_RESERVE_BYTES to 0 -> "counts the line the BYTE cap cut inside"
+ *    goes red on its byte assertion, because the block the SERVER weighs
+ *    carries four fields this side's own measurement does not
  *  - call `redactOutput` instead of `redactPatch` in buildDiffForWire (drop
  *    the gutter from the collapsed key block) -> "keeps the gutter of the line
  *    it replaced" goes red, and so does the app's own
  *    diffModel "a collapsed private key block" case
  */
+import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -61,6 +71,7 @@ import {
   DIFF_FILES_MAX,
   DIFF_LINES_PER_FILE,
   DIFF_UNITS_TOTAL,
+  type FileChangeWire,
   askSentence,
   buildDiffForWire,
   hiddenLineCount,
@@ -68,10 +79,38 @@ import {
   toolLines,
   wireChangeKind,
 } from "../src/file-change-wire.js";
+import { APPROVAL_HOLD_SECONDS } from "../src/interactions.js";
 import { redactOutput, redactPatch } from "../src/redact-output.js";
 
 const CWD = "/work/project";
 const ctx = { cwd: CWD, home: "/home/owner" };
+
+/**
+ * The block the SERVER measures, which is not the three keys this file builds.
+ *
+ * `metaBytes` in the source weighs `{change_summary, diff, tool}` and adds
+ * META_RESERVE_BYTES as a stand in for the stage 1 fields that ride beside
+ * them. A test that weighs those same three keys asserts only that the
+ * implementation agrees with itself, and can never catch the one way that
+ * constant fails: a field added to `ApprovalMeta` eats the headroom, the
+ * daemon starts posting bodies the server answers with a 400, and a 400 costs
+ * the owner the whole card. So every byte cap case here weighs the REAL
+ * `approvalMeta`, exactly as `interactions.approve` assembles it.
+ */
+function approvalMetaBytes(wire: FileChangeWire): number {
+  return Buffer.byteLength(
+    JSON.stringify({
+      tool: wire.tool,
+      agent_route: "codex-9",
+      risk: "high",
+      request_id: randomUUID(),
+      wait_seconds: APPROVAL_HOLD_SECONDS,
+      change_summary: wire.change_summary,
+      diff: wire.diff,
+    }),
+    "utf8",
+  );
+}
 
 function change(path: string, kind: unknown, diff: string) {
   return { path, kind, diff };
@@ -356,6 +395,32 @@ describe("buildDiffForWire: the summary every card carries", () => {
       );
   });
 
+  it("keeps widening past one parent, because three checkouts of one repo is ordinary", () => {
+    // `shortenPath` keeps the basename and ONE parent, so three checkouts of
+    // one repository collapse onto one string. Widening by exactly one parent
+    // and then NUMBERING gave `src/i.ts`, `proj/src/i.ts` and `src/i.ts (2)`,
+    // so two DIFFERENT files read on the card as two changes to one file, on
+    // the one card whose whole job is to say what the owner is authorising.
+    // The numbering is for what its own sentence says: the SAME file twice.
+    const wire = buildDiffForWire(
+      [
+        change("/a/proj/src/i.ts", { type: "update" }, "@@ -1 +1 @@\n-a\n+A\n"),
+        change("/b/proj/src/i.ts", { type: "update" }, "@@ -1 +1 @@\n-b\n+B\n"),
+        change("/c/proj/src/i.ts", { type: "update" }, "@@ -1 +1 @@\n-c\n+C\n"),
+      ],
+      { home: "/home/owner" },
+    )!;
+    const names = wire.change_summary.files.map((f) => f.path);
+    expect(names).toEqual(["src/i.ts", "proj/src/i.ts", "c/proj/src/i.ts"]);
+    expect(new Set(names).size).toBe(3);
+    // Not a numbered row anywhere: every one of them is a different file.
+    for (const name of names) expect(name).not.toContain("(2)");
+    for (const [i, name] of names.entries())
+      expect(wire.diff!.files.find((f) => f.path === name)!.patch).toContain(
+        ["+A", "+B", "+C"][i]!,
+      );
+  });
+
   it("numbers two changes to the SAME file, which no parent segment can separate", () => {
     // The runtime does announce a rewrite and the rename of one file as two
     // changes. There is no longer tail to fall back on, so the row is numbered
@@ -503,16 +568,7 @@ describe("buildDiffForWire: the caps, and the order they are applied in", () => 
     expect(sent.patch.startsWith("+\u0639")).toBe(true);
     expect(sent.truncated).toBe(true);
     expect(sent.omitted_lines).toBeGreaterThan(0);
-    expect(
-      Buffer.byteLength(
-        JSON.stringify({
-          change_summary: wire.change_summary,
-          diff: wire.diff,
-          tool: wire.tool,
-        }),
-        "utf8",
-      ),
-    ).toBeLessThanOrEqual(APPROVAL_META_BYTES_MAX);
+    expect(approvalMetaBytes(wire)).toBeLessThanOrEqual(APPROVAL_META_BYTES_MAX);
   });
 
   it("stays under the byte cap the server enforces on the whole column", () => {
@@ -526,15 +582,7 @@ describe("buildDiffForWire: the caps, and the order they are applied in", () => 
       [change("a.txt", "update", lines.join("\n")), change("b.txt", "update", lines.join("\n"))],
       ctx,
     )!;
-    const bytes = Buffer.byteLength(
-      JSON.stringify({
-        change_summary: wire.change_summary,
-        diff: wire.diff,
-        tool: wire.tool,
-      }),
-      "utf8",
-    );
-    expect(bytes).toBeLessThanOrEqual(APPROVAL_META_BYTES_MAX);
+    expect(approvalMetaBytes(wire)).toBeLessThanOrEqual(APPROVAL_META_BYTES_MAX);
     // Under the cap AND still there: an absent diff satisfies a byte cap
     // trivially, which is how a one file card once lost its whole panel here.
     expect(wire.diff!.files.length).toBeGreaterThan(0);
@@ -542,6 +590,30 @@ describe("buildDiffForWire: the caps, and the order they are applied in", () => 
     // The plain line survives whatever the body costs: it is the part that is
     // never gated and never cut.
     expect(wire.change_summary.file_count).toBe(2);
+  });
+
+  it("counts the line the BYTE cap cut inside, so a minified file still says it was cut", () => {
+    // ONE line of 60,000 Arabic characters: inside the 65,536 unit cap, and
+    // twice the 96 KB byte cap. So the unit cut never fires and the only cut
+    // that does is the byte one, landing INSIDE the single line. That path
+    // used to set `truncated` and leave `omitted_lines` at zero, and the app
+    // draws "Cut short: {n} more lines not sent" from that number alone, so
+    // the card fell back to the weaker note that cannot say how much is
+    // missing. A line that arrived in pieces did not arrive.
+    const wire = buildDiffForWire(
+      [change("bundle.min.js", "update", `+${"\u0639".repeat(60_000)}`)],
+      ctx,
+    )!;
+    const sent = wire.diff!.files[0]!;
+    expect(sent.patch.length).toBeLessThan(60_001);
+    expect(sent.truncated).toBe(true);
+    expect(sent.omitted_lines).toBeGreaterThan(0);
+    // Counted ONCE, however many byte passes the cut took.
+    expect(sent.omitted_lines).toBe(1);
+    // And the block the server weighs still fits, which is what makes this the
+    // case that catches a stale META_RESERVE_BYTES: the cut lands on the cap
+    // exactly, so the stage 1 fields have nowhere to hide.
+    expect(approvalMetaBytes(wire)).toBeLessThanOrEqual(APPROVAL_META_BYTES_MAX);
   });
 });
 

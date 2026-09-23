@@ -363,7 +363,9 @@ export interface OutboundMessagePayload {
        * older backend drops what it does not know and an older app draws the
        * row as before. `kind` absent reads as "tool". The last four are what
        * a command printed, the code it exited with and the lines an edit
-       * moved; a diff BODY still never leaves the machine.
+       * moved; a diff BODY never leaves the machine on a ROW. The one case it
+       * does is the file change approval card: see rule 2 in
+       * `activity-markers.ts` and `ApprovalMeta.diff` above.
        *
        * This is the SECOND of three hand written copies of this row shape
        * (`ToolProgressEntry` in tool-progress.ts and the inline type in
