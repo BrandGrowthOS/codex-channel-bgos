@@ -58,6 +58,10 @@
  *  - drop META_RESERVE_BYTES to 0 -> "counts the line the BYTE cap cut inside"
  *    goes red on its byte assertion, because the block the SERVER weighs
  *    carries four fields this side's own measurement does not
+ *  - drop REQUEST_STRINGS_RESERVE_BYTES out of META_RESERVE_BYTES -> "leaves
+ *    room for the two strings a request card can carry" goes red, which is the
+ *    same failure one stage later: a field added to ApprovalMeta eats the
+ *    headroom and the server answers the create with a 400
  *  - call `redactOutput` instead of `redactPatch` in buildDiffForWire (drop
  *    the gutter from the collapsed key block) -> "keeps the gutter of the line
  *    it replaced" goes red, and so does the app's own
@@ -71,6 +75,8 @@ import {
   DIFF_FILES_MAX,
   DIFF_LINES_PER_FILE,
   DIFF_UNITS_TOTAL,
+  REQUEST_REASON_MAX_UNITS,
+  REQUEST_RULE_TEXT_MAX_UNITS,
   type FileChangeWire,
   askSentence,
   buildDiffForWire,
@@ -89,8 +95,8 @@ const ctx = { cwd: CWD, home: "/home/owner" };
  * The block the SERVER measures, which is not the three keys this file builds.
  *
  * `metaBytes` in the source weighs `{change_summary, diff, tool}` and adds
- * META_RESERVE_BYTES as a stand in for the stage 1 fields that ride beside
- * them. A test that weighs those same three keys asserts only that the
+ * META_RESERVE_BYTES as a stand in for the six fields that can ride beside
+ * them: stage 1's four, and stage 5's `reason` and `rule_text`. A test that weighs those same three keys asserts only that the
  * implementation agrees with itself, and can never catch the one way that
  * constant fails: a field added to `ApprovalMeta` eats the headroom, the
  * daemon starts posting bodies the server answers with a 400, and a 400 costs
@@ -614,6 +620,44 @@ describe("buildDiffForWire: the caps, and the order they are applied in", () => 
     // case that catches a stale META_RESERVE_BYTES: the cut lands on the cap
     // exactly, so the stage 1 fields have nowhere to hide.
     expect(approvalMetaBytes(wire)).toBeLessThanOrEqual(APPROVAL_META_BYTES_MAX);
+  });
+
+  it("leaves room for the two strings a request card can carry, at their worst", () => {
+    // The two stage 5 strings do NOT ride a file change card today: a file
+    // change request carries no exec policy amendment, so no always tier and
+    // no rule, and its `reason` arrives as an explicit null. They are counted
+    // anyway, because the reserve is this file's stand in for every
+    // ApprovalMeta field it does not weigh and the ONE way that constant fails
+    // is a field being added to the interface and quietly eating the headroom:
+    // the daemon then posts a body the server answers with a 400 and the owner
+    // loses the whole card. A field that exists is a field that can ride.
+    //
+    // Worst case on purpose. A control character leaves JSON.stringify as the
+    // six byte escape `\u0001`, which is the most one UTF-16 unit can cost
+    // inside a JSON string; a three byte BMP character costs three and a
+    // surrogate pair four bytes for its two units.
+    const wire = buildDiffForWire(
+      [change("bundle.min.js", "update", `+${"\u0639".repeat(60_000)}`)],
+      ctx,
+    )!;
+    const bytes = Buffer.byteLength(
+      JSON.stringify({
+        tool: wire.tool,
+        agent_route: "codex-9",
+        risk: "high",
+        request_id: randomUUID(),
+        wait_seconds: APPROVAL_HOLD_SECONDS,
+        change_summary: wire.change_summary,
+        diff: wire.diff,
+        reason: "\u0001".repeat(REQUEST_REASON_MAX_UNITS),
+        rule_text: "\u0001".repeat(REQUEST_RULE_TEXT_MAX_UNITS),
+      }),
+      "utf8",
+    );
+    expect(bytes).toBeLessThanOrEqual(APPROVAL_META_BYTES_MAX);
+    // Still a panel underneath all that, which is what makes the case mean
+    // something: an absent diff satisfies a byte cap trivially.
+    expect(wire.diff!.files[0]!.patch.length).toBeGreaterThan(0);
   });
 });
 

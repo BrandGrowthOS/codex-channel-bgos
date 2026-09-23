@@ -60,7 +60,14 @@ jobs:
           # without the stage 4 DTO this daemon masks and caps a patch for
           # nothing and the card still reads "Apply file changes". It also
           # inherits both holds above. Held for all three.
-          HELD_FROM_LATEST="0.10.1 0.11.0 0.12.0"
+          # 0.13.0: the request card's `approvalMeta.reason` and
+          # `approvalMeta.rule_text`. Same mechanism as 0.12.0 and the same
+          # cost: against a backend without the stage 5 DTO both are stripped
+          # with a 201 and no error, so the card still says nothing about why
+          # the agent is asking and nothing about the permanent, global rule an
+          # Always answer would write. It inherits all three holds above. Held
+          # for all four.
+          HELD_FROM_LATEST="0.10.1 0.11.0 0.12.0 0.13.0"
           DIST_TAG=latest
           for held in $HELD_FROM_LATEST; do
             if [ "$CURRENT" = "$held" ]; then

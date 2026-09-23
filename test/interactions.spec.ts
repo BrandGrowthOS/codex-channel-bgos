@@ -1,12 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   APPROVAL_HOLD_SECONDS,
+  EXECPOLICY_RULE_LEAD,
   Interactions,
   POLL_FAST_MS,
   POLL_FAST_WINDOW_MS,
   POLL_MAX_SPAN,
   POLL_SLOW_MS,
   coalesceReads,
+  execpolicyRuleText,
   pollIntervalMs,
   retireOrphanedApprovals,
   storedWaitSeconds,
@@ -1269,5 +1271,285 @@ describe("a file change approval names the files it is asking about", () => {
     c.abort();
     await vi.runAllTimersAsync();
     await answer;
+  });
+});
+
+/**
+ * Stage 5: a command approval says WHAT it would run, WHY the model is asking,
+ * and WHAT pressing Always would save.
+ *
+ * All three come from params a `commandExecution` approval carries and this
+ * daemon read none of before this stage. The shapes below are the ones a live
+ * probe against app server 0.154.0 actually captured, twice, with a control
+ * run beside them: `commandActions[0].command` is the command WITHOUT the
+ * shell wrapper, `params.reason` is `exec_command`'s `justification` passed
+ * through unaltered, and `proposedExecpolicyAmendment` is the WHOLE argv as a
+ * string array, which stayed the whole argv even when the model supplied the
+ * `prefix_rule` the tool schema advertises for narrowing it.
+ *
+ * The probe also proved the thing the rule sentence exists to say: answering
+ * with the amendment APPENDED a permanent line to the owner's global
+ * `~/.codex/rules/default.rules`, and the next identical command in the same
+ * turn raised no approval at all, while the control's plain `accept` wrote
+ * nothing and was asked again.
+ *
+ * MUTATION PROOFS, run by hand against this tree:
+ *  - drop the `askTitle` branch and let `text` fall back to the old
+ *    `params.reason ?? generic` -> "reads the command back as the title" and
+ *    "falls back to the wrapped command" go red.
+ *  - drop the `trimmed === title.trim()` guard in `differingReason` -> "sends
+ *    no reason when the sentence is already the title" goes red and the card
+ *    reads one sentence twice.
+ *  - stop quoting a token that holds whitespace in `execpolicyRuleText` ->
+ *    "quotes only the tokens that hold whitespace" goes red and a three
+ *    argument command reads as five.
+ *  - use `clipText` in place of `clipToCap` -> "clips all three inside their
+ *    caps" goes red on the ellipsis, and a cut command reads as a complete,
+ *    shorter command.
+ *  - send `rule_text` whenever the amendment is present, rather than only when
+ *    the Always tier was offered -> "sends no rule beside a button that is not
+ *    offered" goes red.
+ *  - compute the two strings on every method rather than the command one ->
+ *    "sends neither string on a file change approval" goes red.
+ *  - assign either field under a camelCase name (`ruleText`) instead of on the
+ *    typed ApprovalMeta -> "says what Always would save" goes red, which is
+ *    the whole reason the interface is typed: the backend would drop it with a
+ *    201 and no error.
+ */
+describe("a command approval says what it runs, why, and what Always would save", () => {
+  /** The wrapper the runtime would really run, wrapped command and all. */
+  const WRAPPED =
+    '"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command ' +
+    "'echo exec-probe > probe.txt'";
+  const AMENDMENT = [
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "-Command",
+    "echo exec-probe > probe.txt",
+  ];
+  /** The twelve fields the probe saw, in the order it saw them. */
+  const COMMAND_PARAMS = {
+    kind: "command",
+    threadId: "t1",
+    turnId: "turn-1",
+    itemId: "call_1",
+    startedAtMs: 1790152546803,
+    environmentId: "local",
+    reason: "Write probe.txt in the scratch directory",
+    command: WRAPPED,
+    cwd: "E:\\scratch",
+    commandActions: [{ type: "unknown", command: "echo exec-probe > probe.txt" }],
+    proposedExecpolicyAmendment: AMENDMENT,
+    availableDecisions: [
+      "accept",
+      { acceptWithExecpolicyAmendment: { execpolicy_amendment: AMENDMENT } },
+      "cancel",
+    ],
+  };
+
+  async function post(params: Record<string, unknown>, method = "item/commandExecution/requestApproval") {
+    const { bridge, ctx, api, c } = fixture();
+    const answer = bridge.approve(ctx, method, params);
+    await tick();
+    const body = (api.agentRequest.mock.calls[0] as any)[3];
+    c.abort();
+    await vi.runAllTimersAsync();
+    await answer;
+    return body;
+  }
+
+  it("reads the command back as the title and the model's justification as the reason", async () => {
+    vi.useFakeTimers();
+    const body = await post(COMMAND_PARAMS);
+    // The title is the ACTION's command, which is the string a person reads.
+    expect(body.text).toBe("Run echo exec-probe > probe.txt");
+    // The reason is the model's own sentence, verbatim, and it is not the
+    // title, so the card says what AND why instead of one of them twice.
+    expect(body.approvalMeta.reason).toBe("Write probe.txt in the scratch directory");
+    // The mono panel keeps the literal argv the runtime would run: the title
+    // moved, the evidence did not.
+    expect(body.approvalMeta.tool).toBe(WRAPPED);
+    // Stage 1's fields, untouched.
+    expect(body.approvalMeta).toMatchObject({
+      agent_route: "codex-9",
+      risk: "high",
+      wait_seconds: APPROVAL_HOLD_SECONDS,
+    });
+    // No session chip: `availableDecisions` on a real command approval does
+    // not carry `acceptForSession`, and the amendment entry is what puts the
+    // Always chip there.
+    expect(body.options.map((o: any) => o.text)).toEqual([
+      "Allow once",
+      "Always allow this rule",
+      "Deny",
+    ]);
+  });
+
+  it("says what Always would save: this exact command, everywhere, until it is removed", async () => {
+    vi.useFakeTimers();
+    const body = await post(COMMAND_PARAMS);
+    expect(body.approvalMeta.rule_text).toBe(
+      "this exact command runs without asking again, in every project on this " +
+        "computer, until you remove the rule from your Codex rules file: " +
+        "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -Command " +
+        '"echo exec-probe > probe.txt"',
+    );
+    // Never a family of commands: the probe proved `prefix_rule` does not
+    // narrow the amendment, so a sentence about a pattern would be a lie.
+    expect(body.approvalMeta.rule_text).not.toContain("commands like");
+  });
+
+  it("quotes only the tokens that hold whitespace, so three arguments do not read as five", () => {
+    expect(
+      execpolicyRuleText(["C:\\Program Files\\PowerShell\\pwsh.exe", "-c", "ls a b"]),
+    ).toBe(
+      `${EXECPOLICY_RULE_LEAD}"C:\\Program Files\\PowerShell\\pwsh.exe" -c "ls a b"`,
+    );
+    // A shape this cannot render honestly gets no sentence at all, rather than
+    // half a command. The Always button is offered on a truthy amendment, so
+    // this is the case where the button ships with no claim beside it, which
+    // is exactly where this stage started.
+    expect(execpolicyRuleText(["git", 7])).toBeNull();
+    expect(execpolicyRuleText([])).toBeNull();
+    expect(execpolicyRuleText("git pull")).toBeNull();
+    expect(execpolicyRuleText(undefined)).toBeNull();
+  });
+
+  it("falls back to the wrapped command when the runtime sent no action", async () => {
+    vi.useFakeTimers();
+    const body = await post({
+      command: "rm -rf build",
+      reason: "Clear the stale build directory",
+      availableDecisions: ["accept", "decline"],
+    });
+    expect(body.text).toBe("Run rm -rf build");
+    expect(body.approvalMeta.reason).toBe("Clear the stale build directory");
+    expect(body.approvalMeta).not.toHaveProperty("rule_text");
+  });
+
+  it("sends no reason when the sentence is already the title", async () => {
+    vi.useFakeTimers();
+    // Neither an action nor a command: the title falls back to the runtime's
+    // sentence exactly as it did before this stage, so a reason line would
+    // draw that same sentence a second time.
+    const body = await post({
+      reason: "Codex needs to reconfigure the network.",
+      availableDecisions: ["accept", "decline"],
+    });
+    expect(body.text).toBe("Codex needs to reconfigure the network.");
+    expect(body.approvalMeta).not.toHaveProperty("reason");
+    // A blank sentence is not a sentence either.
+    const blank = await post({ command: "ls", reason: "   " });
+    expect(blank.text).toBe("Run ls");
+    expect(blank.approvalMeta).not.toHaveProperty("reason");
+  });
+
+  it("clips all three inside their caps, ellipsis and all", async () => {
+    vi.useFakeTimers();
+    const body = await post({
+      reason: "b".repeat(400),
+      command: "wrapped",
+      commandActions: [{ command: "a".repeat(300) }],
+      proposedExecpolicyAmendment: ["c".repeat(700)],
+      availableDecisions: [
+        { acceptWithExecpolicyAmendment: { execpolicy_amendment: ["c"] } },
+      ],
+    });
+    // The backend REFUSES a string past its length rather than clipping it, so
+    // one unit over costs the owner the whole card. Every cut is marked,
+    // because a silent prefix renders as a complete, shorter command.
+    expect(body.text).toBe(`Run ${"a".repeat(119)}\u2026`);
+    expect(body.approvalMeta.reason).toHaveLength(280);
+    expect(body.approvalMeta.reason.endsWith("\u2026")).toBe(true);
+    expect(body.approvalMeta.reason.startsWith("bbb")).toBe(true);
+    expect(body.approvalMeta.rule_text).toHaveLength(500);
+    expect(body.approvalMeta.rule_text.endsWith("\u2026")).toBe(true);
+    expect(body.approvalMeta.rule_text.startsWith(EXECPOLICY_RULE_LEAD)).toBe(true);
+  });
+
+  it("sends no rule beside a button that is not offered", async () => {
+    vi.useFakeTimers();
+    // The amendment is there and the runtime's own decision list does not
+    // carry it, so stage 4's tier withholds the chip. A sentence about an
+    // answer the owner cannot give would be worse than silence.
+    const withheld = await post({
+      command: "curl example.com",
+      commandActions: [{ command: "curl example.com" }],
+      proposedExecpolicyAmendment: AMENDMENT,
+      availableDecisions: ["accept", "cancel"],
+    });
+    expect(withheld.options.map((o: any) => o.text)).toEqual(["Allow once", "Deny"]);
+    expect(withheld.approvalMeta).not.toHaveProperty("rule_text");
+    // And no amendment at all is the ordinary case on most commands.
+    const plain = await post({
+      command: "ls",
+      commandActions: [{ command: "ls" }],
+      availableDecisions: ["accept", "decline"],
+    });
+    expect(plain.options.map((o: any) => o.text)).toEqual([
+      "Allow once",
+      "Deny",
+    ]);
+    expect(plain.approvalMeta).not.toHaveProperty("rule_text");
+  });
+
+  it("sends neither string on a file change approval, which stage 4 owns", async () => {
+    vi.useFakeTimers();
+    const changes = [
+      {
+        path: "/work/project/calc.py",
+        kind: { type: "update" },
+        diff: "@@ -1 +1 @@\n-a\n+b\n",
+      },
+    ];
+    const plain = await post(
+      { itemId: "call_3", reason: null, changes, cwd: "/work/project" },
+      "item/fileChange/requestApproval",
+    );
+    expect(plain.text).toBe("Change calc.py");
+    expect(plain.approvalMeta).not.toHaveProperty("reason");
+    expect(plain.approvalMeta).not.toHaveProperty("rule_text");
+    // And when the runtime DOES fill a sentence on a file change, it stays the
+    // title, exactly as stage 4 left it, rather than moving to a reason line.
+    const withReason = await post(
+      {
+        itemId: "call_4",
+        reason: "This patch writes outside your workspace.",
+        changes,
+        cwd: "/work/project",
+      },
+      "item/fileChange/requestApproval",
+    );
+    expect(withReason.text).toBe("This patch writes outside your workspace.");
+    expect(withReason.approvalMeta).not.toHaveProperty("reason");
+    // THE METHOD DECIDES, not the presence of a field. The host joins the
+    // runtime's own item onto these params, so a file change request that also
+    // carried a command would still be a file change, and its title is stage
+    // 4's ask sentence rather than a command read back.
+    const mixed = await post(
+      {
+        itemId: "call_5",
+        reason: "This patch writes outside your workspace.",
+        changes,
+        cwd: "/work/project",
+        command: "git apply patch.diff",
+        commandActions: [{ command: "git apply patch.diff" }],
+      },
+      "item/fileChange/requestApproval",
+    );
+    expect(mixed.text).toBe("This patch writes outside your workspace.");
+    expect(mixed.approvalMeta.tool).toBe("calc.py (update)");
+    expect(mixed.approvalMeta).not.toHaveProperty("reason");
+  });
+
+  it("leaves a permissions approval exactly as it was", async () => {
+    vi.useFakeTimers();
+    const body = await post(
+      { permissions: { network: true } },
+      "item/permissions/requestApproval",
+    );
+    expect(body.text).toBe("Codex needs your approval to continue.");
+    expect(body.approvalMeta.tool).toBe('{"network":true}');
+    expect(body.approvalMeta).not.toHaveProperty("reason");
+    expect(body.approvalMeta).not.toHaveProperty("rule_text");
   });
 });

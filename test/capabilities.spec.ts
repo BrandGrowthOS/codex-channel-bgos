@@ -275,3 +275,41 @@ describe("BUNDLED_CAPABILITIES helper rows paragraph", () => {
     expect(BUNDLED_CAPABILITIES).not.toMatch(/[\u2013\u2014]/);
   });
 });
+
+/**
+ * Stage 5: the one field on a request card the MODEL fills, and the sentence
+ * that had to sit beside "You fill none of these fields" without contradicting
+ * it.
+ *
+ * `exec_command`'s `justification` is a tool ARGUMENT, not a card field, and
+ * the runtime passes it through to the approval request as `params.reason`,
+ * which this daemon now draws as the card's reason line. Until this stage
+ * nothing anywhere told the model that: the hints never used the word, so
+ * whether an owner was told WHY a command needed escalated permissions came
+ * down to whether the model felt like filling an optional argument.
+ *
+ * The placement is the assertion. Both sentences are pinned in ONE string, in
+ * order, because the hazard is not the wording of either: it is a later edit
+ * moving the new sentence somewhere the "you fill none of these fields" line
+ * reads as denying it.
+ *
+ * MUTATION PROOF: move the justification sentence out of that paragraph, or
+ * reword one clause of it, and this case goes red.
+ */
+describe("BUNDLED_CAPABILITIES justification sentence", () => {
+  const flat = BUNDLED_CAPABILITIES.replace(/\s+/g, " ");
+
+  it("tells the model to write the justification, beside the line that says it fills no card field", () => {
+    expect(flat).toContain(
+      "You fill none of these fields. One thing on an approval card IS yours to write, and it is a tool argument rather than a card field: when you ask to run a command with escalated permissions, exec_command's justification is passed to your owner word for word as the card's reason line, so write it as a plain sentence saying why this command is needed, for a reader who cannot see your reasoning.",
+    );
+  });
+
+  it("does not promise the model any of the card's own fields", () => {
+    // The card's reason line is drawn FROM a tool argument; the model never
+    // writes `reason` or `rule_text` itself, and a hint that said it could
+    // would have it look for a field the protocol does not offer.
+    expect(flat).not.toContain("send reason");
+    expect(flat).not.toContain("rule_text");
+  });
+});

@@ -7,7 +7,12 @@ import type {
   InboundClickPayload,
 } from "./types.js";
 import type { RpcObject } from "./app-server.js";
-import { buildDiffForWire } from "./file-change-wire.js";
+import { clipText } from "./clip-text.js";
+import {
+  REQUEST_REASON_MAX_UNITS,
+  REQUEST_RULE_TEXT_MAX_UNITS,
+  buildDiffForWire,
+} from "./file-change-wire.js";
 import {
   diskPendingApprovals,
   type PendingApprovalStore,
@@ -94,9 +99,19 @@ interface Pending {
  * `ApprovalMetaDto` strips a field it does not declare with a 201 and no
  * error: against a backend without the stage 4 DTO this daemon would mask and
  * cap a patch for nothing, the card would still read "Apply file changes",
- * and nothing anywhere would say why. Retire the THREE lines one at a time,
- * in this order: stage 1 backend live, then 0.10.1; stage 3 backend live,
- * then 0.11.0; stage 4 backend live, then 0.12.0.
+ * and nothing anywhere would say why.
+ *
+ * 0.13.0 INHERITS all three and adds a fourth of exactly the same kind. Its
+ * request card sends `approvalMeta.reason`, the model's own words for why it
+ * is asking, and `approvalMeta.rule_text`, the sentence saying that an Always
+ * answer writes a permanent line into the owner's global Codex rules file.
+ * Against a backend whose `ApprovalMetaDto` declares neither, both are
+ * stripped with a 201 and no error: the owner reads a card that still says
+ * nothing about why, and still says nothing about what Always would do, which
+ * is the one thing this release exists to tell them. Retire the FOUR lines one
+ * at a time, in this order: stage 1 backend live, then 0.10.1; stage 3 backend
+ * live, then 0.11.0; stage 4 backend live, then 0.12.0; stage 5 backend live,
+ * then 0.13.0.
  *
  * The lines below are the machine readable half of that hold, and the publish
  * workflow's HELD_FROM_LATEST list must agree with them exactly
@@ -106,6 +121,7 @@ interface Pending {
  * HELD-FROM-LATEST: 0.10.1
  * HELD-FROM-LATEST: 0.11.0
  * HELD-FROM-LATEST: 0.12.0
+ * HELD-FROM-LATEST: 0.13.0
  */
 export const APPROVAL_HOLD_SECONDS = 1800;
 
@@ -145,6 +161,119 @@ export function storedWaitSeconds(created: unknown): number | null {
     seconds <= APPROVAL_HOLD_SECONDS
     ? seconds
     : null;
+}
+
+/**
+ * UTF-16 units of the command read back into a request card's TITLE.
+ *
+ * 120 because the title is one line under a name and above a mono panel that
+ * still carries the whole argv: past a line's worth the title stops being the
+ * ask and starts being the command a second time.
+ */
+export const TITLE_COMMAND_MAX_UNITS = 120;
+
+/**
+ * The lead in of the sentence drawn under an offered Always button.
+ *
+ * Every clause of it is a probe finding rather than a guess (app server
+ * 0.154.0, two runs with a control):
+ *  - "this exact command": `proposedExecpolicyAmendment` arrived as the WHOLE
+ *    argv, and stayed the whole argv even when the model supplied the
+ *    `prefix_rule` the tool schema advertises for narrowing it. A sentence
+ *    implying a family of commands would be worse than today's silence.
+ *  - "in every project on this computer ... your Codex rules file": answering
+ *    with the amendment APPENDED a permanent line to
+ *    `C:\Users\<owner>\.codex\rules\default.rules`, a file already holding
+ *    rules from past sessions across several projects, and the next identical
+ *    command in the same turn raised no approval at all. The control run
+ *    answered a plain `accept`, wrote nothing, and was asked again.
+ *
+ * The app owns the lead in "If you choose Always allow this:" and draws this
+ * verbatim after it, so this string starts mid sentence on purpose.
+ */
+export const EXECPOLICY_RULE_LEAD =
+  "this exact command runs without asking again, in every project on this computer, until you remove the rule from your Codex rules file: ";
+
+/**
+ * Clip to `max` UTF-16 units with the ellipsis INSIDE the cap.
+ *
+ * Inside, twice over. The backend's DTO REFUSES a string past its length
+ * rather than clipping it, so one unit over costs the owner the whole card;
+ * and a silent prefix renders as a complete, shorter command, so an owner
+ * could approve an action whose tail they never saw. `clipText` carries the
+ * surrogate guard, so the result is at most `max` units and never ends on half
+ * a character (Postgres refuses a lone surrogate inside JSONB).
+ */
+export function clipToCap(text: string, max: number): string {
+  return text.length > max ? `${clipText(text, max - 1)}\u2026` : text;
+}
+
+/**
+ * The runtime's own parsed command for this request, without the shell wrapper
+ * it will be run through, or null when the request carried no action.
+ *
+ * `commandActions` is one of the twelve fields a `commandExecution` approval
+ * carries and no other method sends; this daemon read none of them before this
+ * stage. Defensive about every level of it, because a shape that is not the
+ * probed one must fall back to the wrapped command rather than throw inside an
+ * RPC the model is parked on.
+ */
+export function firstActionCommand(actions: unknown): string | null {
+  if (!Array.isArray(actions)) return null;
+  const first: unknown = actions[0];
+  if (typeof first !== "object" || first === null) return null;
+  const command = (first as Record<string, unknown>).command;
+  return typeof command === "string" && command.trim().length > 0
+    ? command.trim()
+    : null;
+}
+
+/**
+ * The agent's own WHY, clipped, or null when there is nothing to add.
+ *
+ * Null in three cases and each one is deliberate: the runtime sent no string
+ * (a file change request sends an explicit `null` here), it sent only
+ * whitespace, or it sent the very sentence already drawn as the title. The
+ * third is the one that matters: the title falls back to this string when the
+ * request named no command, and a card that drew it twice would read worse
+ * than a card that never said why.
+ */
+export function differingReason(raw: unknown, title: string): string | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (trimmed.length === 0 || trimmed === title.trim()) return null;
+  return clipToCap(trimmed, REQUEST_REASON_MAX_UNITS);
+}
+
+/**
+ * What an Always answer would save, in one sentence, or null when the
+ * amendment is not a shape this can say honestly.
+ *
+ * The argv is joined with single spaces and a token holding WHITESPACE is
+ * wrapped in double quotes, because `-Command` and `echo exec-probe >
+ * probe.txt` are two arguments and a bare join reads as five. Any whitespace,
+ * not only U+0020: a tab inside a token is just as invisible at a join.
+ *
+ * This is a rendering FOR A READER and never a shell quoting: nothing
+ * re-parses this string, and the array itself is what is sent back to the
+ * runtime if the owner presses the button. A token carrying its own quote is
+ * therefore left exactly as the runtime sent it.
+ *
+ * Null rather than a partial sentence when the amendment is not an array of
+ * strings end to end. The tier is offered on a truthy amendment, so a shape
+ * this cannot read still gets its button; it just gets no claim about what the
+ * button would save, which is where this stage started.
+ */
+export function execpolicyRuleText(amendment: unknown): string | null {
+  if (!Array.isArray(amendment) || amendment.length === 0) return null;
+  if (!amendment.every((token) => typeof token === "string")) return null;
+  const argv = (amendment as string[])
+    .map((token) => (/\s/.test(token) ? `"${token}"` : token))
+    .join(" ");
+  return clipToCap(
+    `${EXECPOLICY_RULE_LEAD}${argv}`,
+    REQUEST_RULE_TEXT_MAX_UNITS,
+  );
 }
 
 /** The durable poll's two cadences, and the window the fast one owns. */
@@ -588,6 +717,12 @@ export class Interactions {
   ): Promise<unknown> {
     const permissions = method.includes("permissions");
     const fileChange = method.includes("fileChange");
+    // NAMED, not inferred from the other two. Stage 5's title, reason and rule
+    // are all read off params only a `commandExecution` request carries
+    // (twelve fields, against a file change's six), so a method that is
+    // neither permissions nor a file change keeps this method's pre stage 5
+    // behaviour instead of inheriting a title built from fields it never sends.
+    const commandExecution = method.includes("commandExecution");
     const denied = permissions
       ? { permissions: {}, scope: "turn" }
       : { decision: "decline" };
@@ -617,17 +752,17 @@ export class Interactions {
           ? { permissions: params.permissions, scope: "session" }
           : { decision: "acceptForSession" },
       ]);
-    if (
+    const alwaysOffered =
       !permissions &&
-      params.proposedExecpolicyAmendment &&
+      Boolean(params.proposedExecpolicyAmendment) &&
       (!available ||
         available.some(
           (d: unknown) =>
             typeof d === "object" &&
             d !== null &&
             "acceptWithExecpolicyAmendment" in d,
-        ))
-    )
+        ));
+    if (alwaysOffered)
       choices.push([
         "Always allow this rule",
         "always",
@@ -681,6 +816,51 @@ export class Interactions {
       typeof params.reason === "string" && params.reason.trim().length > 0
         ? params.reason
         : null;
+    // WHAT THE OWNER IS BEING ASKED TO RUN, as the title, read back from the
+    // runtime's own parsed action rather than from the wrapper it runs in.
+    //
+    // A live probe on app server 0.154.0 caught both strings on ONE request:
+    // `command` is the hundred character `"C:\...\powershell.exe" -Command
+    // 'echo exec-probe > probe.txt'`, and `commandActions[0].command` is
+    // `echo exec-probe > probe.txt`, which is the string a person reads. The
+    // wrapped one is unchanged on `approvalMeta.tool`, where the mono panel
+    // draws the literal argv for anyone who wants it; the title says what it
+    // does, so the reason below can say why.
+    //
+    // The command path only. A file change keeps stage 4's ask sentence, and
+    // a permissions request carries no command at all.
+    const actionCommand = firstActionCommand(params.commandActions);
+    const titleCommand =
+      actionCommand ??
+      (typeof params.command === "string" && params.command.trim().length > 0
+        ? params.command.trim()
+        : null);
+    const askTitle =
+      commandExecution && titleCommand
+        ? `Run ${clipToCap(titleCommand, TITLE_COMMAND_MAX_UNITS)}`
+        : null;
+    const cardText: string = askTitle
+      ? askTitle
+      : wire
+        ? (reasonText ?? wire.ask)
+        : (params.reason ?? "Codex needs your approval to continue.");
+    // WHY, in the model's own words and never this host's. `params.reason` on
+    // a command request is `exec_command`'s `justification` passed through
+    // unaltered: a live probe pinned the stub's exact sentence arriving here.
+    //
+    // Sent only when it is not the title already drawn above it. On a request
+    // carrying neither an action nor a command the title FALLS BACK to this
+    // same sentence, and a card that read it twice would be worse than one
+    // that never said why at all.
+    const cardReason = commandExecution
+      ? differingReason(params.reason, cardText)
+      : null;
+    // WHAT PRESSING ALWAYS WOULD SAVE, and for how long. Only beside the
+    // button itself: the sentence is about an answer that is not on offer
+    // otherwise, and the app does not draw the line without the option.
+    const ruleText = alwaysOffered
+      ? execpolicyRuleText(params.proposedExecpolicyAmendment)
+      : null;
     // Typed, so the compiler actually checks the wire names. `agentRequest`
     // takes an `unknown` body, so an object literal inlined below would let a
     // camelCase `waitSeconds` through and the backend would silently strip it:
@@ -707,6 +887,15 @@ export class Interactions {
       approvalMeta.change_summary = wire.change_summary;
       if (wire.diff) approvalMeta.diff = wire.diff;
     }
+    // And the same argument a third time, for the two strings stage 5 adds:
+    // fields on ApprovalMeta, never an inline literal, because `reason` sent
+    // as `Reason` or `rule_text` sent as `ruleText` is dropped with a 201 and
+    // no error and the card says nothing about why or about what Always does.
+    // Left OFF entirely rather than sent empty: the app draws a line only when
+    // the string is there, so an absent field renders byte identically to
+    // every card this daemon posted before this stage.
+    if (cardReason) approvalMeta.reason = cardReason;
+    if (ruleText) approvalMeta.rule_text = ruleText;
     const result = await this.api.agentRequest(
       "POST",
       "messages",
@@ -715,9 +904,7 @@ export class Interactions {
         assistantId: context.assistantId,
         chatId: context.chatId,
         sender: "assistant",
-        text: wire
-          ? (reasonText ?? wire.ask)
-          : (params.reason ?? "Codex needs your approval to continue."),
+        text: cardText,
         messageType: "approval_request",
         options,
         approvalMeta,

@@ -79,8 +79,49 @@ export const DIFF_UNITS_TOTAL = 65_536;
  * under it rather than discovering it.
  */
 export const APPROVAL_META_BYTES_MAX = 98_304;
-/** Bytes left for the stage 1 fields (route, risk, request id, wait). */
-const META_RESERVE_BYTES = 1_024;
+/**
+ * UTF-16 units of `approvalMeta.reason`, the agent's own plain words for WHY
+ * it is asking, and of `approvalMeta.rule_text`, what an always answer would
+ * save. The backend's DTO REFUSES a longer string rather than clipping it, so
+ * the writer clips to these and this file counts what it clipped to.
+ *
+ * They live here, beside the column's byte cap, because the byte accounting
+ * below is the only thing in this repo that has to know both numbers at once;
+ * `interactions.ts` imports them for the clip and cannot export them back
+ * (this module is its dependency, not the other way round).
+ */
+export const REQUEST_REASON_MAX_UNITS = 280;
+export const REQUEST_RULE_TEXT_MAX_UNITS = 500;
+/**
+ * Bytes ONE UTF-16 unit can cost inside a serialised JSON string, worst case.
+ * Six, because a control character leaves `JSON.stringify` as the six byte
+ * escape `\u0001`; a three byte BMP character costs three and a surrogate PAIR
+ * costs four bytes for its two units, so neither reaches this.
+ */
+const JSON_STRING_BYTES_PER_UNIT = 6;
+/** `"reason":"",` and `"rule_text":"",`: the keys, quotes and separators. */
+const REQUEST_STRING_KEY_BYTES = 32;
+/**
+ * What the two request card strings can take out of the column between them.
+ *
+ * They do NOT ride a file change card today: a file change request carries no
+ * exec policy amendment, so no always tier and no rule, and its `reason`
+ * arrives as an explicit null. But the reserve is this file's stand in for
+ * every `ApprovalMeta` field it does not weigh, and the ONE way that constant
+ * fails is a field being added to the interface and quietly eating the
+ * headroom: the daemon then posts a body the server answers with a 400 and the
+ * owner loses the whole card. A field that exists is a field that can ride, so
+ * it is counted from the day it exists rather than from the day it first does.
+ */
+const REQUEST_STRINGS_RESERVE_BYTES =
+  (REQUEST_REASON_MAX_UNITS + REQUEST_RULE_TEXT_MAX_UNITS) *
+    JSON_STRING_BYTES_PER_UNIT +
+  REQUEST_STRING_KEY_BYTES;
+/**
+ * Bytes left for every `approvalMeta` field this file does not weigh: stage
+ * 1's four (route, risk, request id, wait) and stage 5's two strings.
+ */
+const META_RESERVE_BYTES = 1_024 + REQUEST_STRINGS_RESERVE_BYTES;
 
 /** The one line a redacted private key block becomes. */
 const PRIVATE_KEY_BODY = "[private key removed]";
@@ -385,7 +426,11 @@ export interface FileChangeWire {
   tool: string;
 }
 
-/** The serialised size of what this card would put in the column, in bytes. */
+/**
+ * The serialised size of what this card would put in the column, in bytes:
+ * the three keys this file builds, plus the reserve standing in for the six it
+ * does not.
+ */
 function metaBytes(summary: ChangeSummary, diff: DiffWire | undefined, tool: string): number {
   try {
     return (
