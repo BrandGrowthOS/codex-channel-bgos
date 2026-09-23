@@ -74,6 +74,30 @@ export interface InboundMessagePayload {
   turnState?: string;
   senderType?: "user" | "agent" | "system";
   senderGuardrail?: string;
+  /**
+   * The owner's per agent plan level, as the server's own LABELLED SENTENCE.
+   *
+   * NOT the bare enum, and this comment said it was until 2026-09-23. The wire
+   * never carries `only_when_asked` / `risky_jobs` / `always`: the backend
+   * ships the prefix "Your owner's setting for when you show a plan before you
+   * change anything ..." followed by the level's own words
+   * (backend/src/services/plan-policy.ts, buildPlanPolicyField), and it OMITS
+   * the key entirely at the default level, so an absent value means the
+   * default level, an older backend, or a channel with no such setting. That
+   * belief is the one that made `planPolicySentence` switch on three values no
+   * envelope ever holds, so every real level reached no turn at all; see the
+   * header of `planPolicySentence` in plan-card.ts for the correction. This
+   * declaration is the one a reader reaches first from `bgos-ws.ts`'s
+   * normalizer, so it is the copy that has to say it; the DispatchArgs twin in
+   * inbound-handler.ts carries the same paragraph.
+   *
+   * It rides the ENVELOPE rather than being read off the assistant row on
+   * purpose, and that is the same rule the share guardrail follows: the daemon
+   * offers, the server decides, the daemon never reads the owner's settings.
+   * UNLIKE the guardrail it rides BOTH provenance arms, because it describes
+   * the agent RECEIVING the turn and not whoever is speaking.
+   */
+  planPolicy?: string;
   chatKind?: string;
   senderUserId?: string;
   senderRelationship?: string;
@@ -209,6 +233,13 @@ export interface OutboundMessagePayload {
     | "tool_progress"
     | "event";
   approvalMeta?: ApprovalMeta;
+  /**
+   * How a row carrying `options` is drawn: chips in the thread ("inline",
+   * what every card here wants) or a modal that demands an answer. Declared
+   * on the payload because the plan card posts through `postMessage` rather
+   * than inlining its own body the way the `reply` tool does.
+   */
+  renderMode?: "inline" | "modal";
   /**
    * Renderable payload - required when messageType="event". The app draws the
    * card registered for `payload.kind` and falls back to the title plus the

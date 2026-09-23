@@ -61,6 +61,20 @@ import type { VoiceRpcFrame } from "./voice-rpc.js";
 import { VoiceRpcHandler } from "./hoai-shared/voice-rpc.js";
 import { buildCodexInput, type InboundFileForCodex } from "./inbound-input.js";
 import { parseReply } from "./reply-markers.js";
+import {
+  PlanLane,
+  planAnswerPrompt,
+  sweepMissedPlanAnswers,
+  type OpenPlan,
+} from "./plan-lane.js";
+import { diskPendingPlans } from "./pending-plans-store.js";
+import { turnDirectiveLines } from "./turn-directives.js";
+import {
+  parsePlanChip,
+  parseProposedPlan,
+  planCardFromMarkdown,
+  type PlanDoor,
+} from "./plan-card.js";
 import { createSkillsHandler } from "./skills-handler.js";
 import type { AuthResolutionOk } from "./auth-mode.js";
 import type { Input } from "@openai/codex-sdk";
@@ -113,6 +127,8 @@ export class CodexAdapter {
   readonly missionControl: MissionControlLane;
   /** The live Steps list for the reply in flight. Never touches a mission. */
   readonly stepsLane: StepsLane;
+  /** The plan card this chat is waiting on, and the three answers to it. */
+  readonly planLane: PlanLane;
 
   private readonly cfg: PluginConfig;
   private readonly ws: BgosWs;
@@ -128,6 +144,40 @@ export class CodexAdapter {
   private readonly voiceTasks = new Map<string, AbortController>();
   private readonly voiceJournal: TaskJournal;
   private readonly mintHandlers = new Map<number, VoiceRpcHandler>();
+  /**
+   * How the plan this chat is about to propose was asked for.
+   *
+   * `/plan <task>` sets `typed` and the first card of that turn spends it;
+   * anything else in plan mode is `mode`. It is a HINT and never state: a
+   * missing entry means plan mode's own door, which is the truthful default
+   * for a plan the runtime raised without the owner typing anything.
+   */
+  private readonly planDoorHint = new Map<number, PlanDoor>();
+  /**
+   * Chats whose last plan card FAILED to post, read and cleared by the turn
+   * that proposed it. One entry per chat is enough: replies are serialised per
+   * chat by `replyQueues`, so a chat never has two turns publishing at once.
+   */
+  private readonly planCardFailures = new Set<number>();
+  /**
+   * The `(mode, enforced)` pair last REPORTED for a chat, so an unchanged one
+   * is not sent again.
+   *
+   * `ChatRepository.setSessionMode` is an unconditional UPDATE with
+   * `returning('*')`, and `chats_sidebar_bump_trigger` carries no column list,
+   * so writing the value the row already holds still bumps the owner's sidebar
+   * version and makes every connected client refetch assistants with chats.
+   * Three paths repeat: every "Change the plan" click reports `plan` for a chat
+   * already in plan mode, every `/code` in a chat that was never in plan mode
+   * reports `default` unconditionally, and connect reports every stored plan
+   * chat. The first two are now free; the third is deliberately forced, because
+   * it is the cutover and this map is empty at boot.
+   *
+   * The pair, not the mode: `enforced` is what chooses the chip's WORDS, so a
+   * `/permissions` inside plan mode has to reach the app even though the mode
+   * did not move.
+   */
+  private readonly lastSessionModeByChat = new Map<number, string>();
   private readonly replyQueues = new Map<number, Promise<void>>();
   private readonly generations = new Map<number, number>();
   private readonly assistantToRoute = new Map<number, string>();
@@ -254,10 +304,37 @@ export class CodexAdapter {
     // typed tools write is stamped here, so a backend that sends no
     // `cleared_by` cannot make the agent's own last tick come back looking
     // like its owner marking the mission done.
-    this.tools = new HoaiTools(this.api, () => this.capabilityText, {
-      starting: (missionId) => this.missionControl.noteSelfWrite(missionId),
-      leftOpen: (missionId) => this.missionControl.dropSelfWrite(missionId),
-    });
+    // The lane answers `enforced` per chat by asking the host what sandbox
+    // that chat's next turn runs under. Lazy on purpose: this reads `this.host`
+    // at call time, so neither construction order nor a later re-pair matters.
+    this.planLane = new PlanLane(
+      this.api,
+      (chatId) => this.host.planWaitEnforcedIn(chatId),
+      // The MODE, separately from the lock, because the card's `mode` door is
+      // a claim about the host and the model is the one that fills the field.
+      // Same lazy read of `this.host` as the line above.
+      (chatId) => this.host.planModeChats().includes(chatId),
+      // The durable half. A plan wait lasts a day and its answer arrives on
+      // the WS click alone, so a card the daemon was not up for is a card
+      // nothing ever replays. See pending-plans-store.ts.
+      diskPendingPlans,
+      // Read as the OWNER, which is how this daemon reads any row it did not
+      // just write, and lazily for the same reason as the two above: identity
+      // lands after construction.
+      () => this.ownerId,
+    );
+    this.tools = new HoaiTools(
+      this.api,
+      () => this.capabilityText,
+      {
+        starting: (missionId) => this.missionControl.noteSelfWrite(missionId),
+        leftOpen: (missionId) => this.missionControl.dropSelfWrite(missionId),
+      },
+      // `propose_plan` posts through the lane, never through the tool, so the
+      // agent-decided door and plan mode's door produce the SAME card and the
+      // same supersede behaviour.
+      this.planLane,
+    );
     this.nativeCommands = new NativeCommands({
       host: this.host,
       interactions: this.tools.interactions,
@@ -267,6 +344,31 @@ export class CodexAdapter {
       // mission has to exist and the lane has to be watching before the goal
       // is set, because setting one starts a turn at once.
       goalLane: this.goalLane,
+      onSessionMode: async (args, mode, typedTask, enforced) => {
+        // `/plan <task>` is the typed door; `/plan` on its own just turns the
+        // mode on, and a plan that comes out of it came through the mode.
+        if (mode === "plan" && typedTask)
+          this.planDoorHint.set(args.chatId, "typed");
+        else this.planDoorHint.delete(args.chatId);
+        await this.reportSessionMode(
+          args.assistantId,
+          args.chatId,
+          mode,
+          enforced,
+        );
+      },
+      // The MODE did not move, only the lock did: `/permissions` inside plan
+      // mode. Re-reported so the chip stops promising a read only chat the
+      // owner has just handed its files back to, and the door hint is left
+      // exactly where it was, because a typed plan is still a typed plan.
+      onPlanEnforcement: async (args, enforced) => {
+        await this.reportSessionMode(
+          args.assistantId,
+          args.chatId,
+          "plan",
+          enforced,
+        );
+      },
       run: async (args, prompt, options = {}) => {
         const files = args.attachments.map((a) => ({
           path: a.localPath,
@@ -274,8 +376,12 @@ export class CodexAdapter {
           name: a.fileName,
           isImage: a.kind === "photo",
         }));
+        // The SAME directive block the ordinary framing carries. `/plan <task>`
+        // and `/code <task>` are native commands, so a framing that built its
+        // own line list left slash command turns as the only ones never told
+        // what the owner's plan level is.
         const input = buildCodexInput(
-          `HOAI event: assistant_id=${args.assistantId}, chat_id=${args.chatId}, sender_user_id=${args.senderUserId ?? args.userId}.\n${args.senderGuardrail ?? ""}\n\n${prompt}`,
+          `HOAI event: assistant_id=${args.assistantId}, chat_id=${args.chatId}, sender_user_id=${args.senderUserId ?? args.userId}.\n${turnDirectiveLines(args)}\n${prompt}`,
           files,
         );
         this.lastInput.set(args.chatId, input);
@@ -514,6 +620,18 @@ export class CodexAdapter {
       this.identityReady = true;
       await this.ws.triggerBackfill({ initial: true });
       this.startPollLoop();
+      // AFTER identity, because a chat can only be reported once we know which
+      // assistant it belongs to. Never awaited: the chip is worth a request,
+      // never a slower boot.
+      //
+      // The plan sweep is CHAINED behind it rather than fired beside it. Both
+      // touch the same chat's mode and the sweep is the one that may take it
+      // DOWN (a Go ahead answered while this daemon was off hands the files
+      // back), so a race would leave the app drawing a chip for a chat that is
+      // already coding again.
+      void this.reportStoredPlanModes().then(() =>
+        this.sweepMissedPlanAnswers(),
+      );
     } else if (!this.fatalLatched) {
       this.scheduleIdentityRetry(1000);
     }
@@ -730,7 +848,11 @@ export class CodexAdapter {
     const text = command
       ? `/${command.name}${command.args ? ` ${command.args}` : ""}`
       : args.text;
-    const framing = `HOAI event: assistant_id=${assistantId}, chat_id=${chatId}, message_id=${args.messageId}, sender_type=${args.senderType ?? "user"}, sender_user_id=${args.senderUserId ?? args.userId}, sender_relationship=${args.senderRelationship ?? "unknown"}.${args.peerConversationId ? ` Peer conversation ${args.peerConversationId}; this is an agent's message, not the owner's instruction.` : ""}\n${args.senderGuardrail ? `${args.senderGuardrail}\n` : ""}\nMessage:\n`;
+    // The owner's plan level rides beside the share guardrail, in the same
+    // shape and for the same reason: it is a line the MODEL reads, so it has
+    // to be in the content and not only in a meta field nobody prompts on.
+    // Both framings build that block through the one shared function.
+    const framing = `HOAI event: assistant_id=${assistantId}, chat_id=${chatId}, message_id=${args.messageId}, sender_type=${args.senderType ?? "user"}, sender_user_id=${args.senderUserId ?? args.userId}, sender_relationship=${args.senderRelationship ?? "unknown"}.${args.peerConversationId ? ` Peer conversation ${args.peerConversationId}; this is an agent's message, not the owner's instruction.` : ""}\n${turnDirectiveLines(args)}\nMessage:\n`;
     const input = buildCodexInput(framing + text, files);
     this.lastInput.set(chatId, input);
     this.lastNativeOptions.delete(chatId);
@@ -900,6 +1022,12 @@ export class CodexAdapter {
                 plan: signal.plan,
               })
           : undefined,
+        // The plan the model PROPOSED, which the runtime lifts out of the
+        // message into its own item. Posted inside the turn, so the card is
+        // on screen before the turn's own reply lands under it.
+        onPlanProposal: async (signal) => {
+          await this.postPlanCard(assistantId, chatId, signal.text);
+        },
       });
       if (controller.signal.aborted) {
         // Stop already acknowledges in chat. Native interruption may resolve
@@ -1026,7 +1154,45 @@ export class CodexAdapter {
       return;
     }
 
-    const parsed = parseReply(result.replyText);
+    /**
+     * THE FALLBACK, and it is deliberately narrow.
+     *
+     * The app server at 0.154.0 lifts the model's `<proposed_plan>` block out
+     * of the message into its own `plan` item, which `onPlanProposal` already
+     * caught (`result.sawPlanProposal`). A runtime that does NOT do that leaves
+     * the block in the text, where markdown would render it as an unclosed tag
+     * and the owner would get a plan with no buttons. So: only when no plan
+     * item arrived, and only when the block is actually there. Never "a message
+     * in plan mode is a plan", because phases 1 and 2 of plan mode are ordinary
+     * chat and every question would become a card.
+     */
+    let replyText = result.replyText;
+    // A plan card IS an answer. Without this, a turn whose whole reply was the
+    // plan would get "(Codex finished the turn without a text reply.)" posted
+    // under its own card.
+    //
+    // POSTED, not merely RAISED. `sawPlanProposal` is set the moment the plan
+    // item arrives and says nothing about the POST, which `postPlanCard`
+    // swallows; a failed card plus an empty reply was a turn that said
+    // absolutely nothing. `planCardFailures` carries the real outcome.
+    let planCardFailed = this.planCardFailures.delete(chatId);
+    let planCardPosted = result.sawPlanProposal === true && !planCardFailed;
+    if (!planCardPosted) {
+      const block = parseProposedPlan(replyText);
+      if (block) {
+        if (await this.postPlanCard(assistantId, chatId, block.plan)) {
+          planCardPosted = true;
+          planCardFailed = false;
+          // The block only leaves the text once the card has taken its place.
+          // Stripping it after a failed post threw the plan away entirely.
+          replyText = block.rest;
+        } else {
+          planCardFailed = true;
+        }
+      }
+    }
+
+    const parsed = parseReply(replyText);
 
     if (parsed.status) {
       await this.api
@@ -1048,9 +1214,13 @@ export class CodexAdapter {
       }
     } else if (body) {
       await replyHandle.sendText(body).catch(() => {});
-    } else if (parsed.media.length === 0 && !sentViaTool) {
+    } else if (parsed.media.length === 0 && !sentViaTool && !planCardPosted) {
       await replyHandle
-        .sendText("(Codex finished the turn without a text reply.)")
+        .sendText(
+          planCardFailed
+            ? "(Codex proposed a plan, but the card could not be posted. Ask it to write the plan out in chat.)"
+            : "(Codex finished the turn without a text reply.)",
+        )
         .catch(() => {});
     }
 
@@ -1180,6 +1350,13 @@ export class CodexAdapter {
         // `onTodoList` stays unwired on purpose: the plan lane already stands
         // down for a chat the goal lane owns, and a first plan arriving after
         // the goal ended would make it build a SECOND mission for this work.
+        //
+        // A proposed plan IS wired, and for the opposite reason: a continuation
+        // turn that stops to propose one is a turn asking its owner a question,
+        // and a question nobody is shown is a run that stalls in silence.
+        onPlanProposal: async (signal) => {
+          await this.postPlanCard(assistantId, chatId, signal.text);
+        },
       },
       deliver: async (result) => {
         await progressWork;
@@ -1255,12 +1432,334 @@ export class CodexAdapter {
   }
 
   /**
+   * Tell BGOS about every chat this daemon has stored in plan mode.
+   *
+   * The mode is persisted on disk per chat, so a daemon that restarts comes
+   * back with chats still in plan mode and an app drawing no chip for any of
+   * them. The STORE is the truth here, not the running threads: a chat whose
+   * thread has not started yet still has a mode.
+   *
+   * Only `plan` is reported. A chat in default mode is the absence of a chip,
+   * and telling the backend that about every chat this daemon has ever served
+   * would be a request storm for nothing.
+   */
+  private async reportStoredPlanModes(): Promise<void> {
+    for (const chatId of this.host.planModeChats()) {
+      const assistantId = this.assistantForChat(chatId);
+      if (!assistantId) continue;
+      // Per chat, from the store that just came off disk. A chat left in plan
+      // mode was left with its read only sandbox too, and both halves are in
+      // the same file, so a restart restores the lock and reports it rather
+      // than downgrading every recovered chat to the convention.
+      // FORCED, and it is the one caller that is. This is the cutover: the
+      // dedupe map is empty at boot, and the app may be drawing a chip left by
+      // the daemon that died, so the value this process believes has to reach
+      // the row whatever it is.
+      await this.reportSessionMode(
+        assistantId,
+        chatId,
+        "plan",
+        this.host.planWaitEnforcedIn(chatId),
+        { force: true },
+      );
+    }
+  }
+
+  /**
+   * The boot half of the plan restart contract (see pending-plans-store.ts).
+   *
+   * Every plan card this daemon left waiting is read back. One still open is
+   * adopted into the lane, so a later tap resolves against it at all; one
+   * ANSWERED while this process was down is delivered exactly as a live click
+   * would have been, which is what ends the wait, takes the status line down,
+   * and on a Go ahead hands the chat's files back.
+   *
+   * Never throws and never blocks a boot: a read that fails leaves the entry
+   * for the next start rather than guessing.
+   */
+  private async sweepMissedPlanAnswers(): Promise<void> {
+    let missed: Awaited<ReturnType<typeof sweepMissedPlanAnswers>>;
+    try {
+      missed = await sweepMissedPlanAnswers(this.api, this.planLane);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `${LOG} could not read back the plan cards from a previous run:`,
+        err instanceof Error ? err.message : String(err),
+      );
+      return;
+    }
+    for (const answer of missed) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `${LOG} delivering the answer to plan card ${answer.entry.id} in chat ` +
+          `${answer.entry.chatId}, missed by a run that had stopped`,
+      );
+      await this.handlePlanClick({
+        assistantId: answer.entry.assistantId,
+        chatId: answer.entry.chatId,
+        messageId: answer.entry.id,
+        callbackData: answer.callbackData,
+        ...(answer.customText ? { customText: answer.customText } : {}),
+        userId: answer.entry.userId,
+      } as never).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `${LOG} could not act on a missed plan answer:`,
+          err instanceof Error ? err.message : String(err),
+        );
+      });
+    }
+  }
+
+  /**
+   * Post the plan a Codex turn proposed, as the card the owner answers.
+   *
+   * The DOOR is the one thing the plan text cannot tell us, so it is read from
+   * the hint `/plan <task>` leaves behind and falls back to plan mode's own
+   * door, which is the truthful answer for a plan the runtime raised without
+   * the owner typing anything WHILE THE CHAT IS ACTUALLY IN PLAN MODE.
+   *
+   * IT IS CLAMPED, exactly as `propose_plan`'s own door is clamped in
+   * hoai-tools.ts, and this was the one of the two mounts that was not. The
+   * fallback used to be a flat `"mode"`, which the app renders as the line
+   * "Plan mode is on." This path is reachable outside plan mode: the
+   * `<proposed_plan>` fallback runs on EVERY reply, so an owner on plan policy
+   * `always` whose model writes Codex's native block inside an ORDINARY coding
+   * chat got a card announcing a mode nobody switched. It was worse on the
+   * answer: `planModeChat` reads the payload's door first and anything but
+   * `decided` means yes, so Go ahead wrote settings, restored a permission,
+   * PATCHed `chats.session_mode` and posted "Plan approved, switched from Plan
+   * to Code mode" into a chat that switched nothing. So the door claims `mode`
+   * only when the HOST says the chat is planning.
+   *
+   * `enforced` is ASKED, per chat, and never a constant. A live probe on
+   * 2026-09-23 ran a workspace write with `collaborationMode: plan` on the
+   * thread and on the turn, and it succeeded with no approval raised, because
+   * the mode sets `developer_instructions` and leaves `sandboxPolicy` exactly
+   * where it was (docs/learnings/codex-plan-mode-wire.md). So the mode alone
+   * proves nothing and this used to report a flat false. `/plan` now turns the
+   * chat's read only sandbox on WITH the mode, which the same probe, re-run
+   * coupled, shows the runtime does refuse writes under, so the answer is true
+   * for a chat under that pair and false for a chat where a model decided to
+   * propose a plan inside an ordinary coding session. Both happen on one
+   * daemon, which is why it is a question and not a setting.
+   */
+  private async postPlanCard(
+    assistantId: number,
+    chatId: number,
+    markdown: string,
+  ): Promise<boolean> {
+    const hinted = this.planDoorHint.get(chatId);
+    // `typed` is never clamped: the owner's own `/plan` is what put the model
+    // here and the daemon's mode flip for it is async, so the hint is the
+    // better evidence. Everything else asks the host.
+    const door: PlanDoor =
+      hinted ?? (this.planLane.planModeIn(chatId) ? "mode" : "decided");
+    this.planDoorHint.delete(chatId);
+    try {
+      await this.planLane.propose({
+        assistantId,
+        chatId,
+        plan: planCardFromMarkdown(markdown, {
+          door,
+          // The host is the one source: the lane's own `enforcedIn` (which
+          // `propose_plan` uses) is a thin wrapper of this very call, so both
+          // doors stamp the card from the same store.
+          enforced: this.host.planWaitEnforcedIn(chatId),
+        }),
+      });
+      this.planCardFailures.delete(chatId);
+      return true;
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `${LOG} could not post a plan card`,
+        error instanceof Error ? error.message : String(error),
+      );
+      // The turn has to know. It reads `sawPlanProposal`, which says the
+      // runtime RAISED a plan and nothing about whether the card reached the
+      // chat, and it uses that to suppress the "no text reply" line. A plan
+      // whose card failed and whose turn said nothing is total silence.
+      this.planCardFailures.add(chatId);
+      return false;
+    }
+  }
+
+  /**
+   * The owner answered a plan card.
+   *
+   * Go ahead: Codex's mode goes back to default (so the next turn may actually
+   * edit), BGOS is told, the announced line is posted, and the turn starts with
+   * the instruction to implement the plan the thread already holds. The plan
+   * text is NOT re-sent: the thread kept it.
+   *
+   * Change the plan: the mode STAYS in plan, and the owner's typed words (which
+   * arrive on the click itself, from the armed composer, never as a second
+   * message) start a plan mode turn. The agent answers with a revised card that
+   * supersedes this one.
+   *
+   * Do not do this: the mode goes back to default, the card is retired, and NO
+   * turn starts. The agent waits to be told something new.
+   *
+   * ALL THREE OF THOSE MODE EFFECTS ARE GATED ON THE DOOR. A card raised by
+   * `propose_plan` under a plan policy (`door: "decided"`) comes from a chat
+   * that is in ORDINARY coding mode, and answering it must not write a mode
+   * the chat never had: flipping settings for nothing, announcing a switch
+   * that did not happen, or reporting `plan` to BGOS, which is persisted on
+   * the chat row and would draw the Plan chip and the gold pill until an
+   * explicit `/code`. `planModeChat` answers from the payload first and the
+   * host's own store second, so a card whose payload was lost to a restart is
+   * still read correctly.
+   */
+  private async handlePlanClick(click: InboundClickPayload): Promise<void> {
+    const route = this.getRouteForAssistant(click.assistantId);
+    if (!route) return;
+    const decision = await this.planLane.answer(click).catch(() => null);
+    if (!decision) return;
+    const inPlanMode = this.planModeChat(click.chatId, decision.plan);
+    const toDefault = decision.answer !== "change";
+    if (inPlanMode) {
+      // Change the plan keeps BOTH halves, so the lock the card was proposed
+      // under is still the lock the revision is written under, and the report
+      // says so off the store rather than off the answer.
+      let enforced = this.host.planWaitEnforcedIn(click.chatId);
+      if (toDefault) {
+        // Persisted before it is announced, exactly as `/code` does it: a mode
+        // BGOS shows that the daemon did not manage to store would survive a
+        // restart as a lie. `setPlanMode` also GIVES THE ACCESS BACK: Go ahead
+        // has to leave the chat able to do the work it just approved, at the
+        // permission the owner had before `/plan` took it read only.
+        const applied = await this.host
+          .setPlanMode(click.chatId, false)
+          .catch(() => null);
+        // A restore that failed leaves the chat read only, and the honest
+        // report of a chat that is still locked is the one it already had.
+        enforced = applied ? applied.enforced : enforced;
+      }
+      await this.reportSessionMode(
+        click.assistantId,
+        click.chatId,
+        toDefault ? "default" : "plan",
+        enforced,
+      );
+    }
+    const replyHandle = buildReplyHandle(
+      { outbound: this.outbound, toolProgress: this.toolProgress },
+      { assistantId: click.assistantId, chatId: click.chatId },
+    );
+    if (decision.answer === "go" && inPlanMode)
+      await replyHandle
+        .sendText("Plan approved, switched from Plan to Code mode")
+        .catch(() => {});
+    const prompt = planAnswerPrompt(decision);
+    if (!prompt) return;
+    const input = buildCodexInput(prompt, []);
+    this.lastInput.set(click.chatId, input);
+    this.lastNativeOptions.delete(click.chatId);
+    await this.runAndReply(
+      click.assistantId,
+      click.chatId,
+      input,
+      replyHandle,
+      { userId: click.userId },
+    ).catch((error) =>
+      this.outbound
+        .sendAgentError({
+          assistantId: click.assistantId,
+          chatId: click.chatId,
+          reason:
+            error instanceof Error
+              ? error.message
+              : "Codex could not act on the plan answer.",
+        })
+        .catch(() => {}),
+    );
+  }
+
+  /**
+   * Was Codex actually PLANNING in this chat when the card was raised?
+   *
+   * The payload's door is the first answer and the cheapest: `typed` and
+   * `mode` are plan mode's own two doors, `decided` is the plan policy asking
+   * a coding chat for a plan. It is not the only answer, because a model
+   * already in plan mode that calls `propose_plan` without naming a door gets
+   * `decided` by default, and because a restart loses the payload. So the
+   * host's persisted per chat setting is consulted whenever the payload does
+   * not already say yes. The two can only widen the answer, never narrow it,
+   * which is the safe direction: the cost of a missed flip is a chat left in
+   * plan mode the owner can leave with `/code`, and the cost of a wrong flip
+   * is a chip the app draws for ever.
+   */
+  private planModeChat(chatId: number, plan: OpenPlan | null): boolean {
+    if (plan && plan.payload.door !== "decided") return true;
+    return this.host.planModeChats().includes(chatId);
+  }
+
+  /**
+   * Tell BGOS what mode this CHAT is in.
+   *
+   * Per chat, because Codex's mode is per chat: one daemon can be planning in
+   * one chat and coding in another, and the assistant's status row cannot hold
+   * both. Swallowed on every failure, including the 404 an older backend
+   * answers: a chip the app cannot draw is never worth a turn.
+   *
+   * AN UNCHANGED PAIR IS NOT RE-SENT (see `lastSessionModeByChat`), because
+   * the backend's write is not free: it bumps the owner's sidebar version and
+   * every connected client refetches. `force` is for the connect time report,
+   * which is the cutover.
+   *
+   * `enforced` IS PASSED IN, from whatever actually happened. It was a
+   * constant `false` while plan mode moved nothing but the model's
+   * instructions; now `/plan` couples the read only sandbox to it, so the
+   * answer is "true while that sandbox is on" and every caller hands over the
+   * value the host gave back rather than a hope. A `default` mode always
+   * arrives here as false, because `setPlanMode(false)` restored the
+   * permission and `planWaitEnforced` needs both halves.
+   */
+  private async reportSessionMode(
+    assistantId: number,
+    chatId: number,
+    mode: "plan" | "default",
+    enforced: boolean,
+    options: { force?: boolean } = {},
+  ): Promise<void> {
+    const pair = `${mode}:${enforced ? "1" : "0"}`;
+    if (!options.force && this.lastSessionModeByChat.get(chatId) === pair)
+      return;
+    this.lastSessionModeByChat.set(chatId, pair);
+    try {
+      await this.api.reportSessionMode(assistantId, chatId, { mode, enforced });
+    } catch {
+      // A memory is only worth keeping while it describes a write that landed.
+      // Forgetting here is what makes the next attempt retry rather than dedupe
+      // against a report the backend never took.
+      this.lastSessionModeByChat.delete(chatId);
+    }
+  }
+
+  /**
    * A user tapped an inline button or answered an ask question. Feed the choice
    * back to Codex as the next turn (the thread keeps context), so the agent
    * continues naturally. Correlate by (assistantId, chatId).
    */
   private handleInboundClick(click: InboundClickPayload): void {
     if (this.tools.interactions.handleClick(click)) return;
+    // The plan chips are not ordinary buttons: two of them change Codex's mode
+    // and one of them starts no turn at all, so they are taken before the
+    // generic "The user selected: ..." path below.
+    //
+    // `isChangeClick` is the third door and it is not decoration. "Change the
+    // plan" (and a step's "Comment") never reach the wire as `plan:change`:
+    // the app arms the composer and Send posts the custom sentinel against the
+    // CARD's message id, so without this the revision arrived here as an
+    // ordinary typed reply, started a plain coding turn on the owner's words,
+    // left the "Waiting for your go ahead" line up for its full day and never
+    // asked for a revised plan at all.
+    if (parsePlanChip(click.callbackData) || this.planLane.isChangeClick(click)) {
+      void this.handlePlanClick(click);
+      return;
+    }
     const route = this.getRouteForAssistant(click.assistantId);
     if (!route) return;
     const replyHandle = buildReplyHandle(

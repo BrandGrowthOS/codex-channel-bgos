@@ -412,6 +412,9 @@ export class BgosWs {
       ...(typeof (r.senderGuardrail ?? r.sender_guardrail) === "string"
         ? { senderGuardrail: String(r.senderGuardrail ?? r.sender_guardrail) }
         : {}),
+      ...(typeof (r.planPolicy ?? r.plan_policy) === "string"
+        ? { planPolicy: String(r.planPolicy ?? r.plan_policy) }
+        : {}),
       files: Array.isArray(r.files)
         ? (r.files as InboundMessagePayload["files"])
         : [],

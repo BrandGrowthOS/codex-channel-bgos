@@ -1,4 +1,7 @@
 // Shared HOAI contract implementation from bgos-claude-plugin, Apache-2.0, commit 3ecbb58679febcc243f671e05788b521b065546e.
+// Later additions carried across from the same file in that plugin, byte for
+// byte, because the contract is one contract: REPLY_BUTTON_STYLES and
+// normalizeButtonStyle (0.45.0, the reply button tier).
 /**
  * Pure, side-effect-free message-text helpers for the BGOS Claude Code plugin.
  *
@@ -425,4 +428,36 @@ export function buildEventMeta(
         : JSON.stringify(eventMeta.payload)
   }
   return out
+}
+
+// ── Reply button tiers ───────────────────────────────────────────────────────
+
+/**
+ * The four tiers the BGOS backend's `CreateMessageOptionDto` accepts, spelled
+ * exactly as its `@IsIn` spells them
+ * (backend/src/dto/create-chat-history.dto.ts).
+ */
+export const REPLY_BUTTON_STYLES: readonly string[] = [
+  'default',
+  'primary',
+  'success',
+  'danger',
+]
+
+/**
+ * The tier an agent asked for, or null.
+ *
+ * An unknown value is DROPPED, never refused. The dynamic tool declaration
+ * carries an enum, but a tool declaration is ADVISORY: nothing at runtime
+ * refuses a model that answers "blue", "warning" or "Success", and the value
+ * used to be spread straight onto the option. The backend's DTO then 400s the
+ * WHOLE reply over one bad enum, so the text, the files and every other chip
+ * are lost with it, and losing a message because a chip wanted a colour that
+ * does not exist is the wrong trade. Neutral is what every app rendered before
+ * the tier existed.
+ */
+export function normalizeButtonStyle(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const value = raw.trim().toLowerCase()
+  return REPLY_BUTTON_STYLES.includes(value) ? value : null
 }

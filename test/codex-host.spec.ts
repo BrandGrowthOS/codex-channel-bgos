@@ -320,6 +320,151 @@ describe("native Codex host contracts", () => {
    * tool there and forget the park list, and this goes red rather than the
    * owner's carousel silently spending the watchdog again.
    */
+  /**
+   * THE PLAN THE MODEL PROPOSED.
+   *
+   * A live probe on 2026-09-23 against the vendored app server at 0.154.0
+   * (docs/learnings/codex-plan-mode-wire.md) showed the runtime lifting the
+   * model's `<proposed_plan>` block out of the message into its own item:
+   * `item/started` with an empty text, `item/plan/delta` while it streams, then
+   * `item/completed` with the whole markdown. `entryFromItem` returns null for
+   * a plan item, so before this branch existed the plan reached nobody and the
+   * owner got only the sentence that came before it.
+   */
+  it("hands over the plan a plan item carries, once, when it is finished", async () => {
+    const seen: Array<{ text: string; itemId: string; turnId: string | null }> = [];
+    const task = host.runTurn(1, "plan it", {
+      onPlanProposal: (signal) => {
+        seen.push(signal);
+      },
+    });
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    const plan = "## Add retry\n\n1. Add the helper";
+    // The empty opener is not a plan.
+    server.emit("notification", "item/started", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { id: "turn-1-plan", type: "plan", text: "" },
+    });
+    // Neither is a partial.
+    server.emit("notification", "item/plan/delta", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      itemId: "turn-1-plan",
+      delta: "## Add re",
+    });
+    server.emit("notification", "item/completed", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { id: "turn-1-plan", type: "plan", text: plan },
+    });
+    server.finish("thread-1", "I explored it. Here is the plan.");
+    const result = await task;
+    expect(seen).toEqual([
+      { text: plan, itemId: "turn-1-plan", turnId: "turn-1" },
+    ]);
+    // And the turn's own reply is what the runtime left in the message, which
+    // is exactly why the card has to carry the plan.
+    expect(result.replyText).toBe("I explored it. Here is the plan.");
+    expect(result.sawPlanProposal).toBe(true);
+  });
+
+  it("ignores a plan item's OPENER even when the runtime fills its text", async () => {
+    // The `!started` half of the guard, which nothing held: the existing case
+    // opens with an EMPTY text, so `item.text.trim()` carried it alone. A
+    // runtime that ever put the whole plan on `item/started` as well would
+    // post two cards for one plan, the second superseding the first, for no
+    // reason the owner could see.
+    const seen: string[] = [];
+    const task = host.runTurn(1, "plan it", {
+      onPlanProposal: (signal) => {
+        seen.push(signal.text);
+      },
+    });
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.emit("notification", "item/started", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { id: "turn-1-plan", type: "plan", text: "## Add retry\n\n1. Add the helper" },
+    });
+    server.finish("thread-1", "Here is the plan.");
+    const result = await task;
+    expect(seen).toEqual([]);
+    expect(result.sawPlanProposal).toBeUndefined();
+  });
+
+  it("says nothing about a plan on a turn that proposed none", async () => {
+    const seen: string[] = [];
+    const task = host.runTurn(1, "just answer", {
+      onPlanProposal: (signal) => {
+        seen.push(signal.text);
+      },
+    });
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.finish("thread-1", "No plan needed.");
+    const result = await task;
+    expect(seen).toEqual([]);
+    expect(result.sawPlanProposal).toBeUndefined();
+  });
+
+  it("never draws a plan item as an activity row", async () => {
+    const rows: string[] = [];
+    const task = host.runTurn(1, "plan it", {
+      onTool: (card) => {
+        rows.push(card.name);
+      },
+    });
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.emit("notification", "item/completed", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { id: "turn-1-plan", type: "plan", text: "## A plan\n\n1. Do it" },
+    });
+    server.finish("thread-1", "done");
+    await task;
+    expect(rows).toEqual([]);
+  });
+
+  /**
+   * `propose_plan` RETURNS AT ONCE, so it must stay off the park list.
+   *
+   * The plan wait has no end by design: the owner's tap arrives as a click and
+   * starts the next turn. A `propose_plan` on this list would park the turn's
+   * 30 minute budget on an answer that may come tomorrow, and the comment above
+   * `execute` is explicit that the budget is for the model's silence and
+   * nothing else.
+   */
+  it("names the chats it has stored in plan mode, and only those", () => {
+    // The mode is per chat and persisted, so a restart has to be able to
+    // report what it came back holding. The STORE is the truth, not the
+    // running threads: a chat with no thread yet still has a mode.
+    writeFileSync(
+      join(home, "session-settings.json"),
+      JSON.stringify({
+        "20": { mode: "plan", model: "one" },
+        "21": { mode: "default", model: "one" },
+        "22": { model: "one" },
+        "23": { mode: "plan" },
+        bogus: { mode: "plan" },
+      }),
+    );
+    const fresh = new CodexHost({
+      auth: { ok: true, mode: "chatgpt", label: "test" },
+      workdir: home,
+      server: new Server() as any,
+    });
+    try {
+      expect(fresh.planModeChats().sort((a, b) => a - b)).toEqual([20, 23]);
+    } finally {
+      fresh.close();
+    }
+  });
+
+  it("keeps propose_plan off the park list, because nothing waits on it", () => {
+    expect(OWNER_BLOCKING_TOOLS.has("propose_plan")).toBe(false);
+    expect(waitsForOwner("item/tool/call", { tool: "propose_plan" })).toBe(false);
+  });
+
   it("keeps OWNER_BLOCKING_TOOLS equal to the tools that block on a person", () => {
     const source = readFileSync(
       new URL("../src/hoai-tools.ts", import.meta.url),

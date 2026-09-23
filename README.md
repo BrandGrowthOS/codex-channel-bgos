@@ -108,10 +108,13 @@ The CI matrix runs on Windows, macOS and Linux. Windows tests launch a real hidd
 
 Release order: publish this connector version first, verify the npm package, then ship the companion HOAI app/backend changes that install and advertise it. A merge to this repository's `main` with a package version change triggers the existing npm publication workflow.
 
-This release is HELD BACK from `latest`, which inverts that order for 0.10.1 only. The daemon now offers a thirty minute approval hold and relies on the BGOS backend clamping that offer to the owner's per agent choice (see the RELEASE ORDER comment above `APPROVAL_HOLD_SECONDS` in `src/interactions.ts`). So the publish workflow sends this version to npm under the dist tag `next`, named in `HELD_FROM_LATEST` in `.github/workflows/publish.yml`, and nothing installs it by default. The hold is written in two machine readable places that a test keeps in agreement: that list, and the `HELD-FROM-LATEST: 0.10.1` line in the RELEASE ORDER comment in `src/interactions.ts`. Once that backend and its migration are deployed, promote it by hand and drop the version from both:
+TWO releases are HELD BACK from `latest`, which inverts that order for 0.10.1 and 0.11.0. 0.10.1 offers a thirty minute approval hold and relies on the BGOS backend clamping that offer to the owner's per agent choice (see the RELEASE ORDER comment above `APPROVAL_HOLD_SECONDS` in `src/interactions.ts`). 0.11.0 inherits that hold and adds one of its own: its plan card is a `plan_card` renderable the app has to know, its three chips are codes the app has to relabel, and its plan mode chip reads a chat column that ships with the stage 3 backend. So the publish workflow sends either version to npm under the dist tag `next`, named in `HELD_FROM_LATEST` in `.github/workflows/publish.yml`, and nothing installs them by default. The hold is written in two machine readable places that a test keeps in agreement (`test/publish-workflow.spec.ts`): that list, and the two `HELD-FROM-LATEST:` lines in the RELEASE ORDER comment in `src/interactions.ts`. Retire them one at a time, each once ITS backend and migration are deployed, dropping the version from both places:
 
 ```text
+# stage 1 backend live (the per agent wait column and its clamp):
 npm dist-tag add codex-channel-bgos@0.10.1 latest
+# stage 3 backend live (the plan card renderable and chats.session_mode):
+npm dist-tag add codex-channel-bgos@0.11.0 latest
 ```
 
 ## License

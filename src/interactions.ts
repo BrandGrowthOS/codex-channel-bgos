@@ -81,12 +81,21 @@ interface Pending {
  * deliberately not written here: a standing guard forbids that spelling under
  * src/, because the daemon must never be tempted to read it.)
  *
- * The line below is the machine readable half of that hold, and the publish
- * workflow's HELD_FROM_LATEST list must agree with it exactly
- * (test/publish-workflow.spec.ts). Retiring the hold is an edit of this line
- * and of that list, never a reword of the paragraph above it.
+ * 0.11.0 INHERITS the same hold, and it has a second reason of its own. The
+ * plan card it adds is a `plan_card` renderable the app has to know, its three
+ * chips are codes the app has to relabel, and its plan mode chip reads a chat
+ * column that does not exist yet. Published as latest ahead of the stage 3
+ * backend it would ship the approval hold sideways AND draw a card nobody can
+ * read. Retire BOTH lines together, in this order: stage 1 backend live, then
+ * 0.10.1; stage 3 backend live, then 0.11.0.
+ *
+ * The lines below are the machine readable half of that hold, and the publish
+ * workflow's HELD_FROM_LATEST list must agree with them exactly
+ * (test/publish-workflow.spec.ts). Retiring the hold is an edit of those lines
+ * and of that list, never a reword of the paragraph above them.
  *
  * HELD-FROM-LATEST: 0.10.1
+ * HELD-FROM-LATEST: 0.11.0
  */
 export const APPROVAL_HOLD_SECONDS = 1800;
 

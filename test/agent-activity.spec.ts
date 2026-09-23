@@ -550,6 +550,7 @@ describe("the adapter's activity wiring", () => {
     });
     Object.assign(adapter, {
       turnControllers: new Map(),
+    planCardFailures: new Set(),
       ownerId: "owner-1",
       missionLane: {
         beginTurn: vi.fn(() => 1),
@@ -912,6 +913,7 @@ describe("an adopted turn's card carries everything an ordinary turn's does", ()
     Object.assign(adapter, {
       ownerId: "owner-1",
       identityReady: false,
+      planCardFailures: new Set<number>(),
       chatToAssistant: new Map<number, number>([[20, 10]]),
       assistantToRoute: new Map<number, string>(),
       goalLane: {

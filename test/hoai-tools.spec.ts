@@ -8,6 +8,315 @@ const context = () => ({
   userId: "owner",
   signal: new AbortController().signal,
 });
+describe("propose_plan", () => {
+  /**
+   * The one tool that asks the owner a question and does NOT block.
+   *
+   * The plan wait has no end: the answer arrives as a click that starts the
+   * next turn. So this tool returns at once, and the turn ends. It is also the
+   * reason `propose_plan` must stay out of OWNER_BLOCKING_TOOLS (pinned in
+   * test/codex-host.spec.ts): a tool that parked the watchdog on an answer that
+   * may come tomorrow would hold a 30 minute budget open forever.
+   */
+  it("posts through the lane and returns pending at once", async () => {
+    const propose = vi.fn(async () => ({ messageId: 501 }));
+    const enforcedIn = vi.fn(() => false);
+    const tools = new HoaiTools(
+      {} as any,
+      () => "canon",
+      undefined,
+      { propose, enforcedIn } as any,
+    );
+    const result: any = await tools.handleRequest(
+      "item/tool/call",
+      {
+        tool: "propose_plan",
+        arguments: {
+          chat_id: "17",
+          title: "Add retry with backoff",
+          summary: "The uploader retries nothing.",
+          steps: [
+            { text: "Add the helper", file: "src/upload.ts" },
+            { text: "Wrap the call", check: "the new test fails without it" },
+          ],
+          files: ["src/upload.ts"],
+          check: "The new unit test fails without the helper.",
+        },
+      },
+      context(),
+    );
+    expect(result.success).toBe(true);
+    expect(result.contentItems[0].text).toContain("pending");
+    expect(result.contentItems[0].text).toContain("501");
+    expect(propose).toHaveBeenCalledWith({
+      assistantId: 9,
+      chatId: 17,
+      plan: expect.objectContaining({
+        title: "Add retry with backoff",
+        summary: "The uploader retries nothing.",
+        files: ["src/upload.ts"],
+        check: "The new unit test fails without the helper.",
+        // The DEFAULT door is the agent deciding for itself: a tool call is
+        // not the owner typing /plan, and it is not plan mode either.
+        door: "decided",
+        // ASKED OF THE LANE, per chat, and false here because this chat is
+        // not holding the read only sandbox. It used to be the constant
+        // `CODEX_PLAN_MODE_ENFORCED`, which could not tell a plan proposed
+        // under `/plan` apart from one the model decided on mid coding.
+        enforced: false,
+      }),
+    });
+    expect(enforcedIn).toHaveBeenCalledWith(17);
+    expect(propose.mock.calls[0]![0].plan.steps).toEqual([
+      { text: "Add the helper", file: "src/upload.ts" },
+      { text: "Wrap the call", check: "the new test fails without it" },
+    ]);
+    // The lane owns the plan's identity, never the model.
+    expect(propose.mock.calls[0]![0].plan).not.toHaveProperty("planId");
+    expect(propose.mock.calls[0]![0].plan).not.toHaveProperty("revision");
+  });
+
+  it("stamps the card with the LOCK THIS CHAT HAS, not a channel constant", () => {
+    // The whole point of retiring `CODEX_PLAN_MODE_ENFORCED`. One daemon
+    // plans under the read only sandbox in chat 17 and, at the same moment,
+    // answers a plan it decided on inside the ordinary coding chat 18. A
+    // constant gets one of those two wrong whichever value it takes, and the
+    // wrong one is a sentence the app puts in front of the owner.
+    return (async () => {
+      const propose = vi.fn(async () => ({ messageId: 504 }));
+      const enforcedIn = vi.fn((chatId: number) => chatId === 17);
+      const tools = new HoaiTools(
+        {} as any,
+        () => "canon",
+        undefined,
+        { propose, enforcedIn } as any,
+      );
+      const call = (chatId: number): Promise<any> =>
+        tools.handleRequest(
+          "item/tool/call",
+          {
+            tool: "propose_plan",
+            arguments: {
+              chat_id: String(chatId),
+              title: "Add retry",
+              steps: [{ text: "Add the helper" }],
+            },
+          },
+          { ...context(), chatId },
+        );
+      expect((await call(17)).success).toBe(true);
+      expect((await call(18)).success).toBe(true);
+      expect(propose.mock.calls[0]![0].plan.enforced).toBe(true);
+      expect(propose.mock.calls[1]![0].plan.enforced).toBe(false);
+    })();
+  });
+
+  it("will not let the model claim plan mode in a chat that is not in it", async () => {
+    // `mode` is the only door that is a claim about the HOST: the app turns
+    // it into the line "Plan mode is on." above the steps. The model fills
+    // the field, so in an ordinary coding chat a plan raised by the owner's
+    // plan policy could print a sentence about the host that is false. The
+    // daemon knows the answer, exactly as it knows `enforced`, so it clamps.
+    const propose = vi.fn(async () => ({ messageId: 505 }));
+    const enforcedIn = vi.fn(() => false);
+    const planModeIn = vi.fn((chatId: number) => chatId === 17);
+    const tools = new HoaiTools(
+      {} as any,
+      () => "canon",
+      undefined,
+      { propose, enforcedIn, planModeIn } as any,
+    );
+    const call = (chatId: number): Promise<any> =>
+      tools.handleRequest(
+        "item/tool/call",
+        {
+          tool: "propose_plan",
+          arguments: {
+            chat_id: String(chatId),
+            title: "Add retry",
+            door: "mode",
+            steps: [{ text: "Add the helper" }],
+          },
+        },
+        { ...context(), chatId },
+      );
+    expect((await call(17)).success).toBe(true);
+    expect((await call(18)).success).toBe(true);
+    // Chat 17 really is in plan mode, so the claim stands.
+    expect(propose.mock.calls[0]![0].plan.door).toBe("mode");
+    // Chat 18 is an ordinary coding chat: the card tells the true story,
+    // which is that the agent decided to plan first.
+    expect(propose.mock.calls[1]![0].plan.door).toBe("decided");
+    expect(planModeIn).toHaveBeenCalledWith(18);
+  });
+
+  it("carries a revision's supersedes, note and per step tags", async () => {
+    const propose = vi.fn(async () => ({ messageId: 502 }));
+    const enforcedIn = vi.fn(() => false);
+    const tools = new HoaiTools(
+      {} as any,
+      () => "canon",
+      undefined,
+      { propose, enforcedIn } as any,
+    );
+    await tools.handleRequest(
+      "item/tool/call",
+      {
+        tool: "propose_plan",
+        arguments: {
+          chat_id: "17",
+          title: "Add retry, revised",
+          door: "typed",
+          supersedes: 501,
+          note: "Dropped the test rewrite.",
+          steps: [
+            { text: "Add the helper", tag: "unchanged" },
+            { text: "Rewrite the tests", tag: "dropped" },
+          ],
+        },
+      },
+      context(),
+    );
+    expect(propose.mock.calls[0]![0].plan).toMatchObject({
+      door: "typed",
+      supersedes: 501,
+      note: "Dropped the test rewrite.",
+    });
+    expect(propose.mock.calls[0]![0].plan.steps[1]!.tag).toBe("dropped");
+  });
+
+  it("refuses a plan with no steps at the schema, before anything is posted", async () => {
+    const propose = vi.fn(async () => ({ messageId: 503 }));
+    const enforcedIn = vi.fn(() => false);
+    const tools = new HoaiTools(
+      {} as any,
+      () => "canon",
+      undefined,
+      { propose, enforcedIn } as any,
+    );
+    const result: any = await tools.handleRequest(
+      "item/tool/call",
+      { tool: "propose_plan", arguments: { chat_id: "17", title: "No steps" } },
+      context(),
+    );
+    expect(result.success).toBe(false);
+    expect(propose).not.toHaveBeenCalled();
+  });
+
+  it("says so honestly on a connection that has no plan lane", async () => {
+    const tools = new HoaiTools({} as any, () => "canon");
+    const result: any = await tools.handleRequest(
+      "item/tool/call",
+      {
+        tool: "propose_plan",
+        arguments: {
+          chat_id: "17",
+          title: "Add retry",
+          steps: [{ text: "Add the helper" }],
+        },
+      },
+      context(),
+    );
+    expect(result.success).toBe(false);
+    expect(result.contentItems[0].text).toMatch(/not available/i);
+  });
+});
+
+describe("reply buttons carry a style", () => {
+  /**
+   * The canon has promised an optional `style` on reply buttons since its own
+   * line 112, and neither plugin sent one: only the approval builders did. A
+   * plan card posted as three plain chips renders three identical neutral
+   * buttons, which is the whole reason the plan chips are CODES the app
+   * relabels and tints.
+   */
+  it("passes the tier through to the option, and omits it when unset", async () => {
+    const agentRequest = vi.fn(async () => ({ id: 1 }));
+    const tools = new HoaiTools({ agentRequest } as any, () => "canon");
+    await tools.handleRequest(
+      "item/tool/call",
+      {
+        tool: "reply",
+        arguments: {
+          chat_id: "17",
+          text: "Ship it?",
+          buttons: [
+            { label: "Ship", value: "ship", style: "success" },
+            { label: "Wait", value: "wait" },
+          ],
+        },
+      },
+      context(),
+    );
+    const body = agentRequest.mock.calls[0]![3] as any;
+    expect(body.options[0]).toMatchObject({ text: "Ship", style: "success" });
+    expect(body.options[1]).not.toHaveProperty("style");
+  });
+
+  it("drops a tier the backend would refuse, and still posts the message", async () => {
+    // THE FINDING. The declaration's enum is ADVISORY: nothing at runtime
+    // holds a model to it, and the value used to be spread straight onto the
+    // option. `CreateMessageOptionDto` carries an `@IsIn` over the same four
+    // tiers, so "blue", "warning" or a capitalised "Success" 400s the WHOLE
+    // reply, and the text, the files and every other chip are lost with it.
+    // Losing a message because a chip wanted a colour that does not exist is
+    // the wrong trade; the sibling plugin shipped the same normalizer.
+    const agentRequest = vi.fn(async () => ({ id: 1 }));
+    const tools = new HoaiTools({ agentRequest } as any, () => "canon");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result: any = await tools.handleRequest(
+      "item/tool/call",
+      {
+        tool: "reply",
+        arguments: {
+          chat_id: "17",
+          text: "Ship it?",
+          buttons: [
+            { label: "Ship", value: "ship", style: "blue" },
+            { label: "Stop", value: "stop", style: "  DANGER " },
+            { label: "Wait", value: "wait", style: "warning" },
+          ],
+        },
+      },
+      context(),
+    );
+    warn.mockRestore();
+    expect(result.success).toBe(true);
+    const body = agentRequest.mock.calls[0]![3] as any;
+    // The message still went, whole: three chips, one of them tinted.
+    expect(body.text).toBe("Ship it?");
+    expect(body.options).toHaveLength(3);
+    expect(body.options[0]).not.toHaveProperty("style");
+    // Trimmed and lowercased, not refused: the tier is a spelling, not a
+    // contract the owner should lose a message over.
+    expect(body.options[1]).toMatchObject({ text: "Stop", style: "danger" });
+    expect(body.options[2]).not.toHaveProperty("style");
+  });
+
+  it("still refuses a style that is not a string, because that is a type error", async () => {
+    // The tier is a spelling the handler can correct. A number is not a tier at
+    // all, and `type: 'string'` stays on the property: the boundary names the
+    // mistake rather than guessing what the model meant.
+    const agentRequest = vi.fn(async () => ({ id: 1 }));
+    const tools = new HoaiTools({ agentRequest } as any, () => "canon");
+    const result: any = await tools.handleRequest(
+      "item/tool/call",
+      {
+        tool: "reply",
+        arguments: {
+          chat_id: "17",
+          text: "Ship it?",
+          buttons: [{ label: "Ship", value: "ship", style: 7 }],
+        },
+      },
+      context(),
+    );
+    expect(result.success).toBe(false);
+    expect(result.contentItems[0].text).toMatch(/must be string/);
+    expect(agentRequest).not.toHaveBeenCalled();
+  });
+});
+
 describe("typed HOAI boundary", () => {
   it("accepts a native free-text form through the real dynamic tool schema", async () => {
     const tools = new HoaiTools({} as any, () => "canon");
@@ -466,5 +775,77 @@ describe("the mission tool descriptions", () => {
   it("points tick and complete at this chat's open mission", () => {
     expect(describeOf("tick_mini_goal")).toContain("Targets this chat's open mission");
     expect(describeOf("complete_mission")).toContain("Targets this chat's open mission");
+  });
+});
+
+describe("the shared tool declarations", () => {
+  /**
+   * The Claude plugin declares these schemas inline in server.ts and this repo
+   * re-declares the same set in src/hoai-shared/tool-declarations.ts. A tool
+   * added to one and not the other means the two channels advertise different
+   * capabilities to the same owner, so the shape is pinned here rather than
+   * trusted to a reviewer noticing.
+   */
+  const propose = HOAI_TOOLS.find((t) => t.name === "propose_plan");
+  const reply = HOAI_TOOLS.find((t) => t.name === "reply");
+
+  it("declares propose_plan with the card's fields and nothing the model must guess", () => {
+    expect(propose).toBeDefined();
+    const schema = propose!.inputSchema as any;
+    expect(schema.required).toEqual(["chat_id", "title", "steps"]);
+    expect(Object.keys(schema.properties)).toEqual([
+      "chat_id",
+      "title",
+      "summary",
+      "steps",
+      "files",
+      "check",
+      "door",
+      "supersedes",
+      "note",
+    ]);
+    expect(schema.properties.steps.maxItems).toBe(30);
+    expect(schema.properties.files.maxItems).toBe(30);
+    expect(schema.properties.steps.items.required).toEqual(["text"]);
+    expect(schema.properties.steps.items.properties.tag.enum).toEqual([
+      "unchanged",
+      "changed",
+      "dropped",
+    ]);
+    expect(schema.properties.door.enum).toEqual(["typed", "decided", "mode"]);
+  });
+
+  it("tells the model the tool does not block, and which chats the wait is real in", () => {
+    // Both are load bearing. A model that waits on this tool wedges its turn;
+    // a model told the wait is always enforced would believe a lock it does
+    // not have in a coding chat, and one told it NEVER is would be surprised
+    // by a denied write inside plan mode. The answer is per chat and the
+    // description now says which is which (see src/plan-mode.ts).
+    expect(propose!.description).toMatch(/RETURNS IMMEDIATELY/);
+    expect(propose!.description).toMatch(/end your turn/i);
+    expect(propose!.description).toMatch(/WHETHER THAT IS ENFORCED DEPENDS ON THE CHAT/);
+    expect(propose!.description).toMatch(/holds your files read only/);
+    expect(propose!.description).toMatch(
+      /ordinary coding chat nothing enforces the wait at all/,
+    );
+    // And it never claims the blanket lock the probe refused.
+    expect(propose!.description).not.toMatch(/plan mode prevents/i);
+  });
+
+  it("offers an optional style on reply buttons, as the canon has promised", () => {
+    const button = (reply!.inputSchema as any).properties.buttons.items;
+    expect(button.properties.style.type).toBe("string");
+    // The four tiers are NAMED, in the description, and deliberately NOT in an
+    // `enum`. `HoaiTools.call` validates every tool call against this schema
+    // before the handler runs, so an enum on a cosmetic optional field refuses
+    // the whole reply over a colour: the text, the files and the other chips go
+    // with it. The handler normalizes instead (see the reply case), which is
+    // what the sibling plugin does. This is the one place that could put the
+    // enum back by accident.
+    expect(button.properties.style.enum).toBeUndefined();
+    for (const tier of ["default", "success", "danger", "primary"])
+      expect(button.properties.style.description).toContain(tier);
+    // Optional: a daemon that sends no tier is the normal case.
+    expect(button.required).toEqual(["label", "value"]);
   });
 });

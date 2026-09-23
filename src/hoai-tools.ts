@@ -22,6 +22,7 @@ import {
   buildScheduleCancelPath,
 } from "./hoai-shared/schedule.js";
 import { buildCallOwnerBody } from "./hoai-shared/call-owner.js";
+import { normalizeButtonStyle } from "./hoai-shared/message-text.js";
 import {
   buildHealthLogEventBody,
   buildHealthLogListPath,
@@ -36,6 +37,7 @@ import {
   listRenderableKinds,
   validateComponentPayload,
 } from "./hoai-shared/renderables.js";
+import type { PlanCardInput, PlanDoor } from "./plan-card.js";
 import {
   buildMissionActivePath,
   buildMissionCreateBody,
@@ -53,6 +55,59 @@ import {
  * done, narrated to the model as a falsehood and steered into the very turn
  * that ticked it.
  */
+/**
+ * Where `propose_plan` sends a plan.
+ *
+ * The tool itself owns nothing: the card has to supersede the chat's previous
+ * open plan, write the status line and be remembered for the click that
+ * answers it, and all three of those live with the adapter, one process wide.
+ * Injected the way `MissionSelfWrites` is, so a tools instance built without
+ * an adapter (every unit test of another tool) still constructs.
+ *
+ * It RETURNS AT ONCE by contract. Nothing here waits on a person, which is why
+ * `propose_plan` must stay OUT of OWNER_BLOCKING_TOOLS: a tool that parked the
+ * turn's watchdog on an answer that may come tomorrow would hold a 30 minute
+ * budget open forever (codex-host.ts, `execute`).
+ */
+export interface PlanCardPoster {
+  /**
+   * `plan_id` and `revision` are deliberately NOT the caller's: a revision has
+   * to keep the identity of the plan it replaces, and only the adapter knows
+   * which card is open in the chat.
+   */
+  propose(input: {
+    assistantId: number;
+    chatId: number;
+    plan: Omit<PlanCardInput, "planId" | "revision">;
+  }): Promise<{ messageId: number }>;
+  /**
+   * Is this chat's plan wait actually held by a read only sandbox?
+   *
+   * Asked per chat rather than read off a constant, because one daemon can be
+   * planning under the lock in one chat and proposing a plan it decided on in
+   * an ordinary coding chat at the same time. The card's `enforced` bit is the
+   * sentence the app puts in front of the owner, so it is a fact and never an
+   * assumption.
+   */
+  enforcedIn(chatId: number): boolean;
+  /**
+   * Is this chat in plan mode right now?
+   *
+   * Asked because the card's `mode` door is a claim about the HOST ("Plan
+   * mode is on." is the line the app draws from it) and the model is the one
+   * that fills the door field. The daemon knows the answer and the model does
+   * not have to be believed about it.
+   */
+  planModeIn(chatId: number): boolean;
+}
+const NO_PLAN_CARDS: PlanCardPoster = {
+  async propose() {
+    throw new Error("Plan cards are not available on this connection.");
+  },
+  enforcedIn: () => false,
+  planModeIn: () => false,
+};
+
 export interface MissionSelfWrites {
   /** About to write this mission: the frame it emits is ours. */
   starting(missionId: number): void;
@@ -179,6 +234,7 @@ export class HoaiTools {
     private api: BgosApi,
     private capabilities: () => string,
     private missionWrites: MissionSelfWrites = NO_MISSION_SELF_WRITES,
+    private plans: PlanCardPoster = NO_PLAN_CARDS,
   ) {
     this.interactions = new Interactions(api);
   }
@@ -331,10 +387,48 @@ export class HoaiTools {
             files,
             ...(args.buttons?.length
               ? {
-                  options: args.buttons.map((b: RpcObject) => ({
-                    text: b.label,
-                    callbackData: escapeButton(b.value),
-                  })),
+                  options: args.buttons.map((b: RpcObject) => {
+                    // Optional and additive. The app draws a tier when it
+                    // knows one and neutral otherwise, so an older client
+                    // loses nothing by us sending it.
+                    //
+                    // NORMALIZED HERE BECAUSE NOTHING ELSE MAY REFUSE IT, and
+                    // the declaration is written to match. THIS runtime
+                    // validates: `HoaiTools.call` runs `validateToolInput`
+                    // over the declared schema before this handler is reached
+                    // (see the `validateToolInput(raw, definition.inputSchema)`
+                    // line at the top of `call`), and that walk throws on the
+                    // first `enum` miss, which fails the WHOLE tool call. An
+                    // `enum` on a cosmetic optional field would therefore cost
+                    // a model that writes "warning", "blue" or a capitalised
+                    // "Success" its entire reply: the text, the files and
+                    // every other chip. So `reply`'s `buttons[].style` carries
+                    // NO enum in tool-declarations.ts (a deliberate divergence
+                    // from the sibling plugin, whose MCP schema really is
+                    // advisory because nothing on its daemon side checks it),
+                    // the four tiers are named in the field's description, and
+                    // this line is the only gate.
+                    //
+                    // WHAT IT DOES: lower cases and trims, returns one of the
+                    // four tiers the backend's `CreateMessageOptionDto` spells
+                    // with `@IsIn`, and returns null for anything else. The
+                    // null is DROPPED with a line in the log rather than sent,
+                    // because the backend's `@IsIn` 400s the whole reply over
+                    // one bad value, so the message would be lost at the other
+                    // end instead of at this one. Neutral is what every client
+                    // drew before tiers existed.
+                    const style = normalizeButtonStyle(b.style);
+                    if (style === null && b.style !== undefined)
+                      // eslint-disable-next-line no-console
+                      console.warn(
+                        `[codex-channel-bgos] dropping unknown reply button style ${JSON.stringify(b.style)}; the chip renders neutral`,
+                      );
+                    return {
+                      text: b.label,
+                      callbackData: escapeButton(b.value),
+                      ...(style ? { style } : {}),
+                    };
+                  }),
                   renderMode: args.render_mode ?? "inline",
                 }
               : {}),
@@ -345,6 +439,61 @@ export class HoaiTools {
         );
         context.onReply?.();
         return response;
+      }
+      case "propose_plan": {
+        // The model names its own door, and one of the three values is a
+        // claim about the HOST rather than about the model: the app turns
+        // `mode` into the line "Plan mode is on." So `mode` is CLAMPED the
+        // same way `enforced` below is resolved, by asking the daemon rather
+        // than believing the turn. A model that says `mode` inside an
+        // ordinary coding chat gets `decided`, which is the true story of
+        // that card: the plan policy asked for a plan and it wrote one.
+        // `typed` is not clamped here: the owner's /plan is what put the tool
+        // in front of the model, and the daemon's mode flip for it is async.
+        const claimed: PlanDoor =
+          args.door === "typed" || args.door === "mode" ? args.door : "decided";
+        const door: PlanDoor =
+          claimed === "mode" && !this.plans.planModeIn(chatId)
+            ? "decided"
+            : claimed;
+        const { messageId } = await this.plans.propose({
+          assistantId: context.assistantId,
+          chatId,
+          plan: {
+            title: String(args.title ?? ""),
+            ...(args.summary ? { summary: String(args.summary) } : {}),
+            steps: (args.steps ?? []).map((step: RpcObject) => ({
+              text: String(step.text ?? ""),
+              ...(step.file ? { file: String(step.file) } : {}),
+              ...(step.check ? { check: String(step.check) } : {}),
+              ...(step.tag ? { tag: step.tag } : {}),
+            })),
+            ...(args.files?.length
+              ? { files: args.files.map((f: unknown) => String(f)) }
+              : {}),
+            ...(args.check ? { check: String(args.check) } : {}),
+            door,
+            // ASKED, NEVER ASSUMED. Plan mode by itself locks nothing (it
+            // rewrites the model's instructions and leaves `sandboxPolicy`
+            // alone), so what makes the wait real is the read only sandbox
+            // `/plan` now turns on with it. A plan the MODEL decided to
+            // propose inside an ordinary coding chat has neither, and this
+            // answers false for exactly that chat while answering true for
+            // the one next to it. See src/plan-mode.ts.
+            enforced: this.plans.enforcedIn(chatId),
+            ...(typeof args.supersedes === "number"
+              ? { supersedes: positive(args.supersedes, "supersedes") }
+              : {}),
+            ...(args.note ? { note: String(args.note) } : {}),
+          },
+        });
+        // Returns at once, on purpose. The owner's tap arrives as a click and
+        // starts the NEXT turn; end this one.
+        return {
+          status: "pending",
+          message_id: messageId,
+          note: "The plan is with the owner. End your turn now; their answer starts a new one. Change nothing until then.",
+        };
       }
       case "ask_user_input":
         return this.interactions.ask(
