@@ -178,7 +178,11 @@ export type ChangeKind = "add" | "update" | "delete" | "rename" | "binary";
 export type PreviewState = "ok" | "binary" | "too_large";
 
 export interface ChangeSummaryFile {
-  /** `shortenPath` form, at most 200 characters. */
+  /**
+   * `shortenPath` form, at most 200 characters, and UNIQUE across the rows of
+   * one card: the app pairs a row to its patch by this string, so the daemon
+   * widens a collision back out (or numbers it) before it reaches the wire.
+   */
   path: string;
   kind: ChangeKind;
   /** Lines this file's own patch added and removed, from `countDiffLines`. */
@@ -205,14 +209,22 @@ export interface DiffWireFile {
   /** Unified patch text, masked whole and then cut at its HEAD. */
   patch: string;
   truncated: boolean;
-  /** Lines the CAP dropped from the end of this file. */
+  /**
+   * Lines the CAP did not deliver from the end of this file, counting a line
+   * the cut landed INSIDE: a line that arrived in pieces did not arrive, and
+   * the card's cut note is drawn from this number alone.
+   */
   omitted_lines: number;
   /** Lines the REDACTOR rewrote or removed in this file. */
   hidden_lines: number;
 }
 
 export interface DiffWire {
-  /** Any file cut short, dropped for budget, or past the 20 row limit. */
+  /**
+   * Any file cut short, dropped for budget, unreadable (binary or no body),
+   * or past the 20 row limit: in other words, the panels here are not the
+   * whole change.
+   */
   truncated: boolean;
   files: DiffWireFile[];
 }

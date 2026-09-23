@@ -38,11 +38,14 @@
  *
  * The daemon's cap and the server's cap are in DIFFERENT UNITS on purpose
  * (65,536 UTF-16 units of patch text here, 98,304 bytes of serialised
- * `approvalMeta` there), so a pathological patch can satisfy this one and
- * still be refused by that one, and a refused create costs the owner the whole
- * card and the agent its answer. `fitsApprovalMeta` below is this side's
- * insurance: it never sends more than the caps above allow, it only sends
- * LESS when the serialised form would not have been accepted at all.
+ * `approvalMeta` there), so a patch that is mostly non ASCII can satisfy this
+ * one and still be refused by that one, and a refused create costs the owner
+ * the whole card and the agent its answer. The loop at the end of
+ * `buildDiffForWire` is this side's insurance: it never sends more than the
+ * caps above allow, and when the serialised form would not have been accepted
+ * it sends LESS, by dropping trailing files and then by re-cutting the last
+ * one that survives. It drops the panel only when not one readable character
+ * of it fits, because the plain line is the part that always has to arrive.
  */
 import { clipText } from "./clip-text.js";
 import {
@@ -82,6 +85,9 @@ const PRIVATE_KEY_END = "-----END";
 
 /** A patch body git wrote instead of text, in either spelling. */
 const BINARY_PATCH_RE = /^(?:GIT binary patch|Binary files? .* differ)/m;
+
+/** The clip `shortenPath` applies, mirrored here for the disambiguated form. */
+const PATH_MAX = 200;
 
 type Rec = Record<string, any>;
 
@@ -158,6 +164,131 @@ export function wireChangeKind(kind: unknown, binary: boolean): ChangeKind {
 /** True for a patch body that is not text a person can read. */
 export function isBinaryPatch(raw: string): boolean {
   return raw.includes("\u0000") || BINARY_PATCH_RE.test(raw);
+}
+
+/** Segments of a path in either separator, with the empties dropped. */
+function segmentsOf(text: string): string[] {
+  return text.split(/[\\/]+/).filter((part) => part.length > 0);
+}
+
+/**
+ * The last `count` segments of a path, joined with the separator it used.
+ *
+ * Never the path itself: the leading root is what `shortenPath` exists to
+ * drop, and a widened name is still a shortened one.
+ */
+function tailOf(full: string, count: number): string {
+  const sep = full.includes("\\") ? "\\" : "/";
+  const parts = segmentsOf(full);
+  return clipText(parts.slice(-count).join(sep), PATH_MAX);
+}
+
+/**
+ * THE PATH IS THE JOIN KEY, so the wire has to make it unique.
+ *
+ * `shortenPath` is deliberately lossy: outside the thread's cwd and outside
+ * home it keeps the basename and ONE parent segment, so `/repo-one/src/x.ts`
+ * and `/repo-two/src/x.ts` both become `src/x.ts`. The runtime can also
+ * announce two changes for the SAME file (a rewrite and the rename of it).
+ * Either way two rows would carry one string, and the app pairs a row to its
+ * patch by that string (`diffModel.diffFileFor` is a `find` on the path), so
+ * the second row would open the FIRST row's patch: the owner shown the wrong
+ * change under the right name, on the one card whose whole job is to say what
+ * they are authorising. The card this fires for is USUALLY a patch outside the
+ * workspace, which is exactly the case `shortenPath` shortens hardest.
+ *
+ * So a collision between two DIFFERENT files is widened back out by one
+ * parent segment, and two changes to the SAME file, which no tail could ever
+ * separate, are numbered. Both lists take the SAME string, because both are
+ * written from this one row.
+ *
+ * Exactly one parent, and never past a `~`: widening is a privacy cost as
+ * well as a fix, since the segments above a file carry the account name on
+ * every desktop, which is the whole reason `shortenPath` cut them off. One
+ * segment separates two checkouts, which is the case this actually fires for,
+ * and a `~` path is already relative to a home the wire refuses to name.
+ */
+function distinctPath(
+  short: string,
+  full: string,
+  sameFile: boolean,
+  used: Map<string, string>,
+): string {
+  if (!sameFile && !short.startsWith("~")) {
+    const wider = tailOf(full, 3);
+    if (wider && wider !== short && !used.has(wider)) return wider;
+  }
+  const base = clipText(short, PATH_MAX - 8);
+  for (let n = 2; n <= DIFF_FILES_MAX + 1; n += 1) {
+    const candidate = `${base} (${n})`;
+    if (!used.has(candidate)) return candidate;
+  }
+  return short;
+}
+
+/** The serialised cost of a string in the column's own unit. */
+function byteLength(text: string): number {
+  try {
+    return Buffer.byteLength(text, "utf8");
+  } catch {
+    return text.length * 4;
+  }
+}
+
+/**
+ * Cut ONE file's patch down by BYTES until the whole card fits the server's
+ * cap, rather than dropping the file and sending no panel at all.
+ *
+ * The two caps are in different units (UTF-16 units of patch text here, bytes
+ * of serialised `approvalMeta` there), and a patch that is mostly non ASCII
+ * spends two or three bytes on every unit. Arabic prose, an `ar.json`, an
+ * emoji heavy file: ordinary edits in a product that ships AR beside EN. The
+ * belt and braces loop below used to POP whole files, so a one file card lost
+ * its diff entirely and the owner got no panel even with the switch on, while
+ * tens of thousands of units of headroom went unspent.
+ *
+ * Trailing lines go first (the head is the meaning), and a single line that
+ * still will not fit is cut inside it through `clipText`, whose surrogate
+ * guard is the one that matters: Postgres refuses a lone surrogate in JSONB.
+ * False when not even one readable character fits, and the caller then drops
+ * the file as before.
+ */
+function cutFileToBytes(file: DiffWireFile, over: () => number): boolean {
+  for (let guard = 0; guard < 64 && over() > 0; guard += 1) {
+    const lines = file.patch.split("\n");
+    if (lines.length > 1) {
+      let need = over();
+      let dropped = 0;
+      while (lines.length > 1 && need > 0) {
+        const line = lines.pop()!;
+        need -= byteLength(line) + 1;
+        dropped += 1;
+      }
+      file.patch = lines.join("\n");
+      file.omitted_lines += dropped;
+      file.truncated = true;
+      continue;
+    }
+    const line = lines[0] ?? "";
+    const room = byteLength(line) - over();
+    if (room <= 0) return false;
+    // The units that fit in `room` bytes, by halving rather than by stepping:
+    // a 60,000 character line of two byte characters would otherwise cost
+    // 30,000 slices of it.
+    let lo = 0;
+    let hi = Math.min(line.length, room);
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      if (byteLength(line.slice(0, mid)) <= room) lo = mid;
+      else hi = mid - 1;
+    }
+    if (lo <= 0) return false;
+    const cut = clipText(line, lo);
+    if (cut.length === 0) return false;
+    file.patch = cut;
+    file.truncated = true;
+  }
+  return over() <= 0;
 }
 
 /**
@@ -243,15 +374,22 @@ export function buildDiffForWire(
     const counts = countDiffLines(raw);
     totalAdded += counts.added;
     totalRemoved += counts.removed;
-    // No body to read is drawn the same way a binary body is: the card says
-    // "can't preview" and offers no panel. The wire has no third word for it.
-    const binary = raw.length === 0 || isBinaryPatch(raw);
+    // Two different questions, and they used to share one answer. A body that
+    // is a BINARY MARKER makes the kind `binary`, because that is what the
+    // change is. A body that is simply ABSENT (the join saw the item before
+    // the runtime filled the patch, or the change carries none) says nothing
+    // about the change: a delete is still a delete and a rename still a
+    // rename, and those are the words the owner needs. Both are unreadable,
+    // so both draw `can't preview` and neither is offered a panel.
+    const binaryBody = isBinaryPatch(raw);
+    const unreadable = raw.length === 0 || binaryBody;
     return {
       path: shortenPath(change.path, ctx),
-      kind: wireChangeKind(change.kind, binary),
+      full: change.path as string,
+      kind: wireChangeKind(change.kind, binaryBody),
       added: counts.added,
       removed: counts.removed,
-      binary,
+      binary: unreadable,
       raw,
     };
   });
@@ -260,10 +398,24 @@ export function buildDiffForWire(
   // A 21st file is counted in `file_count` and in the totals and has no row.
   let anyLeftOut = seen.length > rows.length;
 
+  // Every row on the wire gets its own name, because the app pairs a row to
+  // its patch BY the name. See `distinctPath`.
+  const usedPaths = new Map<string, string>();
+  for (const row of rows) {
+    const taken = usedPaths.get(row.path);
+    if (taken !== undefined)
+      row.path = distinctPath(row.path, row.full, taken === row.full, usedPaths);
+    usedPaths.set(row.path, row.full);
+  }
+
   const files: DiffWireFile[] = [];
   let spent = 0;
   const summaryFiles: ChangeSummaryFile[] = rows.map((row) => {
-    if (row.binary)
+    if (row.binary) {
+      // No `diff.files` entry rides for this row, which is what the block
+      // flag means by "left out": `diff.truncated` says the panel set is not
+      // the whole change, and a file nobody can preview is exactly that.
+      anyLeftOut = true;
       return {
         path: row.path,
         kind: row.kind,
@@ -271,6 +423,7 @@ export function buildDiffForWire(
         removed: row.removed,
         preview: "binary" as const,
       };
+    }
 
     const masked = redactOutput(row.raw);
     const hidden = hiddenLineCount(row.raw, masked);
@@ -281,9 +434,12 @@ export function buildDiffForWire(
     const head = lines.slice(0, DIFF_LINES_PER_FILE);
     let omitted = lines.length - head.length;
     // Whole lines dropped is not the only way a file is cut short: a single
-    // line longer than the whole budget is cut INSIDE, and that file is
-    // truncated with no line missing. The flag and the count answer different
-    // questions and neither is derivable from the other.
+    // line longer than the whole budget is cut INSIDE it. That used to set
+    // the flag and leave the count at zero, which made the cut SILENT: the
+    // app draws "Cut short: {n} more lines not sent" from `omitted_lines`
+    // alone, and zero draws nothing, so a minified file stopped mid line with
+    // no note at all. A line that arrived in pieces did not arrive, so it
+    // counts. The flag stays beside the count as a belt and braces.
     let cutInside = false;
 
     const remaining = DIFF_UNITS_TOTAL - spent;
@@ -325,7 +481,9 @@ export function buildDiffForWire(
         }
         patch = clipText(head[0] ?? "", remaining);
         cutInside = true;
-        omitted += head.length - 1;
+        // The lines behind it, AND the line the cut landed inside: the panel
+        // is short by that much of the file, and the note says so.
+        omitted += head.length;
       } else {
         patch = fit.join("\n");
         omitted += head.length - fit.length;
@@ -363,16 +521,36 @@ export function buildDiffForWire(
   // The server's cap is on the SERIALISED column and this side's is on the
   // patch text, so the two can disagree on a patch that is mostly newlines or
   // mostly non ASCII. Drop whole files from the END until the body fits, and
-  // drop the diff entirely rather than send one the server would refuse: a
-  // 400 costs the owner the card, and the plain line is the part that matters.
-  while (diff && metaBytes(summary, diff, tool) > APPROVAL_META_BYTES_MAX) {
-    diff.files.pop();
+  // never send one the server would refuse: a 400 costs the owner the card,
+  // and the plain line is the part that matters.
+  //
+  // The LAST surviving file is re-cut rather than dropped. Popping it would
+  // empty `diff.files`, take the whole panel with it and spend none of the
+  // headroom the unit cap left, which on a one file card means the owner sees
+  // no change at all with the switch on.
+  const dropLast = () => {
+    diff!.files.pop();
     // The diff entries are the `ok` rows in order, so the one a drop costs is
-    // the LAST row still reading `ok`. Matching on the path would pick the
-    // wrong one when a patch touches the same shortened path twice.
+    // the LAST row still reading `ok`. The path would serve as a key now that
+    // the rows are disambiguated, but the order is what actually built this
+    // list, so the order is what reads it.
     const row = [...summary.files].reverse().find((file) => file.preview === "ok");
     if (row) row.preview = "too_large";
-    diff = diff.files.length > 0 ? { truncated: true, files: diff.files } : undefined;
+  };
+  while (diff && metaBytes(summary, diff, tool) > APPROVAL_META_BYTES_MAX) {
+    if (diff.files.length > 1) {
+      dropLast();
+      diff = { truncated: true, files: diff.files };
+      continue;
+    }
+    const only = diff.files[0]!;
+    const over = () => metaBytes(summary, diff!, tool) - APPROVAL_META_BYTES_MAX;
+    if (cutFileToBytes(only, over)) {
+      diff = { truncated: true, files: diff.files };
+      break;
+    }
+    dropLast();
+    diff = undefined;
   }
   if (!diff) for (const row of summary.files) if (row.preview === "ok") row.preview = "too_large";
 

@@ -37,6 +37,18 @@
  *  - let a binary patch through as `ok` -> "says can't preview" goes red
  *  - name the files in `text` and the sentence in `tool` -> "the ask sentence
  *    and the file list are different strings" goes red
+ *  - let `distinctPath` hand a collision straight back -> "gives every row on
+ *    the wire its own name" and "numbers two changes to the SAME file" go red
+ *  - make `cutFileToBytes` answer false at once (drop the last file instead of
+ *    re-cutting it) -> "cuts a mostly non ASCII patch to fit the byte cap" and
+ *    "stays under the byte cap" go red
+ *  - pass `unreadable` where `binaryBody` goes, so an absent body overwrites
+ *    the change kind again -> "keeps the change's own word when the body is
+ *    missing" goes red
+ *  - stop counting the line the cut landed INSIDE (`head.length - 1`) ->
+ *    "draws the cut note on a minified file" goes red
+ *  - stop setting `anyLeftOut` on a binary row -> "says a binary file was left
+ *    out of the panels" goes red
  */
 import { describe, expect, it } from "vitest";
 
@@ -225,15 +237,66 @@ describe("buildDiffForWire: the summary every card carries", () => {
     expect(isBinaryPatch(HUNK)).toBe(false);
   });
 
-  it("treats a change with no readable body the same way, rather than inventing a word", () => {
-    const wire = buildDiffForWire([{ path: "vendor/blob", kind: "update" }], ctx)!;
-    expect(wire.change_summary.files[0]).toMatchObject({
-      kind: "binary",
-      preview: "binary",
-      added: 0,
-      removed: 0,
-    });
+  it("keeps the change's own word when the body is missing, and still offers no panel", () => {
+    // A body that is a binary MARKER makes the kind `binary`. A body that is
+    // simply absent says nothing about the change: a delete is still a delete
+    // and that word is the one thing the owner needs off this card. Both are
+    // unreadable, so both say `can't preview` and neither opens.
+    const wire = buildDiffForWire(
+      [
+        { path: "old.ts", kind: { type: "delete" }, diff: "" },
+        { path: "moved.ts", kind: { type: "update", move_path: "elsewhere.ts" } },
+        { path: "vendor/blob", kind: { type: "teleport" }, diff: { not: "a string" } },
+      ],
+      ctx,
+    )!;
+    expect(wire.change_summary.files).toEqual([
+      { path: "old.ts", kind: "delete", added: 0, removed: 0, preview: "binary" },
+      { path: "moved.ts", kind: "rename", added: 0, removed: 0, preview: "binary" },
+      { path: "vendor/blob", kind: "update", added: 0, removed: 0, preview: "binary" },
+    ]);
+    expect(wire.tool).toBe("old.ts (delete)\nmoved.ts (rename)\nvendor/blob (update)");
     expect(wire.diff).toBeUndefined();
+  });
+
+  it("gives every row on the wire its own name, because the app joins on it", () => {
+    // `shortenPath` keeps the basename and ONE parent outside the cwd, so two
+    // repositories collapse onto one string. The app finds a row's patch by
+    // that string, so a collision would open the FIRST file's change under the
+    // SECOND file's name, on the one card that asks the owner to authorise it.
+    const wire = buildDiffForWire(
+      [
+        change("/repo-one/src/index.ts", { type: "update" }, "@@ -1 +1 @@\n-one\n+ONE\n"),
+        change("/repo-two/src/index.ts", { type: "update" }, "@@ -1 +1 @@\n-two\n+TWO\n"),
+      ],
+      { home: "/home/owner" },
+    )!;
+    const names = wire.change_summary.files.map((f) => f.path);
+    expect(new Set(names).size).toBe(2);
+    expect(names).toEqual(["src/index.ts", "repo-two/src/index.ts"]);
+    // The two lists are written from one row, so they carry the same string,
+    // and each name resolves to its OWN patch the way the app resolves it.
+    expect(wire.diff!.files.map((f) => f.path)).toEqual(names);
+    for (const [i, name] of names.entries())
+      expect(wire.diff!.files.find((f) => f.path === name)!.patch).toContain(
+        i === 0 ? "+ONE" : "+TWO",
+      );
+  });
+
+  it("numbers two changes to the SAME file, which no parent segment can separate", () => {
+    // The runtime does announce a rewrite and the rename of one file as two
+    // changes. There is no longer tail to fall back on, so the row is numbered
+    // rather than left to shadow the other one.
+    const wire = buildDiffForWire(
+      [
+        change(`${CWD}/a.ts`, { type: "update" }, "@@ -1 +1 @@\n-first\n+FIRST\n"),
+        change(`${CWD}/a.ts`, { type: "update", move_path: "b.ts" }, "@@ -1 +1 @@\n-second\n+SECOND\n"),
+      ],
+      ctx,
+    )!;
+    expect(wire.change_summary.files.map((f) => f.path)).toEqual(["a.ts", "a.ts (2)"]);
+    expect(wire.change_summary.files[1]!.kind).toBe("rename");
+    expect(wire.diff!.files.find((f) => f.path === "a.ts (2)")!.patch).toContain("+SECOND");
   });
 
   it("answers null when the item named no file at all, so the card posts as it did before", () => {
@@ -325,6 +388,60 @@ describe("buildDiffForWire: the caps, and the order they are applied in", () => 
     expect(sent.truncated).toBe(true);
   });
 
+  it("draws the cut note on a minified file, because a line cut inside is a line not sent", () => {
+    // One line, longer than the whole budget, cut INSIDE it. The app's note
+    // reads `omitted_lines` and nothing else, so leaving the count at zero
+    // made this cut silent: a patch that stops mid line with no note, at the
+    // one moment the design asks to be loud.
+    const sent = buildDiffForWire(
+      [change("bundle.js", "update", `+${"a".repeat(DIFF_UNITS_TOTAL + 500)}`)],
+      ctx,
+    )!.diff!.files[0]!;
+    expect(sent.truncated).toBe(true);
+    expect(sent.omitted_lines).toBeGreaterThan(0);
+  });
+
+  it("says a binary file was left out of the panels", () => {
+    // `diff.truncated` means the panels are not the whole change, and a file
+    // nobody can preview keeps its row and rides no panel at all.
+    const wire = buildDiffForWire(
+      [
+        change("logo.png", { type: "update" }, "GIT binary patch\nliteral 12\nzcmZ\n"),
+        change("notes.md", { type: "update" }, HUNK),
+      ],
+      ctx,
+    )!;
+    expect(wire.diff!.files).toHaveLength(1);
+    expect(wire.diff!.truncated).toBe(true);
+  });
+
+  it("cuts a mostly non ASCII patch to fit the byte cap instead of losing it whole", () => {
+    // 400 lines of Arabic: well inside the line cap and inside the unit cap,
+    // and two bytes a character past the column's byte cap. The loop used to
+    // POP whole files, so the one file on this card lost its panel entirely
+    // and tens of thousands of units of headroom went unspent. An AR file is
+    // an ordinary edit in a product that ships AR beside EN.
+    const lines: string[] = [];
+    for (let i = 0; i < DIFF_LINES_PER_FILE; i++) lines.push(`+${"\u0639".repeat(130)}`);
+    const wire = buildDiffForWire([change("ar.md", "update", lines.join("\n"))], ctx)!;
+    const sent = wire.diff!.files[0]!;
+    expect(wire.change_summary.files[0]!.preview).toBe("ok");
+    expect(sent.patch.length).toBeGreaterThan(0);
+    expect(sent.patch.startsWith("+\u0639")).toBe(true);
+    expect(sent.truncated).toBe(true);
+    expect(sent.omitted_lines).toBeGreaterThan(0);
+    expect(
+      Buffer.byteLength(
+        JSON.stringify({
+          change_summary: wire.change_summary,
+          diff: wire.diff,
+          tool: wire.tool,
+        }),
+        "utf8",
+      ),
+    ).toBeLessThanOrEqual(APPROVAL_META_BYTES_MAX);
+  });
+
   it("stays under the byte cap the server enforces on the whole column", () => {
     // The two caps are in different units on purpose (UTF-16 units of patch
     // text here, bytes of serialised approvalMeta there), so a patch that is
@@ -345,6 +462,10 @@ describe("buildDiffForWire: the caps, and the order they are applied in", () => 
       "utf8",
     );
     expect(bytes).toBeLessThanOrEqual(APPROVAL_META_BYTES_MAX);
+    // Under the cap AND still there: an absent diff satisfies a byte cap
+    // trivially, which is how a one file card once lost its whole panel here.
+    expect(wire.diff!.files.length).toBeGreaterThan(0);
+    expect(wire.diff!.files[0]!.patch.length).toBeGreaterThan(0);
     // The plain line survives whatever the body costs: it is the part that is
     // never gated and never cut.
     expect(wire.change_summary.file_count).toBe(2);
