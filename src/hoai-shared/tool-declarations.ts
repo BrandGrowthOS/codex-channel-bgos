@@ -357,7 +357,9 @@ export const HOAI_TOOL_DECLARATIONS = [
             description:
               'How this plan came about: "typed" (the owner typed /plan), ' +
               '"decided" (you decided to plan first) or "mode" (plan mode is on). ' +
-              'Defaults to "decided".',
+              'Defaults to "decided". "mode" is checked against the host: in a ' +
+              'chat that is not actually in plan mode it is recorded as ' +
+              '"decided", because that door prints "Plan mode is on." to the owner.',
           },
           supersedes: {
             type: 'number',

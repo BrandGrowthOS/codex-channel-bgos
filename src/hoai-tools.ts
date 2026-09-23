@@ -89,12 +89,22 @@ export interface PlanCardPoster {
    * assumption.
    */
   enforcedIn(chatId: number): boolean;
+  /**
+   * Is this chat in plan mode right now?
+   *
+   * Asked because the card's `mode` door is a claim about the HOST ("Plan
+   * mode is on." is the line the app draws from it) and the model is the one
+   * that fills the door field. The daemon knows the answer and the model does
+   * not have to be believed about it.
+   */
+  planModeIn(chatId: number): boolean;
 }
 const NO_PLAN_CARDS: PlanCardPoster = {
   async propose() {
     throw new Error("Plan cards are not available on this connection.");
   },
   enforcedIn: () => false,
+  planModeIn: () => false,
 };
 
 export interface MissionSelfWrites {
@@ -396,8 +406,21 @@ export class HoaiTools {
         return response;
       }
       case "propose_plan": {
-        const door: PlanDoor =
+        // The model names its own door, and one of the three values is a
+        // claim about the HOST rather than about the model: the app turns
+        // `mode` into the line "Plan mode is on." So `mode` is CLAMPED the
+        // same way `enforced` below is resolved, by asking the daemon rather
+        // than believing the turn. A model that says `mode` inside an
+        // ordinary coding chat gets `decided`, which is the true story of
+        // that card: the plan policy asked for a plan and it wrote one.
+        // `typed` is not clamped here: the owner's /plan is what put the tool
+        // in front of the model, and the daemon's mode flip for it is async.
+        const claimed: PlanDoor =
           args.door === "typed" || args.door === "mode" ? args.door : "decided";
+        const door: PlanDoor =
+          claimed === "mode" && !this.plans.planModeIn(chatId)
+            ? "decided"
+            : claimed;
         const { messageId } = await this.plans.propose({
           assistantId: context.assistantId,
           chatId,

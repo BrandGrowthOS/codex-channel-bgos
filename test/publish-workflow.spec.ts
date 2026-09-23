@@ -66,6 +66,27 @@ describe("the publish workflow never advertises a held version as latest", () =>
     expect(workflow).toMatch(/^\s*echo "dist_tag=\$DIST_TAG" >> "\$GITHUB_OUTPUT"$/m);
   });
 
+  it("names EVERY held version in the README a human releasing will open", () => {
+    // The drift this catches: the hold went from one version to two, the two
+    // machine readable lists both moved, and the prose kept saying "0.10.1
+    // only" with a single promote line. Nothing was red, because nothing read
+    // the one copy a person actually follows at release time. So the README is
+    // held to the same list as the other two.
+    const held = heldInSource();
+    if (held.length === 0) return;
+    const readme = readFileSync("README.md", "utf8");
+    for (const version of held) {
+      expect(
+        readme,
+        `README.md does not name held version ${version}`,
+      ).toContain(version);
+      expect(
+        readme,
+        `README.md has no promote line for held version ${version}`,
+      ).toContain(`npm dist-tag add codex-channel-bgos@${version} latest`);
+    }
+  });
+
   it("holds this version while its own source says the backend is not ready", () => {
     const version = JSON.parse(readFileSync("package.json", "utf8")).version;
     const held = heldInSource();

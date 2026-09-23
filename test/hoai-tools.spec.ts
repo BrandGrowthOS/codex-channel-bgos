@@ -111,6 +111,45 @@ describe("propose_plan", () => {
     })();
   });
 
+  it("will not let the model claim plan mode in a chat that is not in it", async () => {
+    // `mode` is the only door that is a claim about the HOST: the app turns
+    // it into the line "Plan mode is on." above the steps. The model fills
+    // the field, so in an ordinary coding chat a plan raised by the owner's
+    // plan policy could print a sentence about the host that is false. The
+    // daemon knows the answer, exactly as it knows `enforced`, so it clamps.
+    const propose = vi.fn(async () => ({ messageId: 505 }));
+    const enforcedIn = vi.fn(() => false);
+    const planModeIn = vi.fn((chatId: number) => chatId === 17);
+    const tools = new HoaiTools(
+      {} as any,
+      () => "canon",
+      undefined,
+      { propose, enforcedIn, planModeIn } as any,
+    );
+    const call = (chatId: number): Promise<any> =>
+      tools.handleRequest(
+        "item/tool/call",
+        {
+          tool: "propose_plan",
+          arguments: {
+            chat_id: String(chatId),
+            title: "Add retry",
+            door: "mode",
+            steps: [{ text: "Add the helper" }],
+          },
+        },
+        { ...context(), chatId },
+      );
+    expect((await call(17)).success).toBe(true);
+    expect((await call(18)).success).toBe(true);
+    // Chat 17 really is in plan mode, so the claim stands.
+    expect(propose.mock.calls[0]![0].plan.door).toBe("mode");
+    // Chat 18 is an ordinary coding chat: the card tells the true story,
+    // which is that the agent decided to plan first.
+    expect(propose.mock.calls[1]![0].plan.door).toBe("decided");
+    expect(planModeIn).toHaveBeenCalledWith(18);
+  });
+
   it("carries a revision's supersedes, note and per step tags", async () => {
     const propose = vi.fn(async () => ({ messageId: 502 }));
     const enforcedIn = vi.fn(() => false);

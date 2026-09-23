@@ -151,13 +151,24 @@ export interface DispatchArgs {
   senderType?: "user" | "agent" | "system";
   senderGuardrail?: string;
   /**
-   * The owner's per agent plan level, as the server labels it:
-   * `only_when_asked`, `risky_jobs` or `always`. Absent means the server did
-   * not send one (an older backend, or a channel that has no such setting).
+   * The owner's per agent plan level, as the server's own LABELLED SENTENCE.
+   *
+   * NOT the bare enum, and this comment said it was until 2026-09-23. The wire
+   * never carries `only_when_asked` / `risky_jobs` / `always`: the backend
+   * ships the prefix "Your owner's setting for when you show a plan before you
+   * change anything ..." followed by the level's own words
+   * (backend/src/services/plan-policy.ts, buildPlanPolicyField), and it OMITS
+   * the key entirely at the default level, so an absent value means the
+   * default level, an older backend, or a channel with no such setting. That
+   * belief is the one that made `planPolicySentence` switch on three values no
+   * envelope ever holds, so every real level reached no turn at all; see the
+   * header of `planPolicySentence` in plan-card.ts for the correction.
    *
    * It rides the ENVELOPE rather than being read off the assistant row on
    * purpose, and that is the same rule the share guardrail follows: the daemon
    * offers, the server decides, the daemon never reads the owner's settings.
+   * UNLIKE the guardrail it rides BOTH provenance arms, because it describes
+   * the agent RECEIVING the turn and not whoever is speaking.
    */
   planPolicy?: string;
   chatKind?: string;
@@ -478,10 +489,19 @@ export function createInboundHandler(
         senderRelationship: event.senderRelationship,
         senderGuardrail:
           event.senderType === "agent" ? undefined : event.senderGuardrail,
-        // The plan level is the OWNER's, so a peer agent's message never
-        // carries it: the same reason the guardrail above is dropped there.
-        planPolicy:
-          event.senderType === "agent" ? undefined : event.planPolicy,
+        // A PASS THROUGH, and deliberately NOT branched on senderType the way
+        // the guardrail above is. The guardrail is a term about a human share
+        // recipient, so an agent turn has none; the plan level is a fact about
+        // the agent RECEIVING the turn, so it is equally true on a peer
+        // delivery. The backend says so in one place and means it: its emitter
+        // deletes sender, isSharedRecipient, shareOwnerUserId and
+        // senderGuardrail inside its senderType === 'agent' branch and carries
+        // a paragraph saying planPolicy is deliberately not deleted there
+        // (backend websocket-outcome-event.service.ts), and peers.service.ts
+        // stamps the RECEIVING agent's level onto the same a2a envelope that
+        // carries senderType 'agent'. Dropping it here made one owner setting
+        // reach a Claude agent's peer turn and not a Codex agent's.
+        planPolicy: event.planPolicy,
         text: missingAttachments.length
           ? `${event.text}\n\n[Attachment delivery notice: the following files are unavailable. Do not infer their contents. File names: ${JSON.stringify(missingAttachments)}]`
           : event.text,

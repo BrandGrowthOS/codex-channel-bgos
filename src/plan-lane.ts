@@ -91,6 +91,19 @@ export class PlanLane {
   constructor(
     private readonly api: PlanLaneApi,
     private readonly enforced: (chatId: number) => boolean = () => false,
+    /**
+     * Is this chat in plan mode at all?
+     *
+     * A different question from `enforced`, and both are asked because the
+     * card makes two different claims. `enforced` is about the read only
+     * sandbox; this is about the MODE, which is what the card's `mode` door
+     * turns into the line "Plan mode is on." for the owner. The model names
+     * its own door, so without this the model could claim the host is
+     * planning in a chat that is an ordinary coding chat. A daemon with no
+     * host answers false, which is the honest direction: the card falls back
+     * to the decided door, which claims nothing about the host.
+     */
+    private readonly planMode: (chatId: number) => boolean = () => false,
   ) {}
 
   /** The card this chat is waiting on, if this process posted it. */
@@ -105,6 +118,17 @@ export class PlanLane {
     } catch {
       // A resolver that throws is a daemon that cannot prove the lock, and an
       // unprovable lock is reported as no lock.
+      return false;
+    }
+  }
+
+  /** Is this chat in plan mode right now, whatever the model claims? */
+  planModeIn(chatId: number): boolean {
+    try {
+      return this.planMode(chatId) === true;
+    } catch {
+      // Same direction as above: a daemon that cannot prove the mode does not
+      // let the model announce it.
       return false;
     }
   }

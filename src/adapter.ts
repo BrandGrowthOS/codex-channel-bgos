@@ -286,8 +286,13 @@ export class CodexAdapter {
     // The lane answers `enforced` per chat by asking the host what sandbox
     // that chat's next turn runs under. Lazy on purpose: this reads `this.host`
     // at call time, so neither construction order nor a later re-pair matters.
-    this.planLane = new PlanLane(this.api, (chatId) =>
-      this.host.planWaitEnforcedIn(chatId),
+    this.planLane = new PlanLane(
+      this.api,
+      (chatId) => this.host.planWaitEnforcedIn(chatId),
+      // The MODE, separately from the lock, because the card's `mode` door is
+      // a claim about the host and the model is the one that fills the field.
+      // Same lazy read of `this.host` as the line above.
+      (chatId) => this.host.planModeChats().includes(chatId),
     );
     this.tools = new HoaiTools(
       this.api,

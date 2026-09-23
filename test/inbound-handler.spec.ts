@@ -83,7 +83,21 @@ describe("the owner's plan level on the envelope", () => {
    * daemon that read the assistant row would be the first breach of "the
    * daemon offers, the server decides" (and there is a standing source guard
    * against reading the LAST per agent setting, in agent-activity.spec.ts).
+   *
+   * THE FIXTURE IS THE SERVER'S SENTENCE, NOT THE ENUM, and that is the whole
+   * reason it is spelled out here. These tests fed `risky_jobs` and `always`,
+   * three-word values the wire has never carried, which is the same fixture
+   * shape that kept the `planPolicySentence` defect green next door
+   * (test/plan-card.spec.ts's WIRE_RISKY has the account). A pass through is
+   * only proven by passing through what is actually sent.
    */
+  const WIRE_ALWAYS =
+    "Your owner's setting for when you show a plan before you change " +
+    "anything. It applies in every chat and on every channel. Typing /plan " +
+    "always shows a plan whatever this says, and this is a request about how " +
+    "you work rather than something the platform can enforce: show a plan " +
+    "first, every time, before you change a single file.";
+
   let home: string;
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "hoai-plan-envelope-"));
@@ -111,22 +125,37 @@ describe("the owner's plan level on the envelope", () => {
       files: [],
       ...event,
     } as never);
-    return dispatch.mock.calls[0]![0] as { planPolicy?: string };
+    return dispatch.mock.calls[0]![0] as {
+      planPolicy?: string;
+      senderGuardrail?: string;
+    };
   }
 
   it("carries the level through to the turn", async () => {
-    expect((await dispatched({ planPolicy: "risky_jobs" })).planPolicy).toBe(
-      "risky_jobs",
+    expect((await dispatched({ planPolicy: WIRE_ALWAYS })).planPolicy).toBe(
+      WIRE_ALWAYS,
     );
   });
 
-  it("drops it on a peer agent's message, exactly as the guardrail is dropped", async () => {
-    // The level is the OWNER's instruction about the owner's work. Another
-    // agent's message is not the owner speaking.
-    expect(
-      (await dispatched({ planPolicy: "always", senderType: "agent" }))
-        .planPolicy,
-    ).toBeUndefined();
+  it("carries it on a peer agent's message too, unlike the guardrail", async () => {
+    // NOT the guardrail's rule, and this used to be branched as if it were.
+    // The guardrail is a term a human share recipient agreed to, so an agent
+    // turn has none. The plan level describes the agent RECEIVING the turn:
+    // an agent asked by a peer to change twelve files still proposes first if
+    // that is what its owner set. The backend is explicit about the asymmetry
+    // (its emitter deletes senderGuardrail inside the senderType === 'agent'
+    // branch and carries a paragraph saying planPolicy is deliberately left
+    // alone there), and peers.service.ts stamps the RECEIVING agent's level
+    // onto the a2a envelope that is itself senderType 'agent'. Dropping it
+    // here left one owner setting reaching Claude's peer turns and not ours.
+    const dispatched_ = await dispatched({
+      planPolicy: WIRE_ALWAYS,
+      senderGuardrail: "Never touch prod.",
+      senderType: "agent",
+    });
+    expect(dispatched_.planPolicy).toBe(WIRE_ALWAYS);
+    // The guardrail IS still dropped there. That is the real precedent.
+    expect(dispatched_.senderGuardrail).toBeUndefined();
   });
 
   it("omits it when the server sent none", async () => {
