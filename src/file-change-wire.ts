@@ -20,12 +20,16 @@
  * THE ORDER IS THE CONTRACT, and it is the same one `output-tail.ts` states
  * for command output, applied to the other end of the string:
  *
- *  1. MASK the WHOLE patch (`redactOutput`), before anything is cut. A cut
+ *  1. MASK the WHOLE patch (`redactPatch`), before anything is cut. A cut
  *     first hands a rule half a token: the anchor it matches on (`Bearer `,
  *     `KEY=`) is sliced off, the pattern stops matching, and the rest of the
  *     value ships in the clear. Masking first also means `hidden_lines` is
  *     counted over the whole file, so a secret past line 400 is still
  *     reported even though the line itself was never going to be sent.
+ *     `redactPatch` and not `redactOutput`: the two differ by ONE character,
+ *     the gutter a collapsed private key block keeps, and that character is
+ *     what keeps the masked text a unified diff the app can still parse past
+ *     the block. `redact-output.ts` says what goes wrong without it.
  *  2. CUT the HEAD. A diff's meaning is at its START (the first hunk is what
  *     the owner reads), which is the opposite of a command's output, so
  *     `tailClip` from `output-tail.ts` is the wrong helper here and is never
@@ -54,7 +58,7 @@ import {
   shortenPath,
   type ItemContext,
 } from "./activity-markers.js";
-import { redactOutput } from "./redact-output.js";
+import { redactPatch } from "./redact-output.js";
 import type {
   ChangeKind,
   ChangeSummary,
@@ -82,6 +86,23 @@ const META_RESERVE_BYTES = 1_024;
 const PRIVATE_KEY_BODY = "[private key removed]";
 /** Any END marker closes the block, whatever the key type says. */
 const PRIVATE_KEY_END = "-----END";
+/** The three characters a unified diff's body lines begin with. */
+const DIFF_GUTTERS = " +-";
+
+/**
+ * Is this the one line a key block became? `redactPatch` keeps the gutter of
+ * the first body line it replaced, so the placeholder arrives as
+ * `+[private key removed]` inside a hunk and bare outside one (a key printed
+ * above the first `@@` has no gutter to keep).
+ */
+function isKeyBodyPlaceholder(line: string): boolean {
+  if (line === PRIVATE_KEY_BODY) return true;
+  return (
+    line.length === PRIVATE_KEY_BODY.length + 1 &&
+    DIFF_GUTTERS.includes(line.charAt(0)) &&
+    line.slice(1) === PRIVATE_KEY_BODY
+  );
+}
 
 /** A patch body git wrote instead of text, in either spelling. */
 const BINARY_PATCH_RE = /^(?:GIT binary patch|Binary files? .* differ)/m;
@@ -117,7 +138,7 @@ export function hiddenLineCount(original: string, masked: string): number {
       j += 1;
       continue;
     }
-    if (after[j] === PRIVATE_KEY_BODY) {
+    if (isKeyBodyPlaceholder(after[j]!)) {
       // A whole block collapsed into one placeholder: consume the original
       // lines up to and including the END marker, and count every one of them.
       while (i < before.length) {
@@ -425,7 +446,7 @@ export function buildDiffForWire(
       };
     }
 
-    const masked = redactOutput(row.raw);
+    const masked = redactPatch(row.raw);
     const hidden = hiddenLineCount(row.raw, masked);
     const lines = masked.split("\n");
     // A trailing newline splits into one empty last element. Dropping it here

@@ -49,6 +49,10 @@
  *    "draws the cut note on a minified file" goes red
  *  - stop setting `anyLeftOut` on a binary row -> "says a binary file was left
  *    out of the panels" goes red
+ *  - call `redactOutput` instead of `redactPatch` in buildDiffForWire (drop
+ *    the gutter from the collapsed key block) -> "keeps the gutter of the line
+ *    it replaced" goes red, and so does the app's own
+ *    diffModel "a collapsed private key block" case
  */
 import { describe, expect, it } from "vitest";
 
@@ -64,7 +68,7 @@ import {
   toolLines,
   wireChangeKind,
 } from "../src/file-change-wire.js";
-import { redactOutput } from "../src/redact-output.js";
+import { redactOutput, redactPatch } from "../src/redact-output.js";
 
 const CWD = "/work/project";
 const ctx = { cwd: CWD, home: "/home/owner" };
@@ -163,6 +167,67 @@ describe("the four secret shapes, against the redactor this plugin already ships
   });
 });
 
+describe("a collapsed key block stays a unified diff line", () => {
+  // THE MISMATCH THIS PINS (P2 stage 4 reconciliation). The redactor collapses
+  // a private key block into ONE line. Bare, that line is not a diff body
+  // line, and the app's `diffModel.parsePatch` ends a hunk at the first line
+  // inside it that begins with none of the three body markers, because it may
+  // not classify a line by what a header looks like (removing the source line
+  // `--` writes the diff line `---`). So a bare placeholder inside a hunk cost
+  // the panel EVERY line of that file after the key. The gutter is the fix,
+  // and it is one character.
+  const KEY_IN_A_HUNK =
+    "@@ -1,8 +1,10 @@\n" +
+    " alpha\n" +
+    "-beta\n" +
+    "+beta (edited)\n" +
+    "+-----BEGIN RSA PRIVATE KEY-----\n" +
+    "+MIIEpAIBAAKCAQEAxq3fL0k2vZ9tN0pQmS1a8dYb2ZrW7cVhTgKqPnLmJoIuHyGf\n" +
+    "+EdCbAzYxWvUtSrQpOnMlKjIhGfEdCbAzYxWvUtSrQpOnMlKjIhGfEdCbAzYxWvUt\n" +
+    "+-----END RSA PRIVATE KEY-----\n" +
+    " gamma\n" +
+    "+epsilon\n" +
+    " omega\n";
+
+  it("keeps the gutter of the line it replaced, so every body line after it is still a body line", () => {
+    const sent = buildDiffForWire(
+      [change(`${CWD}/keys.ts`, { type: "update" }, KEY_IN_A_HUNK)],
+      ctx,
+    )!.diff!.files[0]!;
+    const lines = sent.patch.split("\n");
+    const at = lines.findIndex((line) => line.includes("[private key removed]"));
+    expect(at).toBeGreaterThan(0);
+    // The placeholder is an ADDED line, because the block it stands for was
+    // added. Not the bare string, which is what shipped before this fix.
+    expect(lines[at]).toBe("+[private key removed]");
+    expect(lines).not.toContain("[private key removed]");
+    // And nothing after it was lost on the wire.
+    expect(lines.slice(at + 1)).toEqual([" gamma", "+epsilon", " omega"]);
+    // Every line from the first hunk header on begins with a body marker, so
+    // a reader that stops at the first one that does not reads the whole file.
+    const hunkAt = lines.findIndex((line) => line.startsWith("@@"));
+    for (const line of lines.slice(hunkAt + 1)) {
+      expect(" +-".includes(line.charAt(0))).toBe(true);
+    }
+    // The count is still the BLOCK's four lines, not the one they became.
+    expect(sent.hidden_lines).toBe(4);
+  });
+
+  it("leaves the placeholder bare where there is no gutter to keep", () => {
+    // A key printed above the first hunk header has no body marker of its own,
+    // and inventing one would be a lie about the format.
+    expect(
+      redactPatch("-----BEGIN PRIVATE KEY-----\nbody one\n-----END PRIVATE KEY-----\n"),
+    ).toContain("\n[private key removed]");
+  });
+
+  it("is the one thing that differs from the output masker", () => {
+    const raw = "+-----BEGIN PRIVATE KEY-----\n+body one\n+-----END PRIVATE KEY-----";
+    expect(redactOutput(raw).split("\n")[1]).toBe("[private key removed]");
+    expect(redactPatch(raw).split("\n")[1]).toBe("+[private key removed]");
+  });
+});
+
 describe("hiddenLineCount", () => {
   it("counts a rewritten line once and a removed block whole", () => {
     const raw = "a\nBearer abcd1234efgh5678ijkl9012mnop\nb\n";
@@ -172,6 +237,14 @@ describe("hiddenLineCount", () => {
 
   it("counts an unterminated key block to the end of the text", () => {
     const raw = "-----BEGIN PRIVATE KEY-----\nbody one\nbody two";
+    expect(hiddenLineCount(raw, redactOutput(raw))).toBe(3);
+  });
+
+  it("reads the gutter-carrying placeholder as the block it stands for", () => {
+    // The count must not change because the placeholder gained a character:
+    // it counts the lines the block HAD, not the line it became.
+    const raw = "+-----BEGIN PRIVATE KEY-----\n+body one\n+-----END PRIVATE KEY-----\n gamma\n";
+    expect(hiddenLineCount(raw, redactPatch(raw))).toBe(3);
     expect(hiddenLineCount(raw, redactOutput(raw))).toBe(3);
   });
 });
