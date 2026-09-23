@@ -93,6 +93,21 @@ export const APPROVAL_META_BYTES_MAX = 98_304;
 export const REQUEST_REASON_MAX_UNITS = 280;
 export const REQUEST_RULE_TEXT_MAX_UNITS = 500;
 /**
+ * UTF-16 units of `approvalMeta.tool` on the card this file does NOT build:
+ * the command one, where `tool` is the literal argv the runtime would run and
+ * nothing else in the column is large.
+ *
+ * It lives here beside the column's byte cap because that cap is what decides
+ * it. Worst case a unit costs six bytes serialised, so 8,192 units is 49,152
+ * bytes, and with the two request strings at their own caps (4,712 bytes) and
+ * a kilobyte for the four small keys the command card's whole column stays
+ * around 55 KB against the server's 98,304. Long enough that no command a
+ * person reads is ever cut, short enough that a runaway one costs the owner an
+ * ellipsis rather than the whole card: the backend answers an oversized column
+ * with a 400, and the card is what is lost.
+ */
+export const COMMAND_TOOL_MAX_UNITS = 8_192;
+/**
  * Bytes ONE UTF-16 unit can cost inside a serialised JSON string, worst case.
  * Six, because a control character leaves `JSON.stringify` as the six byte
  * escape `\u0001`; a three byte BMP character costs three and a surrogate PAIR
@@ -106,12 +121,19 @@ const REQUEST_STRING_KEY_BYTES = 32;
  *
  * They do NOT ride a file change card today: a file change request carries no
  * exec policy amendment, so no always tier and no rule, and its `reason`
- * arrives as an explicit null. But the reserve is this file's stand in for
- * every `ApprovalMeta` field it does not weigh, and the ONE way that constant
- * fails is a field being added to the interface and quietly eating the
- * headroom: the daemon then posts a body the server answers with a 400 and the
- * owner loses the whole card. A field that exists is a field that can ride, so
- * it is counted from the day it exists rather than from the day it first does.
+ * arrives as an explicit null. So be honest about who pays: this reserve is
+ * charged to the DIFF, on the one card kind that cannot carry either string,
+ * and it costs that card about 3.8 KB of patch. The command card, which is the
+ * only one that does carry them, is not weighed here at all; it is held under
+ * the column by `COMMAND_TOOL_MAX_UNITS` above, which is the only other large
+ * field it has.
+ *
+ * The reserve is kept anyway because it is this file's stand in for every
+ * `ApprovalMeta` field it does not weigh, and the ONE way that constant fails
+ * is a field being added to the interface and quietly eating the headroom: the
+ * daemon then posts a body the server answers with a 400 and the owner loses
+ * the whole card. A field that exists is a field that can ride, so it is
+ * counted from the day it exists rather than from the day it first does.
  */
 const REQUEST_STRINGS_RESERVE_BYTES =
   (REQUEST_REASON_MAX_UNITS + REQUEST_RULE_TEXT_MAX_UNITS) *

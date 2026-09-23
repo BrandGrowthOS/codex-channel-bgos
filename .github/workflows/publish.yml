@@ -61,12 +61,15 @@ jobs:
           # nothing and the card still reads "Apply file changes". It also
           # inherits both holds above. Held for all three.
           # 0.13.0: the request card's `approvalMeta.reason` and
-          # `approvalMeta.rule_text`. Same mechanism as 0.12.0 and the same
+          # `approvalMeta.rule_text`. Same mechanism as 0.12.0 and a WORSE
           # cost: against a backend without the stage 5 DTO both are stripped
-          # with a 201 and no error, so the card still says nothing about why
-          # the agent is asking and nothing about the permanent, global rule an
-          # Always answer would write. It inherits all three holds above. Held
-          # for all four.
+          # with a 201 and no error, and the justification that was the card's
+          # TITLE on 0.12.0 (`text` was `params.reason`) has moved into that
+          # stripped `reason` while the title became `Run <command>`. So this
+          # release says LESS than the one before it, not the same: the
+          # sentence the owner used to read is gone and nothing replaces it,
+          # and the permanent, global rule an Always answer would write is
+          # still unsaid. It inherits all three holds above. Held for all four.
           HELD_FROM_LATEST="0.10.1 0.11.0 0.12.0 0.13.0"
           DIST_TAG=latest
           for held in $HELD_FROM_LATEST; do

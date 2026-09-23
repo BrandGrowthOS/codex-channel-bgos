@@ -8,11 +8,18 @@ import {
   POLL_MAX_SPAN,
   POLL_SLOW_MS,
   coalesceReads,
+  differingReason,
   execpolicyRuleText,
+  firstActionCommand,
   pollIntervalMs,
   retireOrphanedApprovals,
   storedWaitSeconds,
 } from "../src/interactions.js";
+import {
+  APPROVAL_META_BYTES_MAX,
+  COMMAND_TOOL_MAX_UNITS,
+  REQUEST_REASON_MAX_UNITS,
+} from "../src/file-change-wire.js";
 import type {
   PendingApprovalEntry,
   PendingApprovalStore,
@@ -1303,14 +1310,27 @@ describe("a file change approval names the files it is asking about", () => {
  *  - stop quoting a token that holds whitespace in `execpolicyRuleText` ->
  *    "quotes only the tokens that hold whitespace" goes red and a three
  *    argument command reads as five.
- *  - use `clipText` in place of `clipToCap` -> "clips all three inside their
- *    caps" goes red on the ellipsis, and a cut command reads as a complete,
- *    shorter command.
+ *  - use `clipText` in place of `clipWithEllipsis` -> "clips all three inside
+ *    their caps" goes red on the ellipsis, and a cut command reads as a
+ *    complete, shorter command.
  *  - send `rule_text` whenever the amendment is present, rather than only when
  *    the Always tier was offered -> "sends no rule beside a button that is not
  *    offered" goes red.
- *  - compute the two strings on every method rather than the command one ->
- *    "sends neither string on a file change approval" goes red.
+ *  - drop the `commandExecution &&` in front of the TITLE -> "sends neither
+ *    string on a file change approval" goes red, because a file change that
+ *    also carried a command would be retitled `Run git apply patch.diff`.
+ *    That gate is the only one the METHOD owns: the reason is held off those
+ *    cards by `differingReason` (on every other method the title IS that
+ *    sentence) and the rule by the Always tier, not by a branch on the method,
+ *    so a ternary in front of either would never change an answer. This list
+ *    said otherwise until the stage 5 review ran it.
+ *  - drop the `typeof first !== \"object\" || first === null` guard in
+ *    `firstActionCommand` -> "survives every shape the runtime could put in
+ *    commandActions" goes red on `[null]`, throwing inside an RPC the model is
+ *    parked on.
+ *  - raise or remove `COMMAND_TOOL_MAX_UNITS` on the non wire `tool` -> "cuts
+ *    a runaway command inside the column the server will refuse" goes red, and
+ *    a body past 98,304 bytes costs the owner the whole card.
  *  - assign either field under a camelCase name (`ruleText`) instead of on the
  *    typed ApprovalMeta -> "says what Always would save" goes red, which is
  *    the whole reason the interface is typed: the backend would drop it with a
@@ -1393,9 +1413,12 @@ describe("a command approval says what it runs, why, and what Always would save"
         "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -Command " +
         '"echo exec-probe > probe.txt"',
     );
-    // Never a family of commands: the probe proved `prefix_rule` does not
-    // narrow the amendment, so a sentence about a pattern would be a lie.
-    expect(body.approvalMeta.rule_text).not.toContain("commands like");
+    // The equality above is the whole assertion: the lead in is a frozen
+    // constant, so a `not.toContain("commands like")` beside it could not
+    // fail and would only read as though something checked. What the probe
+    // proved (that `prefix_rule` does not narrow the amendment, so a sentence
+    // about a family of commands would be a lie) is pinned by the exact
+    // sentence, and by EXECPOLICY_RULE_LEAD's own docblock.
   });
 
   it("quotes only the tokens that hold whitespace, so three arguments do not read as five", () => {
@@ -1414,6 +1437,52 @@ describe("a command approval says what it runs, why, and what Always would save"
     expect(execpolicyRuleText(undefined)).toBeNull();
   });
 
+  it("survives every shape the runtime could put in commandActions", () => {
+    // `commandActions` is one of the twelve fields a command approval carries
+    // and this daemon read none of them before stage 5. The probed shape is
+    // one entry with a string `command`; everything else here is a shape
+    // nobody has seen, and the point is that an unseen shape falls back to the
+    // wrapped command rather than THROWING inside an RPC the model is parked
+    // on, which would hang the turn instead of costing a nicer title.
+    expect(firstActionCommand([{ type: "unknown", command: " ls -la " }])).toBe(
+      "ls -la",
+    );
+    expect(firstActionCommand([null])).toBeNull();
+    expect(firstActionCommand([undefined])).toBeNull();
+    expect(firstActionCommand(["ls"])).toBeNull();
+    expect(firstActionCommand([{}])).toBeNull();
+    expect(firstActionCommand([{ command: 42 }])).toBeNull();
+    expect(firstActionCommand([{ command: "   " }])).toBeNull();
+    expect(firstActionCommand([])).toBeNull();
+    expect(firstActionCommand({ command: "ls" })).toBeNull();
+    expect(firstActionCommand(undefined)).toBeNull();
+    // The FIRST action decides, even when a later one would read better.
+    expect(
+      firstActionCommand([{ command: "ls" }, { command: "rm -rf /" }]),
+    ).toBe("ls");
+  });
+
+  it("holds the reason back whenever it would read as the title twice", () => {
+    expect(differingReason("Write probe.txt", "Run echo hi")).toBe(
+      "Write probe.txt",
+    );
+    // Trimmed on both sides before the comparison, so the same sentence with
+    // different whitespace is still the same sentence.
+    expect(differingReason("  Reconfigure the network.  ", "Reconfigure the network.")).toBeNull();
+    expect(differingReason("Run ls", "  Run ls  ")).toBeNull();
+    // A file change request sends an EXPLICIT null here, which is the case
+    // this null check exists for; the rest are shapes nobody has seen.
+    expect(differingReason(null, "Change calc.py")).toBeNull();
+    expect(differingReason(undefined, "Change calc.py")).toBeNull();
+    expect(differingReason(7, "Change calc.py")).toBeNull();
+    expect(differingReason("   ", "Change calc.py")).toBeNull();
+    // Clipped with the ellipsis inside the cap, because the backend refuses a
+    // 281st unit rather than clipping it.
+    const long = differingReason("b".repeat(400), "Run ls");
+    expect(long).toHaveLength(REQUEST_REASON_MAX_UNITS);
+    expect(long?.endsWith("\u2026")).toBe(true);
+  });
+
   it("falls back to the wrapped command when the runtime sent no action", async () => {
     vi.useFakeTimers();
     const body = await post({
@@ -1421,9 +1490,36 @@ describe("a command approval says what it runs, why, and what Always would save"
       reason: "Clear the stale build directory",
       availableDecisions: ["accept", "decline"],
     });
+    // AND THIS EQUALITY IS THE PUSH BODY, not only the title. The backend
+    // never puts `approvalMeta` on a notification (spec 4.2), so the phone
+    // shows `text` and nothing else: from this release the owner's phone
+    // reads the WRAPPED command back, where it used to read the model's
+    // sentence, and the WHY cannot ride along. Deliberate (spec 4.3) and
+    // written down in the comment above `actionCommand`, so the next edit of
+    // `cardText` is an edit of the notification and this line goes red.
     expect(body.text).toBe("Run rm -rf build");
     expect(body.approvalMeta.reason).toBe("Clear the stale build directory");
     expect(body.approvalMeta).not.toHaveProperty("rule_text");
+  });
+
+  it("cuts a runaway command inside the column the server will refuse", async () => {
+    vi.useFakeTimers();
+    // `tool` is the literal argv, and on a command card nothing else in the
+    // column is large: no summary, no diff. A body past 98,304 bytes is
+    // refused with a 400, which costs the owner the card rather than a tail.
+    const body = await post({
+      command: "powershell -Command " + "x".repeat(40_000),
+      reason: "Run the generated script",
+      availableDecisions: ["accept", "decline"],
+    });
+    expect(body.approvalMeta.tool).toHaveLength(COMMAND_TOOL_MAX_UNITS);
+    expect(body.approvalMeta.tool.endsWith("\u2026")).toBe(true);
+    expect(
+      Buffer.byteLength(JSON.stringify(body.approvalMeta), "utf8"),
+    ).toBeLessThan(APPROVAL_META_BYTES_MAX);
+    // The title is the command too, under its own tighter cap, so the card
+    // reads as a card and not as a file.
+    expect(body.text.length).toBeLessThanOrEqual(125);
   });
 
   it("sends no reason when the sentence is already the title", async () => {

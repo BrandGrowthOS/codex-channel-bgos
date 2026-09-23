@@ -7,8 +7,9 @@ import type {
   InboundClickPayload,
 } from "./types.js";
 import type { RpcObject } from "./app-server.js";
-import { clipText } from "./clip-text.js";
+import { clipWithEllipsis } from "./clip-text.js";
 import {
+  COMMAND_TOOL_MAX_UNITS,
   REQUEST_REASON_MAX_UNITS,
   REQUEST_RULE_TEXT_MAX_UNITS,
   buildDiffForWire,
@@ -101,14 +102,19 @@ interface Pending {
  * cap a patch for nothing, the card would still read "Apply file changes",
  * and nothing anywhere would say why.
  *
- * 0.13.0 INHERITS all three and adds a fourth of exactly the same kind. Its
+ * 0.13.0 INHERITS all three and its own reason is WORSE than theirs, which is
+ * the part a future releaser has to read before promoting the dist tag. Its
  * request card sends `approvalMeta.reason`, the model's own words for why it
  * is asking, and `approvalMeta.rule_text`, the sentence saying that an Always
  * answer writes a permanent line into the owner's global Codex rules file.
  * Against a backend whose `ApprovalMetaDto` declares neither, both are
- * stripped with a 201 and no error: the owner reads a card that still says
- * nothing about why, and still says nothing about what Always would do, which
- * is the one thing this release exists to tell them. Retire the FOUR lines one
+ * stripped with a 201 and no error, and the card does not merely stay as it
+ * was: on 0.12.0 the model's justification WAS the card's title (`text` was
+ * `params.reason ?? the generic sentence`, the fallback still on this method
+ * below), and here the title becomes `Run <command>` while that justification
+ * moves to the stripped `reason`. So against a pre stage 5 backend this
+ * release says LESS than the one before it: the sentence the owner used to
+ * read is gone and nothing replaces it. Retire the FOUR lines one
  * at a time, in this order: stage 1 backend live, then 0.10.1; stage 3 backend
  * live, then 0.11.0; stage 4 backend live, then 0.12.0; stage 5 backend live,
  * then 0.13.0.
@@ -195,20 +201,6 @@ export const EXECPOLICY_RULE_LEAD =
   "this exact command runs without asking again, in every project on this computer, until you remove the rule from your Codex rules file: ";
 
 /**
- * Clip to `max` UTF-16 units with the ellipsis INSIDE the cap.
- *
- * Inside, twice over. The backend's DTO REFUSES a string past its length
- * rather than clipping it, so one unit over costs the owner the whole card;
- * and a silent prefix renders as a complete, shorter command, so an owner
- * could approve an action whose tail they never saw. `clipText` carries the
- * surrogate guard, so the result is at most `max` units and never ends on half
- * a character (Postgres refuses a lone surrogate inside JSONB).
- */
-export function clipToCap(text: string, max: number): string {
-  return text.length > max ? `${clipText(text, max - 1)}\u2026` : text;
-}
-
-/**
  * The runtime's own parsed command for this request, without the shell wrapper
  * it will be run through, or null when the request carried no action.
  *
@@ -242,7 +234,7 @@ export function differingReason(raw: unknown, title: string): string | null {
   if (typeof raw !== "string") return null;
   const trimmed = raw.trim();
   if (trimmed.length === 0 || trimmed === title.trim()) return null;
-  return clipToCap(trimmed, REQUEST_REASON_MAX_UNITS);
+  return clipWithEllipsis(trimmed, REQUEST_REASON_MAX_UNITS);
 }
 
 /**
@@ -270,7 +262,7 @@ export function execpolicyRuleText(amendment: unknown): string | null {
   const argv = (amendment as string[])
     .map((token) => (/\s/.test(token) ? `"${token}"` : token))
     .join(" ");
-  return clipToCap(
+  return clipWithEllipsis(
     `${EXECPOLICY_RULE_LEAD}${argv}`,
     REQUEST_RULE_TEXT_MAX_UNITS,
   );
@@ -798,14 +790,23 @@ export class Interactions {
     // the ask sentence. They differ on purpose: an app that predates this
     // stage draws the ask as the title and the list in its mono panel, which
     // is already better than "Apply file changes" over nothing.
+    //
+    // Clipped on the command path, which `buildDiffForWire` does not weigh:
+    // there `tool` is the literal argv and a runaway one is the only thing in
+    // that column big enough to reach the server's 98,304 byte refusal, which
+    // costs the owner the whole card rather than a tail. The file change path
+    // is already counted to the byte by the wire builder, so it is left alone.
     const command = wire
       ? wire.tool
-      : String(
-          params.command ??
-            params.reason ??
-            (permissions
-              ? JSON.stringify(params.permissions)
-              : "Apply file changes"),
+      : clipWithEllipsis(
+          String(
+            params.command ??
+              params.reason ??
+              (permissions
+                ? JSON.stringify(params.permissions)
+                : "Apply file changes"),
+          ),
+          COMMAND_TOOL_MAX_UNITS,
         );
     // The runtime's own sentence wins whenever it fills one. The live probe
     // saw `reason: null` on every file change request, EXPLICITLY null rather
@@ -829,6 +830,15 @@ export class Interactions {
     //
     // The command path only. A file change keeps stage 4's ask sentence, and
     // a permissions request carries no command at all.
+    //
+    // `cardText` is ALSO the push body: the backend never puts `approvalMeta`
+    // on a notification, so the phone shows this string and nothing else. The
+    // WHY cannot ride along, and on a request that carried no
+    // `commandActions` the body falls back to the wrapped command, which is
+    // the least readable string on the card. That is the spec's call (4.2 and
+    // 4.3) rather than an accident; it is written down here, and pinned in
+    // test/interactions.spec.ts, so the next edit of `cardText` is an edit of
+    // the notification and knows it.
     const actionCommand = firstActionCommand(params.commandActions);
     const titleCommand =
       actionCommand ??
@@ -837,7 +847,7 @@ export class Interactions {
         : null);
     const askTitle =
       commandExecution && titleCommand
-        ? `Run ${clipToCap(titleCommand, TITLE_COMMAND_MAX_UNITS)}`
+        ? `Run ${clipWithEllipsis(titleCommand, TITLE_COMMAND_MAX_UNITS)}`
         : null;
     const cardText: string = askTitle
       ? askTitle
@@ -852,9 +862,16 @@ export class Interactions {
     // carrying neither an action nor a command the title FALLS BACK to this
     // same sentence, and a card that read it twice would be worse than one
     // that never said why at all.
-    const cardReason = commandExecution
-      ? differingReason(params.reason, cardText)
-      : null;
+    //
+    // Not gated on the method, because the method cannot gate it: on every
+    // OTHER kind of request the title IS this sentence (a file change falls
+    // back to `reasonText`, a permissions request to `params.reason`), so
+    // `differingReason` returns null there by construction rather than by a
+    // branch. A ternary on `commandExecution` here would read as the thing
+    // keeping the reason off those cards while never once changing an answer,
+    // and the case below that pins it ("sends neither string on a file change
+    // approval") would go on passing if it were deleted.
+    const cardReason = differingReason(params.reason, cardText);
     // WHAT PRESSING ALWAYS WOULD SAVE, and for how long. Only beside the
     // button itself: the sentence is about an answer that is not on offer
     // otherwise, and the app does not draw the line without the option.

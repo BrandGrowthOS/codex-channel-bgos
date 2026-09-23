@@ -305,11 +305,20 @@ describe("BUNDLED_CAPABILITIES justification sentence", () => {
     );
   });
 
-  it("does not promise the model any of the card's own fields", () => {
-    // The card's reason line is drawn FROM a tool argument; the model never
-    // writes `reason` or `rule_text` itself, and a hint that said it could
-    // would have it look for a field the protocol does not offer.
-    expect(flat).not.toContain("send reason");
-    expect(flat).not.toContain("rule_text");
+  it("says it in the sentence's own words: a tool argument, not a card field", () => {
+    // The clause that carries the whole distinction, asserted on its own so a
+    // reword of it fails here and not only inside the paragraph above.
+    expect(flat).toContain(
+      "it is a tool argument rather than a card field",
+    );
+    // What is NOT asserted, deliberately: that this text lacks the tokens
+    // `send reason` or `rule_text`. Both were tried during stage 5 and both
+    // could only ever pass. Neither string has appeared in agent-hints.ts,
+    // and BUNDLED_CAPABILITIES is this daemon's offline MIRROR of the served
+    // canon, whose approvals core owns exactly those words ("send reason (at
+    // most 280)", "send rule_text (at most 500)"). Refreshing the bundled
+    // copy from the served canon is the standard practice, so a test
+    // forbidding them would go red on the first correct refresh and the
+    // repair would be to delete the test or to leave the fallback stale.
   });
 });
