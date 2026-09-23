@@ -75,13 +75,27 @@ export interface InboundMessagePayload {
   senderType?: "user" | "agent" | "system";
   senderGuardrail?: string;
   /**
-   * The owner's per agent plan level, as the server labels it:
-   * `only_when_asked`, `risky_jobs` or `always`. Absent means the server did
-   * not send one (an older backend, or a channel that has no such setting).
+   * The owner's per agent plan level, as the server's own LABELLED SENTENCE.
+   *
+   * NOT the bare enum, and this comment said it was until 2026-09-23. The wire
+   * never carries `only_when_asked` / `risky_jobs` / `always`: the backend
+   * ships the prefix "Your owner's setting for when you show a plan before you
+   * change anything ..." followed by the level's own words
+   * (backend/src/services/plan-policy.ts, buildPlanPolicyField), and it OMITS
+   * the key entirely at the default level, so an absent value means the
+   * default level, an older backend, or a channel with no such setting. That
+   * belief is the one that made `planPolicySentence` switch on three values no
+   * envelope ever holds, so every real level reached no turn at all; see the
+   * header of `planPolicySentence` in plan-card.ts for the correction. This
+   * declaration is the one a reader reaches first from `bgos-ws.ts`'s
+   * normalizer, so it is the copy that has to say it; the DispatchArgs twin in
+   * inbound-handler.ts carries the same paragraph.
    *
    * It rides the ENVELOPE rather than being read off the assistant row on
    * purpose, and that is the same rule the share guardrail follows: the daemon
    * offers, the server decides, the daemon never reads the owner's settings.
+   * UNLIKE the guardrail it rides BOTH provenance arms, because it describes
+   * the agent RECEIVING the turn and not whoever is speaking.
    */
   planPolicy?: string;
   chatKind?: string;

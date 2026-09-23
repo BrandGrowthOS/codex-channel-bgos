@@ -12,6 +12,8 @@
  * `normalizeInboundMessage` in src/bgos-ws.ts turns the level cases red;
  * restoring it turns them green and leaves the file's sha256 unchanged.
  */
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it, vi } from "vitest";
 
 import type { BgosApi } from "../src/bgos-api.js";
@@ -85,10 +87,44 @@ describe("the inbound envelope carries the owner's plan level", () => {
     expect(messages[1]!.planPolicy).toBe("risky_jobs");
   });
 
+  it("carries the server's whole labelled sentence, which is what the wire sends", async () => {
+    // The short enum above is the SHAPE case (either spelling survives the
+    // normalizer). This is the VALUE case, and it is here because believing
+    // the wire carried the bare enum is what made planPolicySentence switch
+    // on three values no envelope holds.
+    const labelled =
+      "Your owner's setting for when you show a plan before you change " +
+      "anything. It applies in every chat and on every channel. Typing /plan " +
+      "always shows a plan whatever this says, and this is a request about " +
+      "how you work rather than something the platform can enforce: show a " +
+      "plan first, every time, before you change a single file.";
+    const { socket, messages } = await connected();
+    socket.deliver("inbound_message", message({ planPolicy: labelled }));
+    expect(messages[0]!.planPolicy).toBe(labelled);
+  });
+
   it("omits it rather than inventing one when the backend sends none", async () => {
     const { socket, messages } = await connected();
     socket.deliver("inbound_message", message());
     expect(messages[0]).not.toHaveProperty("planPolicy");
+  });
+
+  it("says on the DECLARATION itself that the wire carries a sentence, not the enum", () => {
+    // Three copies of the same belief, and correcting two of them left the
+    // third to reintroduce the defect: InboundMessagePayload is the
+    // declaration a reader reaches first from this very normalizer, and it
+    // still read "as the server labels it: only_when_asked, risky_jobs or
+    // always" after the DispatchArgs twin had been corrected in the same
+    // commit that found the bug.
+    const types = readFileSync("src/types.ts", "utf8");
+    const upto = types.slice(0, types.indexOf("planPolicy?: string;"));
+    // Unwrapped, so a reflow of the paragraph cannot retire the assertion.
+    const comment = upto
+      .slice(upto.lastIndexOf("/**"))
+      .replace(/\s*\r?\n\s*\*\s?/g, " ");
+    expect(comment).toContain("LABELLED SENTENCE");
+    expect(comment).toContain("OMITS the key entirely at the default level");
+    expect(comment).not.toContain("as the server labels it");
   });
 });
 

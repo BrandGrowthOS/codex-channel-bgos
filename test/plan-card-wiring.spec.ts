@@ -33,6 +33,7 @@ function fixture(runTurn: (callbacks: any) => Promise<unknown>) {
   Object.assign(adapter, {
     turnControllers: new Map(),
     planDoorHint: new Map(),
+    lastSessionModeByChat: new Map(),
     planCardFailures: new Set(),
     lastInput: new Map(),
     lastNativeOptions: new Map(),
@@ -64,8 +65,14 @@ function fixture(runTurn: (callbacks: any) => Promise<unknown>) {
     // Wired exactly as the adapter wires it, resolver and all: the lane's
     // `enforcedIn` is what `propose_plan` stamps a card with, and a fixture
     // that left it at its default would test a lane the daemon never builds.
-    planLane: new PlanLane(api as never, (chatId: number) =>
-      adapter.host.planWaitEnforcedIn(chatId),
+    // BOTH resolvers, as the adapter passes both. The second one is what
+    // stops a card claiming "Plan mode is on." for a chat nobody switched, so
+    // a fixture that left it at its default would test a lane the daemon never
+    // builds and would assert the default rather than the rule.
+    planLane: new PlanLane(
+      api as never,
+      (chatId: number) => adapter.host.planWaitEnforcedIn(chatId),
+      (chatId: number) => adapter.host.planModeChats().includes(chatId),
     ),
     tools: { handleRequest: vi.fn(async () => ({})) },
     host: {
@@ -95,9 +102,14 @@ function fixture(runTurn: (callbacks: any) => Promise<unknown>) {
 
 const PLAN = "## Add retry\n\n### Summary\nIt retries nothing.\n\n1. Add the helper\n2. Wrap the call";
 
+/** The chat under test is actually planning, which is the `mode` door's premise. */
+function planning(f: { adapter: any }): void {
+  f.adapter.host.planModeChats = vi.fn(() => [20]);
+}
+
 describe("the plan a Codex turn proposes reaches the chat", () => {
   it("posts the plan item as a card, with chips, inside the turn", async () => {
-    const { adapter, reply, api } = fixture(async (cb) => {
+    const f = fixture(async (cb) => {
       await cb.onPlanProposal?.({ turnId: "t1", itemId: "t1-plan", text: PLAN });
       return {
         error: null,
@@ -106,6 +118,8 @@ describe("the plan a Codex turn proposes reaches the chat", () => {
         sawPlanProposal: true,
       };
     });
+    planning(f);
+    const { adapter, reply, api } = f;
     await adapter.executeAndReply(10, 20, "Plan it", reply);
     expect(api.postMessage).toHaveBeenCalledTimes(1);
     const body = api.postMessage.mock.calls[0]![0] as any;
@@ -188,6 +202,59 @@ describe("the plan a Codex turn proposes reaches the chat", () => {
     }));
     await adapter.executeAndReply(10, 20, "Plan it", reply);
     expect(reply.sendText).not.toHaveBeenCalled();
+  });
+
+  it("does NOT claim plan mode for a chat the host says is not in it", async () => {
+    // THE FINDING. `propose_plan`'s own door was clamped and this mount, the
+    // other place a card is minted, was left on a flat `?? "mode"`. The
+    // `<proposed_plan>` fallback runs on EVERY reply and is not gated on plan
+    // mode, so an owner on plan policy `always` whose model writes Codex's
+    // native block inside an ordinary coding chat got a card whose door line
+    // reads "Plan mode is on." for a chat nobody switched.
+    const f = fixture(async () => ({
+      error: null,
+      replyText: `Here it is.\n\n<proposed_plan>\n${PLAN}\n</proposed_plan>`,
+      turnCompleted: true,
+    }));
+    f.adapter.host.planModeChats = vi.fn(() => []);
+    await f.adapter.executeAndReply(10, 20, "Refactor the uploader", f.reply);
+    const payload = (f.api.postMessage.mock.calls[0]![0] as any).eventMeta
+      .payload;
+    expect(payload.door).toBe("decided");
+  });
+
+  it("answering that card touches no settings and announces no switch", async () => {
+    // And the half that made it worse than a wrong word: `planModeChat` reads
+    // the payload's door first and anything but `decided` means yes, so Go
+    // ahead used to write settings, restore a permission, PATCH
+    // chats.session_mode and post "Plan approved, switched from Plan to Code
+    // mode" into a chat that switched nothing.
+    const f = fixture(async () => ({
+      error: null,
+      replyText: `<proposed_plan>\n${PLAN}\n</proposed_plan>`,
+      turnCompleted: true,
+    }));
+    f.adapter.host.planModeChats = vi.fn(() => []);
+    f.adapter.runAndReply = vi.fn(async () => {});
+    await f.adapter.executeAndReply(10, 20, "Refactor the uploader", f.reply);
+    const messageId = (f.api.postMessage.mock.results[0]!.value as any);
+    const id = (await messageId).id;
+    f.api.setStatus.mockClear();
+    await f.adapter.handlePlanClick({
+      assistantId: 10,
+      chatId: 20,
+      messageId: id,
+      callbackData: "plan:go",
+      userId: "owner-1",
+    });
+    expect(f.adapter.host.setPlanMode).not.toHaveBeenCalled();
+    expect(f.adapter.host.updateSettings).not.toHaveBeenCalled();
+    expect(f.api.reportSessionMode).not.toHaveBeenCalled();
+    expect(f.adapter.outbound.sendText).not.toHaveBeenCalled();
+    // The work still starts: the owner approved a plan, mode or no mode.
+    expect(f.adapter.runAndReply).toHaveBeenCalledTimes(1);
+    // And the wait still ends.
+    expect(f.api.setStatus).toHaveBeenCalledWith(10, { statusText: null });
   });
 
   it("leaves an ordinary plan mode message alone, which is most of plan mode", async () => {
@@ -518,6 +585,90 @@ describe("chats left in plan mode", () => {
       mode: "plan",
       enforced: false,
     });
+  });
+
+  it("reports at connect even for a pair it would otherwise dedupe", async () => {
+    // The connect time report is the CUTOVER and is the one forced caller. The
+    // dedupe map is empty at boot anyway, but an app drawing a chip left by the
+    // daemon that died has to be told what THIS process believes, so a future
+    // edit must not let the dedupe swallow it.
+    const f = fixture(async () => ({}));
+    f.adapter.host.planModeChats = vi.fn(() => [20]);
+    f.adapter.lastSessionModeByChat.set(20, "plan:1");
+    await f.adapter.reportStoredPlanModes();
+    expect(f.api.reportSessionMode).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("a session mode report that changes nothing is not sent", () => {
+  /**
+   * THE FINDING. `ChatRepository.setSessionMode` is an unconditional UPDATE
+   * with `returning('*')`, and `chats_sidebar_bump_trigger` carries no column
+   * list, so writing the value the row already holds still bumps the owner's
+   * sidebar version and makes every connected client refetch assistants with
+   * chats. Three paths repeat, and "Change the plan" is the worst of them: it
+   * reports `plan` for a chat that is already in plan mode, on every tap.
+   */
+  it("drops the repeat and sends the change", async () => {
+    const f = fixture(async () => ({}));
+    await f.adapter.reportSessionMode(10, 20, "plan", true);
+    await f.adapter.reportSessionMode(10, 20, "plan", true);
+    expect(f.api.reportSessionMode).toHaveBeenCalledTimes(1);
+    // The PAIR, not the mode: `enforced` chooses the chip's words, so a
+    // /permissions inside plan mode still has to reach the app.
+    await f.adapter.reportSessionMode(10, 20, "plan", false);
+    expect(f.api.reportSessionMode).toHaveBeenCalledTimes(2);
+    await f.adapter.reportSessionMode(10, 20, "default", false);
+    expect(f.api.reportSessionMode).toHaveBeenCalledTimes(3);
+    // Per chat: another chat's mode is its own question.
+    await f.adapter.reportSessionMode(10, 21, "default", false);
+    expect(f.api.reportSessionMode).toHaveBeenCalledTimes(4);
+  });
+
+  it("forgets a report the backend refused, so the next attempt retries", async () => {
+    // A memory is only worth keeping while it describes a write that landed.
+    // Remembering a rejected PATCH would dedupe every later attempt against a
+    // mode the row never got, and the chip would never appear.
+    const f = fixture(async () => ({}));
+    f.api.reportSessionMode = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("404"))
+      .mockResolvedValue(undefined);
+    await f.adapter.reportSessionMode(10, 20, "plan", true);
+    await f.adapter.reportSessionMode(10, 20, "plan", true);
+    expect(f.api.reportSessionMode).toHaveBeenCalledTimes(2);
+  });
+
+  it("the change click stops re-reporting a mode the chat is already in", async () => {
+    // End to end on the path the finding named: Change the plan keeps both
+    // halves, so the report it makes is always the one already on the row.
+    const f = fixture(async () => ({
+      error: null,
+      replyText: "",
+      turnCompleted: true,
+    }));
+    f.adapter.runAndReply = vi.fn(async () => {});
+    planning(f);
+    await f.adapter.planLane.propose({
+      assistantId: 10,
+      chatId: 20,
+      plan: {
+        title: "Add retry",
+        steps: [{ text: "Add the helper" }],
+        door: "mode" as const,
+        enforced: true,
+      },
+    });
+    for (let i = 0; i < 3; i++)
+      await f.adapter.handlePlanClick({
+        assistantId: 10,
+        chatId: 20,
+        messageId: 501,
+        callbackData: "__custom__",
+        customText: "Skip the second step.",
+        userId: "owner-1",
+      });
+    expect(f.api.reportSessionMode).toHaveBeenCalledTimes(1);
   });
 });
 

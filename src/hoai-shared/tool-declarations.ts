@@ -4,6 +4,18 @@
 // they target this chat's open mission, because a mission now belongs to one
 // chat. Codex takes no chat argument on any of the three: the host stamps the
 // chat of the turn, so there is nothing for the model to get wrong.
+//
+// SECOND DIVERGENCE, and it is about this runtime and not about the contract:
+// `reply`'s `buttons[].style` carries NO `enum` here. In the sibling plugin the
+// schema is advisory (MCP hands it to the client and nothing on the daemon side
+// checks it), so the enum costs nothing there and `normalizeButtonStyle` is the
+// real gate. Here `HoaiTools.call` runs `validateToolInput` over the declared
+// schema before the handler sees anything, so an enum on a COSMETIC OPTIONAL
+// field refuses the whole tool call: a model that writes "warning", "blue" or a
+// capitalised "Success" loses the reply's text, its files and its other chips
+// over a colour. The four tiers are still named in the description and the
+// handler normalizes, so the well behaved model is guided and the other one
+// still gets its message delivered with a neutral chip.
 export const HOAI_TOOL_DECLARATIONS = [
 {
       name: 'bgos_capabilities',
@@ -78,8 +90,9 @@ export const HOAI_TOOL_DECLARATIONS = [
                 value: { type: 'string', description: 'Stable identifier returned to you in the click callback_data.' },
                 style: {
                   type: 'string',
-                  enum: ['default', 'success', 'danger', 'primary'],
                   description:
+                    'One of "default", "success", "danger" or "primary"; anything ' +
+                    'else is dropped and the chip renders neutral. ' +
                     'Optional visual tier for this chip. "success" is the go-ahead, ' +
                     '"danger" the destructive or refusing choice, "primary" the one ' +
                     'you recommend, "default" (the default) neutral. Use it only when ' +

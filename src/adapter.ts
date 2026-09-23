@@ -64,8 +64,10 @@ import { parseReply } from "./reply-markers.js";
 import {
   PlanLane,
   planAnswerPrompt,
+  sweepMissedPlanAnswers,
   type OpenPlan,
 } from "./plan-lane.js";
+import { diskPendingPlans } from "./pending-plans-store.js";
 import { turnDirectiveLines } from "./turn-directives.js";
 import {
   parsePlanChip,
@@ -157,6 +159,25 @@ export class CodexAdapter {
    * chat by `replyQueues`, so a chat never has two turns publishing at once.
    */
   private readonly planCardFailures = new Set<number>();
+  /**
+   * The `(mode, enforced)` pair last REPORTED for a chat, so an unchanged one
+   * is not sent again.
+   *
+   * `ChatRepository.setSessionMode` is an unconditional UPDATE with
+   * `returning('*')`, and `chats_sidebar_bump_trigger` carries no column list,
+   * so writing the value the row already holds still bumps the owner's sidebar
+   * version and makes every connected client refetch assistants with chats.
+   * Three paths repeat: every "Change the plan" click reports `plan` for a chat
+   * already in plan mode, every `/code` in a chat that was never in plan mode
+   * reports `default` unconditionally, and connect reports every stored plan
+   * chat. The first two are now free; the third is deliberately forced, because
+   * it is the cutover and this map is empty at boot.
+   *
+   * The pair, not the mode: `enforced` is what chooses the chip's WORDS, so a
+   * `/permissions` inside plan mode has to reach the app even though the mode
+   * did not move.
+   */
+  private readonly lastSessionModeByChat = new Map<number, string>();
   private readonly replyQueues = new Map<number, Promise<void>>();
   private readonly generations = new Map<number, number>();
   private readonly assistantToRoute = new Map<number, string>();
@@ -293,6 +314,14 @@ export class CodexAdapter {
       // a claim about the host and the model is the one that fills the field.
       // Same lazy read of `this.host` as the line above.
       (chatId) => this.host.planModeChats().includes(chatId),
+      // The durable half. A plan wait lasts a day and its answer arrives on
+      // the WS click alone, so a card the daemon was not up for is a card
+      // nothing ever replays. See pending-plans-store.ts.
+      diskPendingPlans,
+      // Read as the OWNER, which is how this daemon reads any row it did not
+      // just write, and lazily for the same reason as the two above: identity
+      // lands after construction.
+      () => this.ownerId,
     );
     this.tools = new HoaiTools(
       this.api,
@@ -594,7 +623,15 @@ export class CodexAdapter {
       // AFTER identity, because a chat can only be reported once we know which
       // assistant it belongs to. Never awaited: the chip is worth a request,
       // never a slower boot.
-      void this.reportStoredPlanModes();
+      //
+      // The plan sweep is CHAINED behind it rather than fired beside it. Both
+      // touch the same chat's mode and the sweep is the one that may take it
+      // DOWN (a Go ahead answered while this daemon was off hands the files
+      // back), so a race would leave the app drawing a chip for a chat that is
+      // already coding again.
+      void this.reportStoredPlanModes().then(() =>
+        this.sweepMissedPlanAnswers(),
+      );
     } else if (!this.fatalLatched) {
       this.scheduleIdentityRetry(1000);
     }
@@ -1414,12 +1451,64 @@ export class CodexAdapter {
       // mode was left with its read only sandbox too, and both halves are in
       // the same file, so a restart restores the lock and reports it rather
       // than downgrading every recovered chat to the convention.
+      // FORCED, and it is the one caller that is. This is the cutover: the
+      // dedupe map is empty at boot, and the app may be drawing a chip left by
+      // the daemon that died, so the value this process believes has to reach
+      // the row whatever it is.
       await this.reportSessionMode(
         assistantId,
         chatId,
         "plan",
         this.host.planWaitEnforcedIn(chatId),
+        { force: true },
       );
+    }
+  }
+
+  /**
+   * The boot half of the plan restart contract (see pending-plans-store.ts).
+   *
+   * Every plan card this daemon left waiting is read back. One still open is
+   * adopted into the lane, so a later tap resolves against it at all; one
+   * ANSWERED while this process was down is delivered exactly as a live click
+   * would have been, which is what ends the wait, takes the status line down,
+   * and on a Go ahead hands the chat's files back.
+   *
+   * Never throws and never blocks a boot: a read that fails leaves the entry
+   * for the next start rather than guessing.
+   */
+  private async sweepMissedPlanAnswers(): Promise<void> {
+    let missed: Awaited<ReturnType<typeof sweepMissedPlanAnswers>>;
+    try {
+      missed = await sweepMissedPlanAnswers(this.api, this.planLane);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `${LOG} could not read back the plan cards from a previous run:`,
+        err instanceof Error ? err.message : String(err),
+      );
+      return;
+    }
+    for (const answer of missed) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `${LOG} delivering the answer to plan card ${answer.entry.id} in chat ` +
+          `${answer.entry.chatId}, missed by a run that had stopped`,
+      );
+      await this.handlePlanClick({
+        assistantId: answer.entry.assistantId,
+        chatId: answer.entry.chatId,
+        messageId: answer.entry.id,
+        callbackData: answer.callbackData,
+        ...(answer.customText ? { customText: answer.customText } : {}),
+        userId: answer.entry.userId,
+      } as never).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `${LOG} could not act on a missed plan answer:`,
+          err instanceof Error ? err.message : String(err),
+        );
+      });
     }
   }
 
@@ -1429,7 +1518,20 @@ export class CodexAdapter {
    * The DOOR is the one thing the plan text cannot tell us, so it is read from
    * the hint `/plan <task>` leaves behind and falls back to plan mode's own
    * door, which is the truthful answer for a plan the runtime raised without
-   * the owner typing anything.
+   * the owner typing anything WHILE THE CHAT IS ACTUALLY IN PLAN MODE.
+   *
+   * IT IS CLAMPED, exactly as `propose_plan`'s own door is clamped in
+   * hoai-tools.ts, and this was the one of the two mounts that was not. The
+   * fallback used to be a flat `"mode"`, which the app renders as the line
+   * "Plan mode is on." This path is reachable outside plan mode: the
+   * `<proposed_plan>` fallback runs on EVERY reply, so an owner on plan policy
+   * `always` whose model writes Codex's native block inside an ORDINARY coding
+   * chat got a card announcing a mode nobody switched. It was worse on the
+   * answer: `planModeChat` reads the payload's door first and anything but
+   * `decided` means yes, so Go ahead wrote settings, restored a permission,
+   * PATCHed `chats.session_mode` and posted "Plan approved, switched from Plan
+   * to Code mode" into a chat that switched nothing. So the door claims `mode`
+   * only when the HOST says the chat is planning.
    *
    * `enforced` is ASKED, per chat, and never a constant. A live probe on
    * 2026-09-23 ran a workspace write with `collaborationMode: plan` on the
@@ -1448,7 +1550,12 @@ export class CodexAdapter {
     chatId: number,
     markdown: string,
   ): Promise<boolean> {
-    const door = this.planDoorHint.get(chatId) ?? "mode";
+    const hinted = this.planDoorHint.get(chatId);
+    // `typed` is never clamped: the owner's own `/plan` is what put the model
+    // here and the daemon's mode flip for it is async, so the hint is the
+    // better evidence. Everything else asks the host.
+    const door: PlanDoor =
+      hinted ?? (this.planLane.planModeIn(chatId) ? "mode" : "decided");
     this.planDoorHint.delete(chatId);
     try {
       await this.planLane.propose({
@@ -1597,6 +1704,11 @@ export class CodexAdapter {
    * both. Swallowed on every failure, including the 404 an older backend
    * answers: a chip the app cannot draw is never worth a turn.
    *
+   * AN UNCHANGED PAIR IS NOT RE-SENT (see `lastSessionModeByChat`), because
+   * the backend's write is not free: it bumps the owner's sidebar version and
+   * every connected client refetches. `force` is for the connect time report,
+   * which is the cutover.
+   *
    * `enforced` IS PASSED IN, from whatever actually happened. It was a
    * constant `false` while plan mode moved nothing but the model's
    * instructions; now `/plan` couples the read only sandbox to it, so the
@@ -1610,10 +1722,20 @@ export class CodexAdapter {
     chatId: number,
     mode: "plan" | "default",
     enforced: boolean,
+    options: { force?: boolean } = {},
   ): Promise<void> {
-    await this.api
-      .reportSessionMode(assistantId, chatId, { mode, enforced })
-      .catch(() => {});
+    const pair = `${mode}:${enforced ? "1" : "0"}`;
+    if (!options.force && this.lastSessionModeByChat.get(chatId) === pair)
+      return;
+    this.lastSessionModeByChat.set(chatId, pair);
+    try {
+      await this.api.reportSessionMode(assistantId, chatId, { mode, enforced });
+    } catch {
+      // A memory is only worth keeping while it describes a write that landed.
+      // Forgetting here is what makes the next attempt retry rather than dedupe
+      // against a report the backend never took.
+      this.lastSessionModeByChat.delete(chatId);
+    }
   }
 
   /**

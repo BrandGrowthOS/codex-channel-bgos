@@ -22,6 +22,7 @@ import {
   buildScheduleCancelPath,
 } from "./hoai-shared/schedule.js";
 import { buildCallOwnerBody } from "./hoai-shared/call-owner.js";
+import { normalizeButtonStyle } from "./hoai-shared/message-text.js";
 import {
   buildHealthLogEventBody,
   buildHealthLogListPath,
@@ -386,14 +387,30 @@ export class HoaiTools {
             files,
             ...(args.buttons?.length
               ? {
-                  options: args.buttons.map((b: RpcObject) => ({
-                    text: b.label,
-                    callbackData: escapeButton(b.value),
+                  options: args.buttons.map((b: RpcObject) => {
                     // Optional and additive. The app draws a tier when it
                     // knows one and neutral otherwise, so an older client
                     // loses nothing by us sending it.
-                    ...(typeof b.style === "string" ? { style: b.style } : {}),
-                  })),
+                    //
+                    // NORMALIZED, never passed through. The declaration's enum
+                    // is advisory and nothing at runtime holds a model to it,
+                    // and the backend's CreateMessageOptionDto carries an
+                    // `@IsIn` that 400s the WHOLE reply over one bad value:
+                    // the text, the files and every other chip go with it. So
+                    // an unknown tier is dropped with a line in the log, which
+                    // is what the sibling plugin does for the same reason.
+                    const style = normalizeButtonStyle(b.style);
+                    if (style === null && b.style !== undefined)
+                      // eslint-disable-next-line no-console
+                      console.warn(
+                        `[codex-channel-bgos] dropping unknown reply button style ${JSON.stringify(b.style)}; the chip renders neutral`,
+                      );
+                    return {
+                      text: b.label,
+                      callbackData: escapeButton(b.value),
+                      ...(style ? { style } : {}),
+                    };
+                  }),
                   renderMode: args.render_mode ?? "inline",
                 }
               : {}),

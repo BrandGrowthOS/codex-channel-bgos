@@ -227,6 +227,47 @@ describe("reading the runtime's plan", () => {
     expect(prose.steps).toEqual([{ text: "Just rename the module." }]);
   });
 
+  it("keeps the sub-bullets under a numbered step, which is where they were lost", () => {
+    // THE FINDING, and the commonest shape a model actually writes. Numbered
+    // items win over bullets, and `bullets` was thrown away whole, so every
+    // line of detail indented under a numbered step vanished from the card
+    // while this reader's own header claimed it never loses text.
+    const read = planFromMarkdown(
+      [
+        "## Rework the uploader",
+        "",
+        "1. Rewrite the upload path",
+        "   - drop the retry loop",
+        "   - add a size guard",
+        "2. Update the tests",
+        "   - cover the guard",
+      ].join("\n"),
+    );
+    expect(read.steps).toHaveLength(2);
+    expect(read.steps[0]!.text).toBe(
+      "Rewrite the upload path (drop the retry loop; add a size guard)",
+    );
+    expect(read.steps[1]!.text).toBe("Update the tests (cover the guard)");
+  });
+
+  it("gives a bullet that came before any number to the summary, not to nothing", () => {
+    // It has no step to belong to, and the summary is where a reader looks for
+    // a line of context. Dropping it was the same defect as the nested case.
+    const read = planFromMarkdown(
+      [
+        "## Rework the uploader",
+        "",
+        "- this touches the retry path only",
+        "",
+        "1. Rewrite the upload path",
+      ].join("\n"),
+    );
+    expect(read.steps.map((step) => step.text)).toEqual([
+      "Rewrite the upload path",
+    ]);
+    expect(read.summary).toContain("this touches the retry path only");
+  });
+
   it("keeps a step that IS a path rather than emptying the row", () => {
     const read = planFromMarkdown("# Files\n\n1. `src/a.ts`");
     expect(read.steps[0]!.text).toBe("`src/a.ts`");

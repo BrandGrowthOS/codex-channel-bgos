@@ -170,6 +170,29 @@ function clip(value: unknown, max: number): string {
 }
 
 /** Validate and clip an input into the payload that rides `eventMeta`. */
+/**
+ * Is this `eventMeta.payload` a plan card of ours?
+ *
+ * Read off a ROW, which is the copy that survives a restart, so the boot sweep
+ * can adopt a card this process never posted. Deliberately narrow: the kind
+ * and the fields the lane actually leans on (`plan_id`, `revision` and `door`,
+ * which together decide whether a revision inherits an identity and whether an
+ * answer may move the chat's mode). A payload from a newer version that keeps
+ * those still reads, which is the point of checking fields rather than `v`.
+ */
+export function isPlanCardPayload(value: unknown): value is PlanCardPayload {
+  if (!value || typeof value !== "object") return false;
+  const row = value as Record<string, unknown>;
+  return (
+    row.kind === PLAN_CARD_KIND &&
+    typeof row.title === "string" &&
+    Array.isArray(row.steps) &&
+    typeof row.plan_id === "string" &&
+    typeof row.revision === "number" &&
+    (row.door === "typed" || row.door === "decided" || row.door === "mode")
+  );
+}
+
 export function planCardPayload(input: PlanCardInput): PlanCardPayload {
   const title = clip(input.title, PLAN_CAPS.title);
   if (!title) throw new Error("A plan needs a title.");
@@ -353,6 +376,10 @@ export function planFromMarkdown(markdown: string): {
   const check: string[] = [];
   const steps: PlanStepInput[] = [];
   const bullets: PlanStepInput[] = [];
+  /** For each bullet, the numbered step it sat under, or -1 before the first. */
+  const bulletOwners: number[] = [];
+  /** The bullet as written, before addStep lifted a path out of the sentence. */
+  const bulletSource: string[] = [];
   const loose: string[] = [];
   const files = new Set<string>();
 
@@ -395,7 +422,13 @@ export function planFromMarkdown(markdown: string): {
     const bullet = BULLET.exec(line);
     if (bullet) {
       if (section === "check") check.push(bullet[1]!);
-      else addStep(bullets, bullet[1]!);
+      else {
+        addStep(bullets, bullet[1]!);
+        // Where it sat, so a bullet nested under a numbered step can be folded
+        // back into it rather than dropped when the numbers win. See below.
+        bulletOwners.push(steps.length - 1);
+        bulletSource.push(bullet[1]!);
+      }
       continue;
     }
     const text = line.trim();
@@ -409,7 +442,33 @@ export function planFromMarkdown(markdown: string): {
 
   // Numbered steps win; bullets are the fallback; a plan with neither becomes
   // one step holding its first paragraph, so nothing is ever lost.
+  //
+  // AND THAT USED TO BE FALSE, in the commonest shape a model writes: a
+  // numbered step with its detail indented under it as bullets. The numbers
+  // won, `bullets` was thrown away whole, and the detail vanished from the
+  // card while the header above claimed this never loses text. A bullet that
+  // sat under a numbered step is folded back into that step; one that came
+  // before any number has no step to belong to, so it joins the summary, which
+  // is where a reader looks for it. Both keep the words on screen.
   let chosen = steps.length ? steps : bullets;
+  if (steps.length && bullets.length) {
+    const nested = new Map<number, string[]>();
+    for (let i = 0; i < bullets.length; i++) {
+      const owner = bulletOwners[i] ?? -1;
+      const text = bulletSource[i] ?? bullets[i]!.text;
+      if (owner < 0) {
+        summary.push(text);
+        continue;
+      }
+      const list = nested.get(owner);
+      if (list) list.push(text);
+      else nested.set(owner, [text]);
+    }
+    for (const [index, list] of nested) {
+      const step = steps[index];
+      if (step) step.text = `${step.text} (${list.join("; ")})`;
+    }
+  }
   const looseIsTheStep = !chosen.length && loose.length > 0;
   if (looseIsTheStep) chosen = [{ text: loose[0]! }];
   if (!chosen.length && summary.length) chosen = [{ text: summary[0]! }];

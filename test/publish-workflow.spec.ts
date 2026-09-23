@@ -87,6 +87,23 @@ describe("the publish workflow never advertises a held version as latest", () =>
     }
   });
 
+  it("keeps package-lock.json on the same version package.json is on", () => {
+    // The stage bumped package.json to 0.11.0 and left the lock at 0.10.1, in
+    // BOTH of its version fields. Every previous release in this repo moved the
+    // two together, so this is a broken invariant rather than a repo that never
+    // tracked one, and it is not cosmetic: `npm ci` is what both CI workflows
+    // run, and the published tarball carries a lock naming the previous
+    // release. Nothing read the lock until this case did.
+    const version = JSON.parse(readFileSync("package.json", "utf8")).version;
+    const lock = JSON.parse(readFileSync("package-lock.json", "utf8"));
+    expect(lock.version, "package-lock.json root version").toBe(version);
+    expect(
+      lock.packages?.[""]?.version,
+      'package-lock.json packages[""].version',
+    ).toBe(version);
+    expect(lock.name).toBe(JSON.parse(readFileSync("package.json", "utf8")).name);
+  });
+
   it("holds this version while its own source says the backend is not ready", () => {
     const version = JSON.parse(readFileSync("package.json", "utf8")).version;
     const held = heldInSource();

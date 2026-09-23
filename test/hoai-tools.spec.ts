@@ -252,6 +252,69 @@ describe("reply buttons carry a style", () => {
     expect(body.options[0]).toMatchObject({ text: "Ship", style: "success" });
     expect(body.options[1]).not.toHaveProperty("style");
   });
+
+  it("drops a tier the backend would refuse, and still posts the message", async () => {
+    // THE FINDING. The declaration's enum is ADVISORY: nothing at runtime
+    // holds a model to it, and the value used to be spread straight onto the
+    // option. `CreateMessageOptionDto` carries an `@IsIn` over the same four
+    // tiers, so "blue", "warning" or a capitalised "Success" 400s the WHOLE
+    // reply, and the text, the files and every other chip are lost with it.
+    // Losing a message because a chip wanted a colour that does not exist is
+    // the wrong trade; the sibling plugin shipped the same normalizer.
+    const agentRequest = vi.fn(async () => ({ id: 1 }));
+    const tools = new HoaiTools({ agentRequest } as any, () => "canon");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result: any = await tools.handleRequest(
+      "item/tool/call",
+      {
+        tool: "reply",
+        arguments: {
+          chat_id: "17",
+          text: "Ship it?",
+          buttons: [
+            { label: "Ship", value: "ship", style: "blue" },
+            { label: "Stop", value: "stop", style: "  DANGER " },
+            { label: "Wait", value: "wait", style: "warning" },
+          ],
+        },
+      },
+      context(),
+    );
+    warn.mockRestore();
+    expect(result.success).toBe(true);
+    const body = agentRequest.mock.calls[0]![3] as any;
+    // The message still went, whole: three chips, one of them tinted.
+    expect(body.text).toBe("Ship it?");
+    expect(body.options).toHaveLength(3);
+    expect(body.options[0]).not.toHaveProperty("style");
+    // Trimmed and lowercased, not refused: the tier is a spelling, not a
+    // contract the owner should lose a message over.
+    expect(body.options[1]).toMatchObject({ text: "Stop", style: "danger" });
+    expect(body.options[2]).not.toHaveProperty("style");
+  });
+
+  it("still refuses a style that is not a string, because that is a type error", async () => {
+    // The tier is a spelling the handler can correct. A number is not a tier at
+    // all, and `type: 'string'` stays on the property: the boundary names the
+    // mistake rather than guessing what the model meant.
+    const agentRequest = vi.fn(async () => ({ id: 1 }));
+    const tools = new HoaiTools({ agentRequest } as any, () => "canon");
+    const result: any = await tools.handleRequest(
+      "item/tool/call",
+      {
+        tool: "reply",
+        arguments: {
+          chat_id: "17",
+          text: "Ship it?",
+          buttons: [{ label: "Ship", value: "ship", style: 7 }],
+        },
+      },
+      context(),
+    );
+    expect(result.success).toBe(false);
+    expect(result.contentItems[0].text).toMatch(/must be string/);
+    expect(agentRequest).not.toHaveBeenCalled();
+  });
 });
 
 describe("typed HOAI boundary", () => {
@@ -771,12 +834,17 @@ describe("the shared tool declarations", () => {
 
   it("offers an optional style on reply buttons, as the canon has promised", () => {
     const button = (reply!.inputSchema as any).properties.buttons.items;
-    expect(button.properties.style.enum).toEqual([
-      "default",
-      "success",
-      "danger",
-      "primary",
-    ]);
+    expect(button.properties.style.type).toBe("string");
+    // The four tiers are NAMED, in the description, and deliberately NOT in an
+    // `enum`. `HoaiTools.call` validates every tool call against this schema
+    // before the handler runs, so an enum on a cosmetic optional field refuses
+    // the whole reply over a colour: the text, the files and the other chips go
+    // with it. The handler normalizes instead (see the reply case), which is
+    // what the sibling plugin does. This is the one place that could put the
+    // enum back by accident.
+    expect(button.properties.style.enum).toBeUndefined();
+    for (const tier of ["default", "success", "danger", "primary"])
+      expect(button.properties.style.description).toContain(tier);
     // Optional: a daemon that sends no tier is the normal case.
     expect(button.required).toEqual(["label", "value"]);
   });
