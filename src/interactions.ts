@@ -1005,6 +1005,15 @@ export class Interactions {
       // read a pending request with zero options as the settled "This request
       // is no longer open" row; flagged for the app lane rather than papered
       // over by faking a server verdict from a daemon.
+      // OPTIONS AND NOTHING ELSE, and that is load bearing since 0.13.0. A
+      // PATCH of a message REPLACES the whole approval metadata column, so an
+      // edit that carried `approvalMeta` at all would have to re-send
+      // `reason` and `rule_text` or take both lines off a card that had them
+      // (the served canon says exactly this to every channel). This body
+      // never sends the column, so the question cannot arise here;
+      // test/interactions.spec.ts pins the WHOLE body rather than one key, so
+      // adding one is a red test and not a card that quietly loses its reason
+      // line.
       await this.api
         .agentRequest("PATCH", `messages/${messageId}`, context.assistantId, {
           options: [],

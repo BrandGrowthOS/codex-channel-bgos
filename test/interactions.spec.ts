@@ -1404,6 +1404,40 @@ describe("a command approval says what it runs, why, and what Always would save"
     ]);
   });
 
+  it("never EDITS the card it wrote, so the two sentences cannot fall off it", async () => {
+    // WHAT THE SERVED CANON WARNS EVERY CHANNEL ABOUT, pinned here for this
+    // one. A PATCH of a message REPLACES the whole approval metadata block,
+    // so an edit that sets one field and leaves the two sentences out takes
+    // both lines off a card that had them. This daemon is safe by SHAPE
+    // rather than by care: its only later edit of an approval card is the
+    // retire, and that body is `{ options: [] }` and nothing else, so the
+    // column is never sent and never replaced. Asserted on the whole body,
+    // which is what makes adding `approvalMeta` to that PATCH a red test
+    // rather than a card that quietly loses its reason line.
+    vi.useFakeTimers();
+    const { bridge, ctx, api, c } = fixture();
+    const answer = bridge.approve(
+      ctx,
+      "item/commandExecution/requestApproval",
+      COMMAND_PARAMS,
+    );
+    await tick();
+    const created = (api.agentRequest.mock.calls[0] as any)[3];
+    expect(created.approvalMeta.reason).toBe(
+      "Write probe.txt in the scratch directory",
+    );
+    c.abort();
+    await vi.runAllTimersAsync();
+    await answer;
+    const patches = api.agentRequest.mock.calls.filter(
+      (call: any) => call[0] === "PATCH",
+    );
+    expect(patches.length).toBeGreaterThan(0);
+    for (const call of patches) {
+      expect((call as any)[3]).toEqual({ options: [] });
+    }
+  });
+
   it("says what Always would save: this exact command, everywhere, until it is removed", async () => {
     vi.useFakeTimers();
     const body = await post(COMMAND_PARAMS);
