@@ -381,6 +381,29 @@ export class BgosApi {
     );
   }
 
+  /**
+   * Report this chat's session mode to BGOS, so the app can draw the plan mode
+   * chip and the gold pill without guessing.
+   *
+   * Per CHAT, not per assistant: Codex's mode lives in `SessionSettingsStore`
+   * keyed on chatId, and a daemon serving several chats can be planning in one
+   * and coding in another. `enforced` says whether anything other than the
+   * agent's goodwill holds the wait.
+   *
+   * Additive route: an older backend answers 404 and every caller swallows it,
+   * because a chip the app cannot draw must never cost a turn.
+   */
+  async reportSessionMode(
+    assistantId: number,
+    chatId: number,
+    body: { mode: "plan" | "default"; enforced: boolean },
+  ): Promise<void> {
+    await this.http.patch(
+      `integrations/assistants/${assistantId}/chats/${chatId}/session-mode`,
+      body,
+    );
+  }
+
   async mergeCommands(
     assistantId: number,
     commands: CommandManifestEntry[],
@@ -682,7 +705,16 @@ export class BgosApi {
    */
   async setStatus(
     assistantId: number,
-    body: { statusText: string | null; statusEmoji?: string | null },
+    body: {
+      statusText: string | null;
+      statusEmoji?: string | null;
+      /**
+       * How long the line survives if nothing clears it, 1 to 1440 minutes.
+       * The server's own default is two hours, which is the wrong number for a
+       * plan waiting on an owner who may answer tomorrow.
+       */
+      ttlMinutes?: number;
+    },
   ): Promise<void> {
     await this.http.patch(
       `integrations/assistants/${assistantId}/status`,

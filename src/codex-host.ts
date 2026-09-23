@@ -120,6 +120,28 @@ export interface PlanSignal {
   turnId: string | null;
   plan: PlanItem[];
 }
+/**
+ * A finished plan the model PROPOSED, which is a different thing from the
+ * `turn/plan/updated` checklist above and arrives on a different wire.
+ *
+ * In Codex's plan mode the runtime asks the model to wrap its final plan in a
+ * `<proposed_plan>` block, PARSES that block out of the agent message and
+ * re-emits it as its own item: `item/completed` with `item.type === "plan"` and
+ * the whole markdown in `item.text`. The block is REMOVED from the message, so
+ * before this callback existed the plan reached nobody: `entryFromItem` returns
+ * null for a plan item and `result()` only ever sees the sentence that came
+ * before the block. Settled by a live probe on 2026-09-23, see
+ * docs/learnings/codex-plan-mode-wire.md.
+ *
+ * `item/plan/delta` carries the same text as it streams and is deliberately
+ * ignored: the card is posted once, when the plan is finished.
+ */
+export interface PlanProposalSignal {
+  turnId: string | null;
+  itemId: string;
+  /** The plan, as markdown. Already finalized; never a partial. */
+  text: string;
+}
 export interface RunTurnCallbacks {
   signal?: AbortSignal;
   onTool?: (card: ActivityCard, id: string) => void | Promise<void>;
@@ -132,6 +154,13 @@ export interface RunTurnCallbacks {
   onTodoList?: (signal: TodoListSignal) => void | Promise<void>;
   /** Raw plan snapshot for the live Steps lane. Never touches the mission. */
   onPlan?: (signal: PlanSignal) => void | Promise<void>;
+  /**
+   * The model proposed a plan and is waiting to be told to go ahead. Fired at
+   * most once per turn, from the runtime's own `plan` item. A sibling of
+   * `onPlan` and never a caller of it: the Steps lane is scratch paper for
+   * work in flight, this is a card the owner answers.
+   */
+  onPlanProposal?: (signal: PlanProposalSignal) => void | Promise<void>;
   onTick?: () => void;
   onRequest?: (method: string, params: RpcObject) => Promise<unknown>;
   onUsage?: (usage: RpcObject) => void;
@@ -166,6 +195,12 @@ export interface RunTurnResult {
    * to settle a child of a turn that was cut short.
    */
   helpersStillRunning?: boolean;
+  /**
+   * The runtime emitted a finished `plan` item this turn, so `onPlanProposal`
+   * has already fired and the adapter's `<proposed_plan>` fallback must stay
+   * out of the way. Absent and false both mean no plan item was seen.
+   */
+  sawPlanProposal?: boolean;
 }
 interface ActiveTurn {
   id?: string;
@@ -203,6 +238,12 @@ interface ActiveTurn {
    * the runtime never nicknamed would lose the name it was first drawn with.
    */
   childBaseName: Map<string, string>;
+  /**
+   * The runtime already handed this turn a finished `plan` item, so the
+   * adapter's `<proposed_plan>` fallback must not post a second card. Read on
+   * the result, never inside the notification loop.
+   */
+  sawPlanProposal?: boolean;
   finish: (result: RunTurnResult) => void;
   /**
    * Stop and restart this turn's watchdog around a request that is parked in
@@ -607,6 +648,20 @@ export class CodexHost {
       seen.add(cursor);
     }
     throw new Error("Codex model catalog exceeded its page limit.");
+  }
+  /**
+   * Every chat this daemon has stored in plan mode.
+   *
+   * Read at connect so BGOS can draw the chip for a chat the owner left in
+   * plan mode before the daemon last stopped. The STORE is the truth, not the
+   * running threads: a chat with no thread yet still has a mode.
+   */
+  planModeChats(): number[] {
+    return this.settings
+      .entries()
+      .filter(([, value]) => value.mode === "plan")
+      .map(([chatId]) => chatId)
+      .filter((chatId) => Number.isSafeInteger(chatId) && chatId > 0);
   }
   async sessionSettings(chatId: number): Promise<SessionSettings> {
     const settings = { model: this.opts.model, ...this.settings.get(chatId) };
@@ -1246,6 +1301,7 @@ export class CodexHost {
       finalAgentMessageText: finalText,
       turnCompleted: completed,
       error,
+      ...(turn.sawPlanProposal ? { sawPlanProposal: true } : {}),
       ...turnClock(reported),
     };
   }
@@ -1368,6 +1424,30 @@ export class CodexHost {
         this.cwdByThread.set(String(params.threadId ?? ""), item.cwd);
       const started = method === "item/started";
       const itemKey = typeof item.id === "string" ? item.id : "";
+      // THE PLAN THE MODEL PROPOSED, before entryFromItem drops it.
+      //
+      // A plan item is not an activity row and never was: `entryFromItem`
+      // returns null for it and it vanished with no log line, which is why a
+      // Codex owner in plan mode got the sentence before the plan and never the
+      // plan itself. Taken on `item/completed` only, because `item/started`
+      // carries an empty text and `item/plan/delta` carries a partial.
+      if (item.type === "plan") {
+        if (!started && typeof item.text === "string" && item.text.trim()) {
+          turn.sawPlanProposal = true;
+          turn.pending.push(
+            Promise.resolve()
+              .then(() =>
+                turn.callbacks.onPlanProposal?.({
+                  turnId: params.turnId ?? null,
+                  itemId: itemKey,
+                  text: String(item.text),
+                }),
+              )
+              .catch(() => {}),
+          );
+        }
+        return;
+      }
       if (started && itemKey && typeof params.startedAtMs === "number")
         turn.rowStartedAt.set(itemKey, params.startedAtMs);
       const phase: ItemPhase = started ? "started" : "completed";

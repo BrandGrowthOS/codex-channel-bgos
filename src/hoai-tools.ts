@@ -36,6 +36,8 @@ import {
   listRenderableKinds,
   validateComponentPayload,
 } from "./hoai-shared/renderables.js";
+import { CODEX_PLAN_MODE_ENFORCED } from "./plan-card.js";
+import type { PlanCardInput, PlanDoor } from "./plan-card.js";
 import {
   buildMissionActivePath,
   buildMissionCreateBody,
@@ -53,6 +55,38 @@ import {
  * done, narrated to the model as a falsehood and steered into the very turn
  * that ticked it.
  */
+/**
+ * Where `propose_plan` sends a plan.
+ *
+ * The tool itself owns nothing: the card has to supersede the chat's previous
+ * open plan, write the status line and be remembered for the click that
+ * answers it, and all three of those live with the adapter, one process wide.
+ * Injected the way `MissionSelfWrites` is, so a tools instance built without
+ * an adapter (every unit test of another tool) still constructs.
+ *
+ * It RETURNS AT ONCE by contract. Nothing here waits on a person, which is why
+ * `propose_plan` must stay OUT of OWNER_BLOCKING_TOOLS: a tool that parked the
+ * turn's watchdog on an answer that may come tomorrow would hold a 30 minute
+ * budget open forever (codex-host.ts, `execute`).
+ */
+export interface PlanCardPoster {
+  /**
+   * `plan_id` and `revision` are deliberately NOT the caller's: a revision has
+   * to keep the identity of the plan it replaces, and only the adapter knows
+   * which card is open in the chat.
+   */
+  propose(input: {
+    assistantId: number;
+    chatId: number;
+    plan: Omit<PlanCardInput, "planId" | "revision">;
+  }): Promise<{ messageId: number }>;
+}
+const NO_PLAN_CARDS: PlanCardPoster = {
+  async propose() {
+    throw new Error("Plan cards are not available on this connection.");
+  },
+};
+
 export interface MissionSelfWrites {
   /** About to write this mission: the frame it emits is ours. */
   starting(missionId: number): void;
@@ -179,6 +213,7 @@ export class HoaiTools {
     private api: BgosApi,
     private capabilities: () => string,
     private missionWrites: MissionSelfWrites = NO_MISSION_SELF_WRITES,
+    private plans: PlanCardPoster = NO_PLAN_CARDS,
   ) {
     this.interactions = new Interactions(api);
   }
@@ -334,6 +369,10 @@ export class HoaiTools {
                   options: args.buttons.map((b: RpcObject) => ({
                     text: b.label,
                     callbackData: escapeButton(b.value),
+                    // Optional and additive. The app draws a tier when it
+                    // knows one and neutral otherwise, so an older client
+                    // loses nothing by us sending it.
+                    ...(typeof b.style === "string" ? { style: b.style } : {}),
                   })),
                   renderMode: args.render_mode ?? "inline",
                 }
@@ -345,6 +384,44 @@ export class HoaiTools {
         );
         context.onReply?.();
         return response;
+      }
+      case "propose_plan": {
+        const door: PlanDoor =
+          args.door === "typed" || args.door === "mode" ? args.door : "decided";
+        const { messageId } = await this.plans.propose({
+          assistantId: context.assistantId,
+          chatId,
+          plan: {
+            title: String(args.title ?? ""),
+            ...(args.summary ? { summary: String(args.summary) } : {}),
+            steps: (args.steps ?? []).map((step: RpcObject) => ({
+              text: String(step.text ?? ""),
+              ...(step.file ? { file: String(step.file) } : {}),
+              ...(step.check ? { check: String(step.check) } : {}),
+              ...(step.tag ? { tag: step.tag } : {}),
+            })),
+            ...(args.files?.length
+              ? { files: args.files.map((f: unknown) => String(f)) }
+              : {}),
+            ...(args.check ? { check: String(args.check) } : {}),
+            door,
+            // A plan the MODEL decided to propose has no mode behind it at
+            // all, and even plan mode does not lock the sandbox on this
+            // channel. See CODEX_PLAN_MODE_ENFORCED.
+            enforced: CODEX_PLAN_MODE_ENFORCED,
+            ...(typeof args.supersedes === "number"
+              ? { supersedes: positive(args.supersedes, "supersedes") }
+              : {}),
+            ...(args.note ? { note: String(args.note) } : {}),
+          },
+        });
+        // Returns at once, on purpose. The owner's tap arrives as a click and
+        // starts the NEXT turn; end this one.
+        return {
+          status: "pending",
+          message_id: messageId,
+          note: "The plan is with the owner. End your turn now; their answer starts a new one. Change nothing until then.",
+        };
       }
       case "ask_user_input":
         return this.interactions.ask(

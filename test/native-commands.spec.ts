@@ -51,6 +51,7 @@ function setup() {
     pauseForChat: vi.fn(async () => null),
     resumeForChat: vi.fn(async () => null),
   };
+  const onSessionMode = vi.fn(async () => {});
   const router = new NativeCommands({
     host: host as any,
     interactions: interactions as any,
@@ -58,6 +59,7 @@ function setup() {
     status: () => "connected",
     run,
     goalLane: goalLane as any,
+    onSessionMode,
   });
   const sendText = vi.fn(async () => ({ id: 1 }));
   const args = (name: string, text = "", extra = {}) =>
@@ -69,8 +71,77 @@ function setup() {
       replyHandle: { sendText },
       ...extra,
     }) as any;
-  return { host, interactions, run, router, args, sendText, goalLane };
+  return {
+    host,
+    interactions,
+    run,
+    router,
+    args,
+    sendText,
+    goalLane,
+    onSessionMode,
+  };
 }
+describe("the session mode BGOS is told about", () => {
+  /**
+   * The app draws the plan mode chip off a report from the daemon, not off a
+   * guess, and Codex's mode is per CHAT. Reported after the store and before
+   * the turn: a chip that arrives after the plan card has landed is a chip that
+   * was never useful.
+   */
+  it("reports plan on /plan and default on /code, per chat", async () => {
+    const s = setup();
+    await s.router.handle(s.args("plan"));
+    expect(s.host.updateSettings).toHaveBeenCalledWith(20, { mode: "plan" });
+    expect(s.onSessionMode).toHaveBeenCalledWith(
+      expect.objectContaining({ chatId: 20, assistantId: 10 }),
+      "plan",
+      false,
+    );
+    await s.router.handle(s.args("code"));
+    expect(s.onSessionMode).toHaveBeenLastCalledWith(
+      expect.objectContaining({ chatId: 20 }),
+      "default",
+      false,
+    );
+  });
+
+  it("marks /plan <task> as the TYPED door, and bare /plan as the mode's", async () => {
+    const s = setup();
+    await s.router.handle(s.args("plan", "add retry to the uploader"));
+    expect(s.onSessionMode).toHaveBeenCalledWith(
+      expect.anything(),
+      "plan",
+      true,
+    );
+    // And the task still runs, in the mode that was just set.
+    expect(s.run).toHaveBeenCalledWith(
+      expect.anything(),
+      "add retry to the uploader",
+    );
+    s.onSessionMode.mockClear();
+    s.run.mockClear();
+    await s.router.handle(s.args("plan", "on"));
+    expect(s.onSessionMode).toHaveBeenCalledWith(
+      expect.anything(),
+      "plan",
+      false,
+    );
+    expect(s.run).not.toHaveBeenCalled();
+  });
+
+  it("reads /plan off as coding mode", async () => {
+    const s = setup();
+    await s.router.handle(s.args("plan", "off"));
+    expect(s.host.updateSettings).toHaveBeenCalledWith(20, { mode: "default" });
+    expect(s.onSessionMode).toHaveBeenCalledWith(
+      expect.anything(),
+      "default",
+      false,
+    );
+  });
+});
+
 describe("native controls", () => {
   it("keeps literal paths and argument backslashes intact", () => {
     expect(parseNativeCommand(String.raw`\model two high`)).toEqual({

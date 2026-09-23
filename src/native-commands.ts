@@ -191,6 +191,20 @@ export class NativeCommands {
        * has to be watching BEFORE the goal is set: setting one starts a turn
        * at once, and a turn nobody is watching is dropped on the floor.
        */
+      /**
+       * `/plan` and `/code` just changed this chat's Codex mode.
+       *
+       * Told to the adapter rather than done here, because two things follow
+       * that are not this file's: BGOS has to be told, so the app can draw the
+       * plan mode chip, and a `/plan <task>` has to leave a DOOR behind, so the
+       * card the task produces says the owner typed for it rather than that
+       * plan mode happened to be on. `typedTask` is that difference.
+       */
+      onSessionMode?: (
+        args: DispatchArgs,
+        mode: "plan" | "default",
+        typedTask: boolean,
+      ) => void | Promise<void>;
       goalLane: {
         setFromChat(input: {
           assistantId: number;
@@ -632,10 +646,14 @@ export class NativeCommands {
     }
     if (name === "plan" || name === "code") {
       const mode = name === "code" || text === "off" ? "default" : "plan";
+      const typedTask = Boolean(text) && !["on", "off"].includes(text);
       await apply({ mode });
+      // After the store, before the turn: the app should be drawing the chip
+      // while the agent is still exploring, and a report that lost a race with
+      // the turn would draw it after the plan card had already landed.
+      await this.deps.onSessionMode?.(args, mode, typedTask);
       await say(mode === "plan" ? "Plan mode is on." : "Coding mode is on.");
-      if (text && !["on", "off"].includes(text))
-        await this.deps.run(args, text);
+      if (typedTask) await this.deps.run(args, text);
       return;
     }
     if (name === "permissions") {

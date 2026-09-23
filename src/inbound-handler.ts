@@ -150,6 +150,16 @@ export interface DispatchArgs {
   turnState?: string;
   senderType?: "user" | "agent" | "system";
   senderGuardrail?: string;
+  /**
+   * The owner's per agent plan level, as the server labels it:
+   * `only_when_asked`, `risky_jobs` or `always`. Absent means the server did
+   * not send one (an older backend, or a channel that has no such setting).
+   *
+   * It rides the ENVELOPE rather than being read off the assistant row on
+   * purpose, and that is the same rule the share guardrail follows: the daemon
+   * offers, the server decides, the daemon never reads the owner's settings.
+   */
+  planPolicy?: string;
   chatKind?: string;
   senderUserId?: string;
   senderRelationship?: string;
@@ -468,6 +478,10 @@ export function createInboundHandler(
         senderRelationship: event.senderRelationship,
         senderGuardrail:
           event.senderType === "agent" ? undefined : event.senderGuardrail,
+        // The plan level is the OWNER's, so a peer agent's message never
+        // carries it: the same reason the guardrail above is dropped there.
+        planPolicy:
+          event.senderType === "agent" ? undefined : event.planPolicy,
         text: missingAttachments.length
           ? `${event.text}\n\n[Attachment delivery notice: the following files are unavailable. Do not infer their contents. File names: ${JSON.stringify(missingAttachments)}]`
           : event.text,

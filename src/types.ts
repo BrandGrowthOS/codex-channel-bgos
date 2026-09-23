@@ -74,6 +74,16 @@ export interface InboundMessagePayload {
   turnState?: string;
   senderType?: "user" | "agent" | "system";
   senderGuardrail?: string;
+  /**
+   * The owner's per agent plan level, as the server labels it:
+   * `only_when_asked`, `risky_jobs` or `always`. Absent means the server did
+   * not send one (an older backend, or a channel that has no such setting).
+   *
+   * It rides the ENVELOPE rather than being read off the assistant row on
+   * purpose, and that is the same rule the share guardrail follows: the daemon
+   * offers, the server decides, the daemon never reads the owner's settings.
+   */
+  planPolicy?: string;
   chatKind?: string;
   senderUserId?: string;
   senderRelationship?: string;
@@ -209,6 +219,13 @@ export interface OutboundMessagePayload {
     | "tool_progress"
     | "event";
   approvalMeta?: ApprovalMeta;
+  /**
+   * How a row carrying `options` is drawn: chips in the thread ("inline",
+   * what every card here wants) or a modal that demands an answer. Declared
+   * on the payload because the plan card posts through `postMessage` rather
+   * than inlining its own body the way the `reply` tool does.
+   */
+  renderMode?: "inline" | "modal";
   /**
    * Renderable payload - required when messageType="event". The app draws the
    * card registered for `payload.kind` and falls back to the title plus the

@@ -68,6 +68,17 @@ export class SessionSettingsStore {
   get(chatId: number): SessionSettings {
     return { ...this.values[String(chatId)] };
   }
+  /**
+   * Every chat this store has a setting for, cleaned. The daemon reports each
+   * chat's session mode to BGOS at connect, and it cannot ask for a list it
+   * has no way to enumerate.
+   */
+  entries(): Array<[number, SessionSettings]> {
+    return Object.entries(this.values).map(([id, value]) => [
+      Number(id),
+      { ...value },
+    ]);
+  }
   set(chatId: number, value: SessionSettings): void {
     if (!Number.isSafeInteger(chatId) || chatId <= 0)
       throw new Error("Invalid chat identity.");

@@ -50,7 +50,11 @@ jobs:
           # HELD-FROM-LATEST line, then promote the already published package
           # by hand:
           #   npm dist-tag add codex-channel-bgos@<version> latest
-          HELD_FROM_LATEST="0.10.1"
+          # 0.11.0: the plan card. The app has to know the `plan_card`
+          # renderable, relabel the three `plan:` chip codes and read a chat's
+          # session mode off a column that ships with the stage 3 backend. It
+          # also inherits 0.10.1's approval hold. Held for both.
+          HELD_FROM_LATEST="0.10.1 0.11.0"
           DIST_TAG=latest
           for held in $HELD_FROM_LATEST; do
             if [ "$CURRENT" = "$held" ]; then

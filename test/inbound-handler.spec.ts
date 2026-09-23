@@ -75,3 +75,61 @@ describe("attachment delivery", () => {
     );
   });
 });
+
+describe("the owner's plan level on the envelope", () => {
+  /**
+   * The level is the server's to decide and the daemon's to repeat. It rides
+   * the inbound envelope for the same reason the share guardrail does: a
+   * daemon that read the assistant row would be the first breach of "the
+   * daemon offers, the server decides" (and there is a standing source guard
+   * against reading the LAST per agent setting, in agent-activity.spec.ts).
+   */
+  let home: string;
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "hoai-plan-envelope-"));
+    vi.stubEnv("CODEX_BGOS_HOME", home);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  async function dispatched(event: Record<string, unknown>) {
+    const dispatch = vi.fn(async () => {});
+    const handle = createInboundHandler({
+      outbound: { sendAgentError: vi.fn() } as any,
+      getRouteForAssistant: () => "codex-9",
+      getDispatch: () => dispatch,
+    });
+    await handle({
+      assistantId: 9,
+      userId: "test",
+      chatId: 1,
+      messageId: 3,
+      text: "do it",
+      messageType: "standard",
+      files: [],
+      ...event,
+    } as never);
+    return dispatch.mock.calls[0]![0] as { planPolicy?: string };
+  }
+
+  it("carries the level through to the turn", async () => {
+    expect((await dispatched({ planPolicy: "risky_jobs" })).planPolicy).toBe(
+      "risky_jobs",
+    );
+  });
+
+  it("drops it on a peer agent's message, exactly as the guardrail is dropped", async () => {
+    // The level is the OWNER's instruction about the owner's work. Another
+    // agent's message is not the owner speaking.
+    expect(
+      (await dispatched({ planPolicy: "always", senderType: "agent" }))
+        .planPolicy,
+    ).toBeUndefined();
+  });
+
+  it("omits it when the server sent none", async () => {
+    expect((await dispatched({})).planPolicy).toBeUndefined();
+  });
+});

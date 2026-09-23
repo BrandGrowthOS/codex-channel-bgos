@@ -76,6 +76,16 @@ export const HOAI_TOOL_DECLARATIONS = [
               properties: {
                 label: { type: 'string', description: 'Visible button text (user-facing).' },
                 value: { type: 'string', description: 'Stable identifier returned to you in the click callback_data.' },
+                style: {
+                  type: 'string',
+                  enum: ['default', 'success', 'danger', 'primary'],
+                  description:
+                    'Optional visual tier for this chip. "success" is the go-ahead, ' +
+                    '"danger" the destructive or refusing choice, "primary" the one ' +
+                    'you recommend, "default" (the default) neutral. Use it only when ' +
+                    'the choices genuinely differ in weight; three tinted chips read ' +
+                    'as noise. Clients that do not draw tiers show every chip neutral.',
+                },
               },
               required: ['label', 'value'],
             },
@@ -257,6 +267,108 @@ export const HOAI_TOOL_DECLARATIONS = [
           },
         },
         required: ['chat_id', 'questions'],
+      },
+    },
+{
+      name: 'propose_plan',
+      description:
+        'Propose a plan and WAIT for the owner to answer it before you change ' +
+        'anything. Posts a plan card in the BGOS chat: the title, the numbered ' +
+        'steps with the file each one touches, an optional check line, and three ' +
+        'buttons (Go ahead, Change the plan, Do not do this). ' +
+        'IT RETURNS IMMEDIATELY with the message id and does NOT block this turn: ' +
+        'end your turn after calling it. The answer arrives as an ordinary click ' +
+        'event that starts your NEXT turn, so there is no timeout and the owner ' +
+        'can answer tomorrow. ' +
+        'Change nothing on disk between proposing and Go ahead. Nothing in this ' +
+        'plugin enforces that; the card tells the owner so, and it is the one ' +
+        'promise this tool is for. ' +
+        'Call it when the owner typed /plan, when their per-agent plan policy ' +
+        'asks you to (it arrives on the turn framing), or when a job touches ' +
+        'several files or would be hard to undo. After Go ahead, do the work and ' +
+        'PUT your live steps as you go; the plan card itself just reads Approved.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          chat_id: {
+            type: 'string',
+            description:
+              'The chat to propose in. Pass back the chat_id from the channel ' +
+              'event you are answering.',
+          },
+          title: {
+            type: 'string',
+            description: 'What the plan does, in one line. Max 120 chars.',
+          },
+          summary: {
+            type: 'string',
+            description:
+              'Optional. One or two sentences of context under the title. Max 500 chars.',
+          },
+          steps: {
+            type: 'array',
+            description:
+              'The numbered steps, in order. 1 to 30. Each step is one action the ' +
+              'owner can picture, not a paragraph.',
+            maxItems: 30,
+            items: {
+              type: 'object',
+              properties: {
+                text: { type: 'string', description: 'The step. Max 200 chars.' },
+                file: {
+                  type: 'string',
+                  description:
+                    'Optional. The one file this step touches, shown in mono under it.',
+                },
+                check: {
+                  type: 'string',
+                  description: 'Optional. How this single step is verified.',
+                },
+                tag: {
+                  type: 'string',
+                  enum: ['unchanged', 'changed', 'dropped'],
+                  description:
+                    'Only on a REVISED plan: what happened to this step since the ' +
+                    'plan the owner asked you to change.',
+                },
+              },
+              required: ['text'],
+            },
+          },
+          files: {
+            type: 'array',
+            description:
+              'Optional. Every file the whole plan touches, for the one-line count. Max 30.',
+            maxItems: 30,
+            items: { type: 'string' },
+          },
+          check: {
+            type: 'string',
+            description:
+              'Optional. One sentence on how the finished work will be verified. Max 300 chars.',
+          },
+          door: {
+            type: 'string',
+            enum: ['typed', 'decided', 'mode'],
+            description:
+              'How this plan came about: "typed" (the owner typed /plan), ' +
+              '"decided" (you decided to plan first) or "mode" (plan mode is on). ' +
+              'Defaults to "decided".',
+          },
+          supersedes: {
+            type: 'number',
+            description:
+              'The message id of the plan card this one replaces, when the owner ' +
+              'asked you to change a plan. The old card keeps its steps, loses its ' +
+              'buttons and dims.',
+          },
+          note: {
+            type: 'string',
+            description:
+              'Only on a revision: one line on what changed and why. Max 300 chars.',
+          },
+        },
+        required: ['chat_id', 'title', 'steps'],
       },
     },
 {

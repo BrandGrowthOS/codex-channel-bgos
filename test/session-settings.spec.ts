@@ -161,3 +161,40 @@ describe("durable native settings", () => {
     ).toMatch(/^Conversation · /);
   });
 });
+
+describe("the chats this daemon has left in plan mode", () => {
+  /**
+   * Codex's mode is per chat and persisted, so a daemon that restarts comes
+   * back with chats still in plan mode and an app drawing no chip for any of
+   * them. The store had no way to enumerate itself, which is why it could not
+   * be reported at connect.
+   */
+  let home: string;
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "hoai-plan-store-"));
+  });
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("lists every chat it has a setting for, cleaned", () => {
+    const file = join(home, "settings.json");
+    const store = new SessionSettingsStore(file);
+    store.set(20, { mode: "plan", model: "one" });
+    store.set(21, { mode: "default", model: "one" });
+    store.set(22, { model: "one" });
+    expect(new SessionSettingsStore(file).entries().sort()).toEqual([
+      [20, { mode: "plan", model: "one" }],
+      [21, { mode: "default", model: "one" }],
+      [22, { model: "one" }],
+    ]);
+  });
+
+  it("gives back a copy, so a caller cannot edit the store through it", () => {
+    const store = new SessionSettingsStore(join(home, "settings.json"));
+    store.set(20, { mode: "plan" });
+    const entry = store.entries()[0]![1];
+    entry.mode = "default";
+    expect(store.get(20).mode).toBe("plan");
+  });
+});
