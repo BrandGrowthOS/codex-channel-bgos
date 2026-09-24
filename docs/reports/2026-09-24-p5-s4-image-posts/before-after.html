@@ -1,0 +1,1224 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>C-21 A picture a Codex agent makes appears in the chat by itself, before and after</title>
+<style>
+/* ==========================================================================
+   HOAI FIDELITY KIT  ·  hoai-kit.css
+   One stylesheet every Mission option mockup (A, B, C) is built on.
+   Every number here was read from the shipped components on main (f0bec034)
+   and checked against the real screenshots (mission-02, mission-07b).
+   Sources are named beside each block. Prefix: hk-
+   Rules: gold and neutrals only, no blue, no black filled buttons,
+   no dashes longer than a hyphen, no external requests.
+   ========================================================================== */
+
+/* The app font (Styrene B Regular, the one weight the app ships; 600 is the
+   browser's synthetic bold, exactly as in the real web build). Latin subset.
+   INTERNAL MOCKUPS ONLY: check the font licence before hosting this file on a
+   public site. */
+@font-face{
+  font-family:"Styrene-B";
+  font-style:normal;font-weight:400;font-display:block;
+  src:local("Styrene B Regular"),local("StyreneB-Regular"),
+      url("data:font/woff2;base64,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") format("woff2");
+}
+
+/* --------------------------------------------------------------------------
+   1. TOKENS  (commonConstants.ts, theme/tokens.ts, missionPalette.ts,
+      boardsTone.ts). Dark is the default.
+   -------------------------------------------------------------------------- */
+:root{
+  color-scheme:dark;
+  /* surfaces, the warm ladder */
+  --hk-canvas:#100F0D;          /* MAIN_BG, the chat stage */
+  --hk-rung:#161513;            /* SIDEBAR_BG, title bar, input rung */
+  --hk-raised:#1F1E1C;          /* DEEP, raised panel rung */
+  --hk-card:#2A2A2A;            /* CARD_BG: strip, sheet, cards */
+  --hk-hover:#323230;           /* ELEVATED: hover and pressed */
+  --hk-border:#3A3A3A;          /* BORDER */
+  /* ink */
+  --hk-ink:#FFFFFF;
+  --hk-ink-soft:rgba(255,255,255,.95);   /* assistant body text */
+  --hk-dim:rgba(255,255,255,.58);        /* DIM */
+  --hk-faint:rgba(255,255,255,.30);      /* FAINT: glyphs, rings, hairlines */
+  --hk-faint-text:rgba(255,255,255,.55); /* FAINT_TEXT */
+  --hk-nav:rgb(166,165,157);             /* sidebar row label */
+  --hk-nav-faint:rgba(166,165,157,.5);   /* sidebar section title */
+  /* brand gold */
+  --hk-gold:#FFD900;            /* buttons, send circle, user bubble */
+  --hk-gold-ink:#1A1A18;        /* text on gold */
+  --hk-gold-fill:#FFD900;       /* mission progress fill and ticks */
+  --hk-gold-text:#FFD900;       /* gold used as small text */
+  --hk-gold-wash:rgba(255,217,0,.12);
+  --hk-gold-line:rgba(255,217,0,.30);
+  --hk-mark:#FFD900;            /* logo, working emblem, bell: PRIMARY_1, which is charcoal in light */
+  --hk-voice-ink:rgba(255,217,0,.5);
+  /* state tones (gold and neutrals plus the three honest signals) */
+  --hk-amber:#F2B130;  --hk-amber-wash:rgba(242,177,48,.12);  --hk-amber-line:rgba(242,177,48,.30);
+  --hk-needs:#FF8A3B;  --hk-needs-wash:rgba(255,138,59,.14);  --hk-needs-line:rgba(255,138,59,.34);
+  --hk-done:#5FCF8F;   --hk-done-wash:rgba(95,207,143,.14);   --hk-done-line:rgba(95,207,143,.32);
+  --hk-error:#F0746A;  --hk-error-wash:rgba(240,116,106,.12); --hk-error-line:rgba(240,116,106,.34);
+  --hk-idle:#8A8A86;   --hk-idle-wash:rgba(255,255,255,.06);  --hk-idle-line:rgba(255,255,255,.12);
+  --hk-online:#4FB477;          /* presence dot */
+  /* glass (chat header, circles, composer pill, context card) */
+  --hk-glass-head:rgba(16,15,13,.72);
+  --hk-glass-head-border:rgba(255,255,255,.10);
+  --hk-glass-head-shadow:0 4px 16px rgba(0,0,0,.28);
+  --hk-glass-circle:rgba(22,21,19,.62);
+  --hk-glass-circle-border:rgba(255,255,255,.20);
+  --hk-circle-ink:rgba(255,255,255,.5);   /* measured: glyphs inside a desktop glass circle read at half strength */
+  --hk-action-ink:rgba(255,255,255,.82);  /* copy and retry under a message */
+  --hk-glass-pill:rgba(48,48,46,.55);
+  --hk-glass-pill-border:rgba(255,255,255,.10);
+  --hk-glass-card:rgba(24,23,21,.72);
+  --hk-glass-card-border:rgba(255,255,255,.08);
+  --hk-blur:blur(24px) saturate(160%);
+  /* small parts */
+  --hk-track:rgba(255,255,255,.10);
+  --hk-hairline:rgba(255,255,255,.07);
+  --hk-cell-off:rgba(255,255,255,.10);
+  --hk-tool-surface:#2F2E2C;  --hk-tool-border:#3A3A38;
+  --hk-event-surface:#2C2B29; --hk-event-border:rgba(255,255,255,.065);
+  --hk-code-bg:rgba(0,0,0,.28); --hk-code-border:rgba(255,255,255,.08);
+  --hk-code-ink:rgba(255,255,255,.8);
+  --hk-quote-bg:rgba(255,255,255,.06);
+  --hk-row-selected:rgba(255,255,255,.08);
+  --hk-row-selected-border:rgba(255,255,255,.12);
+  --hk-bubble:#FFD900;  --hk-bubble-ink:#1A1A18;
+  --hk-bubble-chip:rgba(255,255,255,.92); --hk-bubble-chip-ink:#201604;
+  --hk-scrim:rgba(0,0,0,.55);
+  --hk-shadow:rgba(0,0,0,.55);
+  --hk-page:#0A0908;            /* the mockup page behind the frames */
+  /* type */
+  --hk-font:"Styrene-B","Styrene B","Lexend","Segoe UI",system-ui,sans-serif;
+  --hk-font-sys:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  --hk-font-mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+  /* geometry */
+  --hk-sidebar-w:282px;
+  --hk-panel-w:547px;        /* 546 of view plus the 1 px seam, as measured */
+  --hk-titlebar-h:36px;
+}
+
+/* Light theme, by system setting or by html[data-theme=light]. */
+@media (prefers-color-scheme:light){
+  :root:not([data-theme="dark"]){
+    color-scheme:light;
+    --hk-canvas:#F5F5F3; --hk-rung:#EAEAE8; --hk-raised:#EAEAE8; --hk-card:#FFFFFF;
+    --hk-hover:#E8E8E6; --hk-border:#D0D0CE;
+    --hk-ink:#1A1A18; --hk-ink-soft:#1A1A18; --hk-dim:rgba(0,0,0,.62);
+    --hk-faint:rgba(0,0,0,.38); --hk-faint-text:rgba(0,0,0,.55);
+    --hk-nav:rgba(0,0,0,.62); --hk-nav-faint:rgba(0,0,0,.42);
+    --hk-gold-fill:#E0B500; --hk-gold-text:#8F7400; --hk-mark:#1A1A18; --hk-voice-ink:rgba(26,26,24,.55);
+    --hk-gold-wash:rgba(224,181,0,.16); --hk-gold-line:rgba(143,116,0,.35);
+    --hk-amber:#9A6B00; --hk-amber-wash:rgba(154,107,0,.12); --hk-amber-line:rgba(154,107,0,.30);
+    --hk-needs:#D9701C; --hk-needs-wash:rgba(217,112,28,.12); --hk-needs-line:rgba(217,112,28,.32);
+    --hk-done:#2E9E5B;  --hk-done-wash:rgba(46,158,91,.12);   --hk-done-line:rgba(46,158,91,.30);
+    --hk-error:#C0392B; --hk-error-wash:rgba(192,57,43,.10);  --hk-error-line:rgba(192,57,43,.30);
+    --hk-idle:#7A7A76;  --hk-idle-wash:rgba(0,0,0,.05);       --hk-idle-line:rgba(0,0,0,.10);
+    --hk-online:#2E9E66;
+    --hk-glass-head:rgba(252,252,250,.70); --hk-glass-head-border:rgba(0,0,0,.08);
+    --hk-glass-head-shadow:0 4px 14px rgba(0,0,0,.10);
+    --hk-glass-circle:rgba(252,252,250,.72); --hk-glass-circle-border:rgba(0,0,0,.14); --hk-circle-ink:rgba(26,26,24,.62); --hk-action-ink:rgba(26,26,24,.8);
+    --hk-glass-pill:rgba(252,252,250,.62); --hk-glass-pill-border:rgba(0,0,0,.08);
+    --hk-glass-card:rgba(252,252,250,.78); --hk-glass-card-border:rgba(0,0,0,.08);
+    --hk-track:rgba(0,0,0,.08); --hk-hairline:rgba(0,0,0,.08); --hk-cell-off:rgba(26,26,24,.10);
+    --hk-tool-surface:rgba(107,107,104,.07); --hk-tool-border:rgba(107,107,104,.18);
+    --hk-event-surface:rgba(107,107,104,.07); --hk-event-border:rgba(107,107,104,.18);
+    --hk-code-bg:#FFFFFF; --hk-code-border:#D0D0CE; --hk-code-ink:rgba(0,0,0,.7);
+    --hk-quote-bg:rgba(0,0,0,.06);
+    --hk-row-selected:rgba(0,0,0,.06); --hk-row-selected-border:rgba(0,0,0,.10);
+    --hk-bubble:#1A1A18; --hk-bubble-ink:#FFFFFF;   /* the shipped light bubble is charcoal; it is a message, not a button */
+    --hk-scrim:rgba(0,0,0,.40); --hk-shadow:rgba(0,0,0,.16);
+    --hk-page:#DEDEDB;
+  }
+}
+html[data-theme="light"]{
+  color-scheme:light;
+  --hk-canvas:#F5F5F3; --hk-rung:#EAEAE8; --hk-raised:#EAEAE8; --hk-card:#FFFFFF;
+  --hk-hover:#E8E8E6; --hk-border:#D0D0CE;
+  --hk-ink:#1A1A18; --hk-ink-soft:#1A1A18; --hk-dim:rgba(0,0,0,.62);
+  --hk-faint:rgba(0,0,0,.38); --hk-faint-text:rgba(0,0,0,.55);
+  --hk-nav:rgba(0,0,0,.62); --hk-nav-faint:rgba(0,0,0,.42);
+  --hk-gold-fill:#E0B500; --hk-gold-text:#8F7400; --hk-mark:#1A1A18; --hk-voice-ink:rgba(26,26,24,.55);
+  --hk-gold-wash:rgba(224,181,0,.16); --hk-gold-line:rgba(143,116,0,.35);
+  --hk-amber:#9A6B00; --hk-amber-wash:rgba(154,107,0,.12); --hk-amber-line:rgba(154,107,0,.30);
+  --hk-needs:#D9701C; --hk-needs-wash:rgba(217,112,28,.12); --hk-needs-line:rgba(217,112,28,.32);
+  --hk-done:#2E9E5B;  --hk-done-wash:rgba(46,158,91,.12);   --hk-done-line:rgba(46,158,91,.30);
+  --hk-error:#C0392B; --hk-error-wash:rgba(192,57,43,.10);  --hk-error-line:rgba(192,57,43,.30);
+  --hk-idle:#7A7A76;  --hk-idle-wash:rgba(0,0,0,.05);       --hk-idle-line:rgba(0,0,0,.10);
+  --hk-online:#2E9E66;
+  --hk-glass-head:rgba(252,252,250,.70); --hk-glass-head-border:rgba(0,0,0,.08);
+  --hk-glass-head-shadow:0 4px 14px rgba(0,0,0,.10);
+  --hk-glass-circle:rgba(252,252,250,.72); --hk-glass-circle-border:rgba(0,0,0,.14); --hk-circle-ink:rgba(26,26,24,.62); --hk-action-ink:rgba(26,26,24,.8);
+  --hk-glass-pill:rgba(252,252,250,.62); --hk-glass-pill-border:rgba(0,0,0,.08);
+  --hk-glass-card:rgba(252,252,250,.78); --hk-glass-card-border:rgba(0,0,0,.08);
+  --hk-track:rgba(0,0,0,.08); --hk-hairline:rgba(0,0,0,.08); --hk-cell-off:rgba(26,26,24,.10);
+  --hk-tool-surface:rgba(107,107,104,.07); --hk-tool-border:rgba(107,107,104,.18);
+  --hk-event-surface:rgba(107,107,104,.07); --hk-event-border:rgba(107,107,104,.18);
+  --hk-code-bg:#FFFFFF; --hk-code-border:#D0D0CE; --hk-code-ink:rgba(0,0,0,.7);
+  --hk-quote-bg:rgba(0,0,0,.06);
+  --hk-row-selected:rgba(0,0,0,.06); --hk-row-selected-border:rgba(0,0,0,.10);
+  --hk-bubble:#1A1A18; --hk-bubble-ink:#FFFFFF;
+  --hk-scrim:rgba(0,0,0,.40); --hk-shadow:rgba(0,0,0,.16);
+  --hk-page:#DEDEDB;
+}
+
+/* --------------------------------------------------------------------------
+   2. BASE
+   -------------------------------------------------------------------------- */
+.hk-stage,.hk-stage *{box-sizing:border-box}
+.hk-stage{
+  margin:0;background:var(--hk-page);color:var(--hk-ink);
+  font-family:var(--hk-font);font-size:15px;line-height:22px;font-weight:400;
+  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
+}
+.hk-stage p{margin:0}
+.hk-grow{flex:1 1 0;min-width:0}
+.hk-clip{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.hk-tnum{font-variant-numeric:tabular-nums}
+
+/* Tone scope. Put data-tone on a strip, a view, a tag or a callout.
+   live = On it (gold), warn = Paused (amber), needs = Needs you,
+   good = Done, bad = Did not finish, dim = Set aside, Waiting, steps only. */
+.hk-stage,[data-tone="live"]{--t-fill:var(--hk-gold-fill);--t-ink:var(--hk-gold-text);--t-wash:var(--hk-gold-wash);--t-line:var(--hk-gold-line)}
+[data-tone="warn"]{--t-fill:var(--hk-amber);--t-ink:var(--hk-amber);--t-wash:var(--hk-amber-wash);--t-line:var(--hk-amber-line)}
+[data-tone="needs"]{--t-fill:var(--hk-needs);--t-ink:var(--hk-needs);--t-wash:var(--hk-needs-wash);--t-line:var(--hk-needs-line)}
+[data-tone="good"]{--t-fill:var(--hk-done);--t-ink:var(--hk-done);--t-wash:var(--hk-done-wash);--t-line:var(--hk-done-line)}
+[data-tone="bad"]{--t-fill:var(--hk-error);--t-ink:var(--hk-error);--t-wash:var(--hk-error-wash);--t-line:var(--hk-error-line)}
+[data-tone="dim"]{--t-fill:var(--hk-idle);--t-ink:var(--hk-dim);--t-wash:var(--hk-idle-wash);--t-line:var(--hk-idle-line)}
+
+/* --------------------------------------------------------------------------
+   3. ICONS  (the app's own SVG paths, as masks, so they take currentColor)
+      <i class="hk-ico hk-ico--target" style="--s:15px"></i>
+   -------------------------------------------------------------------------- */
+.hk-ico{display:inline-block;flex:none;width:var(--s,16px);height:var(--s,16px);background:currentColor;
+  -webkit-mask:var(--i) center/contain no-repeat;mask:var(--i) center/contain no-repeat}
+.hk-ico--target{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Ccircle cx='12' cy='12' r='8.75' stroke='%23000' stroke-width='1.6'/%3E%3Ccircle cx='12' cy='12' r='4.75' stroke='%23000' stroke-width='1.6'/%3E%3Ccircle cx='12' cy='12' r='1.5' fill='%23000'/%3E%3C/svg%3E")}
+.hk-ico--chevron{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%23000' stroke-width='1' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")}
+.hk-ico--up{transform:rotate(180deg)} .hk-ico--right{transform:rotate(-90deg)} .hk-ico--left{transform:rotate(90deg)}
+.hk-ico--check{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Cpath d='M5 12.5l4.5 4.5L19 7' stroke='%23000' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")}
+.hk-ico--close{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Cpath d='M18 6L6 18M6 6l12 12' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")}
+.hk-ico--lock{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Crect x='5' y='11' width='14' height='9' rx='2.4' stroke='%23000' stroke-width='1.8'/%3E%3Cpath d='M8 11V8a4 4 0 0 1 8 0v3' stroke='%23000' stroke-width='1.8' stroke-linecap='round'/%3E%3C/svg%3E")}
+.hk-ico--bell{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Cpath d='M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9' stroke='%23000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M10.3 21a1.94 1.94 0 0 0 3.4 0' stroke='%23000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")}
+.hk-ico--boards{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Crect x='3.25' y='4.25' width='17.5' height='15.5' rx='2.5' stroke='%23000' stroke-width='1.6'/%3E%3Cpath d='M3.25 9h17.5M9.5 9v10.75M15 9v10.75' stroke='%23000' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E")}
+.hk-ico--globe{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Ccircle cx='12' cy='12' r='8.75' stroke='%23000' stroke-width='1.6'/%3E%3Cpath d='M3.25 12h17.5' stroke='%23000' stroke-width='1.6' stroke-linecap='round'/%3E%3Cellipse cx='12' cy='12' rx='3.6' ry='8.75' stroke='%23000' stroke-width='1.6'/%3E%3C/svg%3E")}
+.hk-ico--search{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Ccircle cx='11' cy='11' r='7' stroke='%23000' stroke-width='2'/%3E%3Cpath d='M21 21l-4-4' stroke='%23000' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E")}
+.hk-ico--gallery{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.5'%3E%3Crect x='3' y='3' width='7' height='7' rx='1.5'/%3E%3Crect x='14' y='3' width='7' height='7' rx='1.5'/%3E%3Crect x='3' y='14' width='7' height='7' rx='1.5'/%3E%3Crect x='14' y='14' width='7' height='7' rx='1.5'/%3E%3C/svg%3E")}
+.hk-ico--feedback{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Cpath d='M5.5 4.75h13a2.25 2.25 0 0 1 2.25 2.25v8a2.25 2.25 0 0 1-2.25 2.25H10l-4.25 3v-3H5.5A2.25 2.25 0 0 1 3.25 15V7A2.25 2.25 0 0 1 5.5 4.75z' stroke='%23000' stroke-width='1.6' stroke-linejoin='round'/%3E%3Ccircle cx='8.5' cy='11' r='1' fill='%23000'/%3E%3Ccircle cx='12' cy='11' r='1' fill='%23000'/%3E%3Ccircle cx='15.5' cy='11' r='1' fill='%23000'/%3E%3C/svg%3E")}
+.hk-ico--plus{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M3 8H13M8 13V3' stroke='%23000' stroke-width='1' stroke-linecap='round'/%3E%3C/svg%3E")}
+.hk-ico--send{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Cpath d='M12 4L12 20M5 11L12 4L19 11' stroke='%23000' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")}
+.hk-ico--voice{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 21 21' fill='none'%3E%3Cpath d='M5.44 8.72v3.57M7.94 7.52v5.95M10.44 6.33v8.34M12.94 7.52v5.95M15.44 8.72v3.57' stroke='%23000' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E")}
+.hk-ico--mic{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Crect x='9' y='3' width='6' height='11' rx='3' stroke='%23000' stroke-width='1.7'/%3E%3Cpath d='M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21' stroke='%23000' stroke-width='1.7' stroke-linecap='round'/%3E%3C/svg%3E")}
+.hk-ico--copy{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Cpath d='M16 12.9V17.1C16 20.6 14.6 22 11.1 22H6.9C3.4 22 2 20.6 2 17.1V12.9C2 9.4 3.4 8 6.9 8H11.1C14.6 8 16 9.4 16 12.9Z' stroke='%23000' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M22 6.9V11.1C22 14.6 20.6 16 17.1 16H16V12.9C16 9.4 14.6 8 11.1 8H8V6.9C8 3.4 9.4 2 12.9 2H17.1C20.6 2 22 3.4 22 6.9Z' stroke='%23000' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")}
+.hk-ico--retry{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Cpath d='M20 12a8 8 0 1 1-2.6-5.9M20 4v4.5h-4.5' stroke='%23000' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")}
+.hk-ico--pause{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Cpath d='M9 6v12M15 6v12' stroke='%23000' stroke-width='2.2' stroke-linecap='round'/%3E%3C/svg%3E")}
+.hk-ico--play{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M8 5.5v13l11-6.5z' fill='%23000'/%3E%3C/svg%3E")}
+.hk-ico--edit{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Cpath d='M4 20h4L19 9l-4-4L4 16v4zM13.5 6.5l4 4' stroke='%23000' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")}
+.hk-ico--list{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Cpath d='M9 7h11M9 12h11M9 17h11' stroke='%23000' stroke-width='1.7' stroke-linecap='round'/%3E%3Ccircle cx='4.75' cy='7' r='1.25' fill='%23000'/%3E%3Ccircle cx='4.75' cy='12' r='1.25' fill='%23000'/%3E%3Ccircle cx='4.75' cy='17' r='1.25' fill='%23000'/%3E%3C/svg%3E")}
+.hk-ico--clock{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Ccircle cx='12' cy='12' r='8.75' stroke='%23000' stroke-width='1.6'/%3E%3Cpath d='M12 7.5V12l3 2' stroke='%23000' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")}
+.hk-ico--more{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='5.5' cy='12' r='1.6' fill='%23000'/%3E%3Ccircle cx='12' cy='12' r='1.6' fill='%23000'/%3E%3Ccircle cx='18.5' cy='12' r='1.6' fill='%23000'/%3E%3C/svg%3E")}
+.hk-ico--grid{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23000'%3E%3Crect x='3' y='3' width='4.6' height='4.6' rx='1'/%3E%3Crect x='9.7' y='3' width='4.6' height='4.6' rx='1'/%3E%3Crect x='16.4' y='3' width='4.6' height='4.6' rx='1'/%3E%3Crect x='3' y='9.7' width='4.6' height='4.6' rx='1'/%3E%3Crect x='9.7' y='9.7' width='4.6' height='4.6' rx='1'/%3E%3Crect x='16.4' y='9.7' width='4.6' height='4.6' rx='1'/%3E%3Crect x='3' y='16.4' width='4.6' height='4.6' rx='1'/%3E%3Crect x='9.7' y='16.4' width='4.6' height='4.6' rx='1'/%3E%3Crect x='16.4' y='16.4' width='4.6' height='4.6' rx='1'/%3E%3C/svg%3E")}
+.hk-ico--calendar{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Crect x='3.75' y='5.25' width='16.5' height='15' rx='2.5' stroke='%23000' stroke-width='1.6'/%3E%3Cpath d='M3.75 10h16.5M8 3v4M16 3v4' stroke='%23000' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E")}
+.hk-ico--chat{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Cpath d='M5.5 4.75h13a2.25 2.25 0 0 1 2.25 2.25v8a2.25 2.25 0 0 1-2.25 2.25H10l-4.25 3v-3H5.5A2.25 2.25 0 0 1 3.25 15V7A2.25 2.25 0 0 1 5.5 4.75z' stroke='%23000' stroke-width='1.6' stroke-linejoin='round'/%3E%3C/svg%3E")}
+.hk-ico--people{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.6' stroke-linecap='round'%3E%3Ccircle cx='12' cy='9' r='3'/%3E%3Cpath d='M6.5 19a5.5 5.5 0 0 1 11 0'/%3E%3Ccircle cx='5' cy='8' r='2'/%3E%3Ccircle cx='19' cy='8' r='2'/%3E%3Cpath d='M2 16.5a3.5 3.5 0 0 1 3.5-3M22 16.5a3.5 3.5 0 0 0-3.5-3'/%3E%3C/svg%3E")}
+.hk-ico--swap{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Cpath d='M4 8.5h15M15.5 5l3.5 3.5-3.5 3.5M20 15.5H5M8.5 12L5 15.5 8.5 19' stroke='%23000' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")}
+.hk-ico--bookmark{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Cpath d='M6.5 3.75h11v16.5L12 16.5l-5.5 3.75z' stroke='%23000' stroke-width='1.6' stroke-linejoin='round'/%3E%3C/svg%3E")}
+.hk-ico--gear{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23000' fill-rule='evenodd'%3E%3Cpath d='M10.3 2h3.4l.5 2.6 1.7.7 2.2-1.5 2.4 2.4-1.5 2.2.7 1.7 2.6.5v3.4l-2.6.5-.7 1.7 1.5 2.2-2.4 2.4-2.2-1.5-1.7.7-.5 2.6h-3.4l-.5-2.6-1.7-.7-2.2 1.5-2.4-2.4 1.5-2.2-.7-1.7L2 13.7v-3.4l2.6-.5.7-1.7-1.5-2.2 2.4-2.4 2.2 1.5 1.7-.7zM12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z'/%3E%3C/svg%3E")}
+.hk-ico--sidebar{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Crect x='3.75' y='4.75' width='16.5' height='14.5' rx='2.5' stroke='%23000' stroke-width='1.6'/%3E%3Cpath d='M9.5 4.75v14.5' stroke='%23000' stroke-width='1.6'/%3E%3C/svg%3E")}
+.hk-ico--menu{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Cpath d='M4 7h16M4 12h16M4 17h16' stroke='%23000' stroke-width='1.7' stroke-linecap='round'/%3E%3C/svg%3E")}
+.hk-ico--logo{--i:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512.35 512.26'%3E%3Cpath d='M333.14,343.5c-42.62,37.65-105.73,39.01-150.07,3.23-40.95-33.05-54.68-89.68-33.38-137.72,3.58-8.08-.06-17.55-8.16-21.13-8.08-3.58-17.55.07-21.13,8.15-27.16,61.28-9.66,133.49,42.55,175.62,56.54,45.62,137.03,43.89,191.39-4.14,6.63-5.86,7.26-15.98,1.4-22.61-.61-.68-1.26-1.3-1.95-1.86-5.97-4.82-14.71-4.79-20.66.46'/%3E%3Cpath d='M98.73,129.09c-35.26,43.7-50.84,100.65-42.75,156.24.61,4.16,2.76,7.7,5.79,10.15,3.35,2.7,7.78,4.06,12.37,3.39,8.76-1.28,14.81-9.4,13.53-18.15-6.81-46.8,6.3-94.73,35.98-131.51,58.96-73.07,166.38-84.55,239.45-25.59,24.62,19.86,43.14,46.04,53.61,75.7,2.94,8.34,12.09,12.72,20.44,9.78,8.34-2.94,12.72-12.09,9.77-20.43-12.43-35.27-34.47-66.37-63.7-89.96-86.81-70.05-214.43-56.42-284.49,30.4'/%3E%3Cpath d='M247.5,107.94c-36.66,2.15-71.01,17.66-96.73,43.66-6.22,6.29-6.17,16.43.12,22.65.39.39.8.75,1.22,1.09,6.32,5.1,15.59,4.68,21.43-1.21,42.11-42.56,109.07-46.26,155.74-8.59,41.33,33.35,54.89,90.36,32.97,138.64-3.66,8.06-.09,17.56,7.96,21.21,8.06,3.66,17.55.09,21.21-7.96,27.96-61.59,10.68-134.3-42.02-176.82-28.8-23.24-64.98-34.84-101.9-32.67'/%3E%3Cpath d='M442.39,239.33c-8.84.04-15.98,7.25-15.94,16.1.12,23.82-4.63,46.92-14.09,68.65-6.07,13.93-14.04,27.05-23.68,39-58.96,73.07-166.37,84.54-239.44,25.58-24.19-19.52-42.55-45.18-53.09-74.22-3.01-8.31-12.2-12.61-20.52-9.59-8.32,3.02-12.6,12.21-9.59,20.52,12.54,34.53,34.35,65.04,63.08,88.22,86.81,70.05,214.43,56.42,284.48-30.39,11.44-14.18,20.9-29.76,28.12-46.32,11.26-25.83,16.89-53.28,16.76-81.59-.03-5.01-2.35-9.48-5.96-12.4-2.77-2.23-6.3-3.56-10.13-3.55'/%3E%3Cpath d='M366.47,24.87C315.34.43,256.55-6.28,200.91,5.99c-56.51,12.44-107.68,44.16-144.09,89.28C17.57,143.91-2.52,205.04.25,267.41c2.74,61.82,27.63,120.44,70.07,165.06.5.52,1.02,1,1.56,1.43,6.16,4.97,15.19,4.73,21.08-.87,6.41-6.09,6.66-16.23.57-22.64C16.47,329.38,11.4,202.54,81.74,115.38c32.32-40.06,75.92-67.06,126.06-78.11,48.7-10.73,100.15-4.87,144.86,16.49,7.98,3.82,17.54.44,21.36-7.55,3.26-6.83,1.26-14.8-4.38-19.36-.96-.77-2.01-1.44-3.17-1.99'/%3E%3Cpath d='M444.69,106.4c-7.27,5.03-9.09,15.01-4.06,22.28,26.95,38.96,41.01,86.65,39.59,134.28-1.46,49.2-18.62,95.51-49.62,133.93-64.87,80.39-175.46,106.1-268.96,62.53-8.02-3.73-17.55-.26-21.28,7.76-3.18,6.81-1.15,14.7,4.45,19.22.99.8,2.09,1.5,3.3,2.06,50.95,23.74,109.36,29.97,164.49,17.56,56.84-12.79,106.25-43.58,142.92-89.01,35.43-43.91,55.04-96.84,56.71-153.08,1.62-54.41-14.46-108.91-45.26-153.45-.9-1.3-1.95-2.42-3.12-3.36-5.39-4.35-13.19-4.84-19.16-.7'/%3E%3Ccircle cx='258.38' cy='256.71' r='44.45'/%3E%3C/svg%3E")}
+
+/* --------------------------------------------------------------------------
+   4. BUTTONS  (MissionView ActionButton, SessionControls, MissionRail return,
+      sidebar Send feedback). Gold, glass, outlined and quiet text only.
+      There is NO black filled button in this kit, in either theme.
+   -------------------------------------------------------------------------- */
+.hk-btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;flex:none;
+  min-height:36px;padding:0 16px;border-radius:999px;border:1px solid transparent;background:transparent;
+  font-family:var(--hk-font);font-size:13px;line-height:19px;font-weight:600;color:var(--hk-ink);
+  white-space:nowrap;cursor:pointer;text-decoration:none}
+.hk-btn--gold{background:var(--hk-gold);border-color:var(--hk-gold);color:var(--hk-gold-ink)}
+.hk-btn--mission{background:var(--hk-gold-fill);border-color:var(--hk-gold-fill);color:var(--hk-gold-ink)} /* Mark done: follows the mission gold per theme */
+.hk-btn--outline{border-color:var(--hk-border);color:var(--hk-ink)}
+.hk-btn--outline-dim{border-color:var(--hk-border);color:var(--hk-dim)}
+.hk-btn--glass{background:var(--hk-glass-circle);border-color:var(--hk-glass-circle-border);color:var(--hk-ink);
+  -webkit-backdrop-filter:var(--hk-blur);backdrop-filter:var(--hk-blur)}
+.hk-btn--wash{background:var(--hk-gold-wash);border-color:var(--hk-gold-line);color:var(--hk-ink)}
+.hk-btn--wash .hk-ico{color:var(--hk-gold-text)}
+.hk-btn--text{min-height:32px;padding:0 8px;gap:4px;font-size:12px;line-height:16px;color:var(--hk-dim)}
+.hk-btn--text:hover{background:var(--hk-hover)}
+.hk-btn--danger{border-color:var(--hk-error-line);color:var(--hk-error)}
+/* The compact pair inside the context card: system font, 13 px, 7 by 14. */
+.hk-btn--sm{min-height:0;padding:7px 14px;font-family:var(--hk-font-sys);font-size:13px;line-height:15px}
+.hk-btn--sm.hk-btn--gold{font-weight:700}
+.hk-btn[disabled],.hk-btn.is-disabled{opacity:.45;cursor:default}
+
+/* Glass and accent circles (CircleSideButton). 44 in the header, 38 in the
+   composer, 40 on a phone header. */
+.hk-circle{display:inline-flex;align-items:center;justify-content:center;flex:none;
+  width:var(--d,38px);height:var(--d,38px);border-radius:50%;
+  background:var(--hk-glass-circle);border:1px solid var(--hk-glass-circle-border);color:var(--hk-circle-ink);
+  -webkit-backdrop-filter:var(--hk-blur);backdrop-filter:var(--hk-blur);
+  box-shadow:0 1.5px 4px rgba(0,0,0,.13);position:relative;overflow:hidden}
+.hk-circle--44{--d:44px} .hk-circle--40{--d:40px} .hk-circle--38{--d:38px}
+.hk-circle--active{border-color:rgba(255,217,0,.55);background:linear-gradient(rgba(255,217,0,.14),rgba(255,217,0,.14)),var(--hk-glass-circle)}
+.hk-circle--gold{background:var(--hk-gold);border-color:transparent;color:var(--hk-gold-ink);box-shadow:0 1.5px 4px rgba(0,0,0,.16)}
+.hk-circle--gold::before{content:"";position:absolute;left:-3%;top:-52%;width:106%;height:62%;border-radius:999px;background:rgba(255,255,255,.16)}
+.hk-circle--voice{color:var(--hk-voice-ink)}           /* the dim gold waveform */
+/* Stop control while a turn runs (SessionStopButton): gold outlined square. */
+.hk-stop{display:inline-flex;align-items:center;justify-content:center;flex:none;width:38px;height:38px;
+  border-radius:12px;border:1.5px solid var(--hk-gold);background:rgba(255,217,0,.08)}
+.hk-stop::before{content:"";width:13px;height:13px;border-radius:3px;background:var(--hk-gold)}
+
+/* Avatars: initials on the app's earthy avatar colours. No photos of people. */
+.hk-avatar{display:inline-flex;align-items:center;justify-content:center;flex:none;
+  width:var(--d,36px);height:var(--d,36px);border-radius:50%;background:var(--a,#7C6F5D);color:#fff;
+  font-size:calc(var(--d,36px) * .4);line-height:1;font-weight:600;overflow:hidden}
+.hk-avatar--48{--d:48px} .hk-avatar--36{--d:36px} .hk-avatar--26{--d:26px}
+.hk-avatar[data-agent="data"]{--a:#7C6F5D} .hk-avatar[data-agent="ava"]{--a:#A37B6F}
+.hk-avatar[data-agent="nova"]{--a:#6B8E7F} .hk-avatar[data-agent="codey"]{--a:#8F8A7A}
+.hk-avatar[data-agent="ares"]{--a:#9F8170} .hk-avatar[data-agent="you"]{--a:#45413A}
+
+/* --------------------------------------------------------------------------
+   5. DESKTOP WINDOW FRAME  (TitleBar.tsx 36 px on Windows, drawer layout
+      "seam pick C": a sidebar coloured stage, the scene an elevated card with
+      a 14 px radius on the sidebar side)
+   -------------------------------------------------------------------------- */
+.hk-window{display:flex;flex-direction:column;width:var(--w,1468px);height:var(--h,900px);
+  background:var(--hk-rung);border:1px solid var(--hk-border);border-radius:10px;overflow:hidden;
+  box-shadow:0 24px 60px rgba(0,0,0,.45);position:relative}
+.hk-titlebar{display:flex;align-items:center;gap:6px;flex:none;height:var(--hk-titlebar-h);padding:0 0 0 10px;
+  background:var(--hk-rung);color:var(--hk-dim)}
+.hk-titlebar__btn{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:6px}
+.hk-titlebar__nav{display:inline-flex;align-items:center;height:28px;padding:0 4px;gap:2px;border-radius:8px;
+  border:1px solid var(--hk-border);background:var(--hk-glass-circle)}
+.hk-titlebar__win{display:flex;align-items:center;margin-left:auto;height:100%}
+.hk-titlebar__win span{display:inline-flex;align-items:center;justify-content:center;width:46px;height:100%;color:var(--hk-dim)}
+.hk-titlebar__win span::before{content:"";display:block;width:10px;height:1px;background:currentColor}                 /* minimise */
+.hk-titlebar__win span:nth-child(2)::before{width:9px;height:9px;background:none;border:1px solid currentColor}        /* maximise */
+.hk-titlebar__win span:nth-child(3)::before{width:14px;height:14px;-webkit-mask:var(--x) center/contain no-repeat;mask:var(--x) center/contain no-repeat;
+  --x:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Cpath d='M18 6L6 18M6 6l12 12' stroke='%23000' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E")} /* close */
+.hk-window__body{display:flex;flex:1 1 0;min-height:0}
+
+/* Sidebar, 282 px (SIDEBAR_EXPANDED_DEFAULT). */
+.hk-sidebar{display:flex;flex-direction:column;flex:none;width:var(--hk-sidebar-w);background:var(--hk-rung);min-height:0}
+.hk-sidebar__brand{display:flex;align-items:center;gap:8px;padding:20px 16px 18px;color:var(--hk-ink);
+  font-size:17px;line-height:22px;font-weight:600;letter-spacing:-.4px}
+.hk-sidebar__brand .hk-ico{color:var(--hk-mark)}
+.hk-sidebar__brand em{font-style:normal;font-weight:400;color:var(--hk-dim)}
+.hk-sidebar__nav{padding:0 12px 10px}
+.hk-navrow{display:flex;align-items:center;gap:10px;height:39px;padding:0 12px;border-radius:8px;
+  color:var(--hk-nav);font-size:14px;line-height:20px;font-weight:500;letter-spacing:-.2px}
+.hk-navrow .hk-ico{--s:18px}
+.hk-navrow.is-active{color:var(--hk-gold-text)}
+.hk-navrow.is-selected{background:var(--hk-row-selected);border:1px solid var(--hk-row-selected-border)}
+.hk-countpill{margin-left:auto;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--hk-gold);
+  color:var(--hk-gold-ink);font-size:11px;line-height:18px;font-weight:700;text-align:center}
+.hk-sidebar__rule{height:1px;background:var(--hk-hairline);margin:0}
+.hk-sidebar__section{padding:12px 12px 0;flex:1 1 0;min-height:0;overflow:hidden}
+.hk-sidebar__label{padding:4px 10px 6px;color:var(--hk-nav-faint);font-size:11px;line-height:14px;font-weight:500;
+  letter-spacing:.5px;text-transform:uppercase}
+.hk-sidebar__beam{height:1px;margin:0 10px 4px;background:linear-gradient(90deg,var(--hk-gold-line),var(--hk-hairline) 40%)}
+/* Agent row (AssistantChatsWidget): 48 px avatar, 13 px name, 11 px status. */
+.hk-agentrow{display:flex;align-items:center;gap:8px;padding:4px 10px;border-radius:6px;border:1px solid transparent}
+.hk-agentrow.is-selected{background:var(--hk-row-selected);border-color:var(--hk-row-selected-border)}
+.hk-agentrow__name{color:var(--hk-ink);font-size:13px;line-height:19px;letter-spacing:-.2px}
+.hk-agentrow__sub{display:flex;align-items:center;gap:5px;margin-top:1px;color:var(--hk-dim);font-size:11px;line-height:14px;letter-spacing:-.1px}
+.hk-agentrow__sub[data-state="needs"]{color:var(--hk-needs)}
+.hk-agentrow__sub[data-state="working"]{color:var(--hk-gold-text)}
+.hk-agentrow__sub[data-state="done"]{color:var(--hk-done)}
+.hk-dot{display:inline-block;flex:none;width:7px;height:7px;border-radius:50%;background:var(--c,var(--hk-online))}
+.hk-dot--gold{--c:var(--hk-gold-fill)} .hk-dot--needs{--c:var(--hk-needs)} .hk-dot--idle{--c:var(--hk-idle)} .hk-dot--done{--c:var(--hk-done)}
+.hk-avatar-wrap{position:relative;flex:none;display:inline-flex}
+.hk-avatar-wrap[data-ring="needs"]::before{content:"";position:absolute;inset:-4px;border-radius:50%;border:1.5px solid var(--hk-needs);opacity:.75}
+.hk-avatar-wrap[data-ring="working"]::before{content:"";position:absolute;inset:-4px;border-radius:50%;border:1.5px solid var(--hk-gold-fill);opacity:.55}
+.hk-badge-count{position:absolute;right:-2px;top:-3px;min-width:16px;height:16px;padding:0 4px;border-radius:8px;
+  background:var(--hk-needs);color:#1A1A18;font-size:10px;line-height:16px;font-weight:700;text-align:center;border:2px solid var(--hk-rung);box-sizing:content-box}
+.hk-newagent{display:flex;align-items:center;gap:10px;padding:12px 16px;color:var(--hk-nav);font-size:14px;line-height:20px;font-weight:500;letter-spacing:-.2px}
+.hk-newagent b{color:var(--hk-gold);font-weight:400;font-size:18px;line-height:20px}
+.hk-sidebar__foot{padding:12px 16px 16px;border-top:1px solid var(--hk-hairline)}
+.hk-sidebar__foot .hk-btn{width:100%;min-height:38px;border-radius:10px}
+.hk-userrow{display:flex;align-items:center;gap:10px;margin-top:12px}
+.hk-userrow__name{color:var(--hk-ink);font-size:13px;line-height:16px;font-weight:600;letter-spacing:-.2px}
+.hk-userrow__plan{color:var(--hk-dim);font-size:10px;line-height:13px;margin-top:3px}
+.hk-squarebtn{display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:10px;
+  border:1px solid var(--hk-hairline);background:var(--hk-raised);color:var(--hk-dim)}
+
+/* The scene: chat column plus the optional side panel. */
+.hk-scene{display:flex;flex:1 1 0;min-width:0;min-height:0;background:var(--hk-canvas);
+  border-top-left-radius:14px;border-bottom-left-radius:14px;overflow:hidden;
+  box-shadow:-12px 0 28px rgba(0,0,0,.35),inset 1px 0 0 rgba(255,255,255,.04);position:relative}
+.hk-scene--bare{border-radius:0;box-shadow:none}     /* a cropped chat pane, as in the real screenshots */
+
+/* --------------------------------------------------------------------------
+   6. CHAT COLUMN  (chat/[id].tsx web branch). Stack order, top to bottom:
+      header row, pinned message bar, pending ask banner, MISSION STRIP,
+      transcript, then the dock: context card, context gauge, composer row,
+      disclaimer. The resting banner floats 8 px above the dock.
+   -------------------------------------------------------------------------- */
+.hk-chat{display:flex;flex-direction:column;flex:1 1 0;min-width:0;min-height:0;background:var(--hk-canvas);position:relative}
+.hk-topstack{flex:none;position:relative;z-index:3}
+/* Header row: margin 8 top, 12 sides, 4 px gaps. Pill 52 tall, circles 44. */
+.hk-header{display:flex;align-items:center;gap:4px;margin:8px 12px 0}
+.hk-header__pill{display:flex;align-items:center;flex:1 1 0;min-width:0;height:52px;padding:5px 8px 5px 7px;border-radius:16px;
+  background:var(--hk-glass-head);border:1px solid var(--hk-glass-head-border);box-shadow:var(--hk-glass-head-shadow);
+  -webkit-backdrop-filter:var(--hk-blur);backdrop-filter:var(--hk-blur)}
+.hk-header__id{display:flex;align-items:center;gap:3px;min-width:0;padding:2px}
+.hk-header__meta{display:flex;flex-direction:column;min-width:0;margin-top:-2px}
+.hk-header__name{color:var(--hk-ink);font-size:15px;line-height:18px;letter-spacing:-.3px}
+.hk-header__status{display:flex;align-items:center;gap:6px;margin-top:1px;min-width:0;color:var(--hk-dim);font-size:13px;line-height:16px}
+.hk-header__status>span:last-child{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.hk-header__status--thinking{color:var(--hk-gold-text)}
+.hk-header__actions{display:flex;align-items:center;gap:4px;flex:none}
+.hk-header__actions .hk-ico{--s:19px}
+
+/* THE MISSION STRIP (MissionStrip.tsx). Fixed height: 40 on a wide desktop
+   window, 38 on a phone or a narrow window. Opaque card background, hairline
+   under it, a 2 px progress line riding the bottom edge. One tap target. */
+.hk-strip{display:flex;flex-direction:column;justify-content:center;position:relative;flex:none;width:100%;height:38px;
+  background:var(--hk-card);border-bottom:1px solid var(--hk-border);overflow:hidden;cursor:pointer}
+.hk-strip--wide{height:40px}
+.hk-strip__in{display:flex;align-items:center;gap:8px;min-width:0;padding:0 14px}
+.hk-strip--wide .hk-strip__in{width:100%;max-width:760px;margin:0 auto;padding:0 20px}
+.hk-strip__icon{--s:15px;color:var(--t-ink)}
+.hk-strip__title{flex:0 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  color:var(--hk-ink);font-size:13px;line-height:19px;font-weight:600}
+.hk-strip__count{flex:none;color:var(--hk-dim);font-size:12px;line-height:16px;font-variant-numeric:tabular-nums}
+.hk-strip__next{flex:1 1 0;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--hk-dim);font-size:12px;line-height:16px}
+.hk-strip__spacer{flex:1 1 0}
+.hk-strip__tag{display:inline-flex;align-items:center;gap:4px;flex:none;padding:3px 8px;border-radius:999px;
+  background:var(--t-wash);color:var(--t-ink);font-size:11px;line-height:14px;font-weight:600}
+.hk-strip__tag .hk-ico{--s:11px}
+.hk-strip__chev{display:inline-flex;justify-content:center;flex:none;width:14px;color:var(--hk-faint)}
+.hk-strip__chev .hk-ico{--s:11px}
+.hk-strip.is-open .hk-strip__chev{color:var(--t-ink)}
+.hk-strip__line{position:absolute;left:0;bottom:0;height:2px;width:var(--pct,0%);background:var(--t-fill);border-radius:1px}
+
+/* The connection pill that floats at the trailing edge (Live Link). It is what
+   covers the right end of the strip in the real screenshots. Optional. */
+.hk-livepill{position:absolute;right:17px;top:66px;z-index:4;display:inline-flex;align-items:center;gap:10px;height:33px;padding:0 13px;
+  border-radius:999px;background:var(--hk-glass-circle);border:1px solid var(--hk-glass-head-border);
+  -webkit-backdrop-filter:var(--hk-blur);backdrop-filter:var(--hk-blur);color:var(--hk-ink);font-size:13.5px;line-height:16px}
+.hk-livepill::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--hk-amber);opacity:.6}
+
+/* Transcript. 16 px gutters, 820 max. The newest message rests at the bottom. */
+.hk-transcript{display:flex;flex-direction:column;justify-content:flex-end;flex:1 1 0;min-height:0;overflow:hidden;position:relative;
+  padding-right:12px}   /* the desktop scrollbar gutter: real content sits 6 px left of centre */
+.hk-transcript::before{content:"";position:absolute;left:0;right:0;top:0;height:28px;z-index:2;pointer-events:none;
+  background:linear-gradient(var(--hk-canvas),transparent)}
+.hk-transcript__in{display:flex;flex-direction:column;width:100%;max-width:820px;margin:0 auto;padding:16px 16px 22px}  /* flex, so margins never collapse: React Native has no margin collapsing */
+.hk-msg{display:flex;flex-direction:column;width:100%;margin-bottom:8px}
+/* Assistant: no bubble. A head row (name 12 px 600, time 10 px), then prose. */
+.hk-msg__head{display:flex;align-items:baseline;gap:8px;margin-bottom:4px}
+.hk-msg__name{color:var(--hk-dim);font-size:12px;line-height:16px;font-weight:600}
+.hk-msg__time{color:var(--hk-faint-text);font-size:10px;line-height:13px;font-variant-numeric:tabular-nums}
+.hk-msg__body{color:var(--hk-ink-soft);font-size:15px;line-height:22px;padding:2px 0;overflow-wrap:anywhere}
+.hk-msg__body p + p{margin-top:10px}
+.hk-msg__body a{color:var(--hk-gold-text);text-decoration:none}
+.hk-msg__body ul{margin:6px 0;padding-left:20px} .hk-msg__body li::marker{color:var(--hk-gold-text)}
+.hk-msg__actions{display:flex;align-items:center;gap:8px;height:32px;margin-top:2px;color:var(--hk-action-ink)}
+.hk-msg__actions span{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:6px}
+.hk-msg__actions .hk-ico{--s:16px}
+/* Code shell inside an assistant message. */
+.hk-code{margin:0 0 8px;padding:22px 24px;border-radius:10px;border:1px solid var(--hk-code-border);background:var(--hk-code-bg);
+  color:var(--hk-code-ink);font-family:var(--hk-font-mono);font-size:12.5px;line-height:20px;white-space:pre-wrap;overflow:hidden}
+/* Quoted reply header above a reply. */
+.hk-quote{display:flex;gap:10px;margin-bottom:6px;padding:6px 10px;border-radius:8px;background:var(--hk-quote-bg);color:var(--hk-dim);font-size:12px;line-height:15px}
+.hk-quote::before{content:"";flex:none;width:3px;border-radius:2px;background:var(--hk-ink)}
+/* User: the gold bubble, right aligned, 18 px corners with the bottom right cut to 4. */
+.hk-msg--user{display:flex;flex-direction:column;align-items:flex-end}
+.hk-bubble{max-width:80%;min-width:72px;padding:10px 14px;border-radius:18px 18px 4px 18px;background:var(--hk-bubble);color:var(--hk-bubble-ink);
+  font-size:15px;line-height:22px;overflow-wrap:anywhere}
+.hk-bubble--command{min-width:0;padding:8px 12px;border-radius:14px}
+.hk-bubble__chip{display:inline-block;padding:2px 8px;border-radius:6px;background:var(--hk-bubble-chip);color:var(--hk-bubble-chip-ink);
+  font-family:var(--hk-font-mono);font-size:14px;line-height:20px;font-weight:600}
+.hk-msg__ticks{margin-top:4px;color:var(--hk-faint-text);font-size:11px;line-height:13px}
+
+/* Tool card (ToolProgressBubble). The running tone is GOLD here: the shipped
+   sky tone is dropped on purpose, no blue anywhere. */
+.hk-toolcard{width:92%;max-width:720px;margin:4px auto;padding:12px;border-radius:14px;background:var(--hk-tool-surface);border:1px solid var(--hk-tool-border)}
+.hk-toolcard__head{display:flex;align-items:center;gap:8px;min-width:0}
+.hk-toolcard__mark{flex:none;width:8px;height:8px;border-radius:50%;border:1.5px solid var(--hk-done)}
+.hk-toolcard__mark--live{width:14px;height:14px;border:0;background:
+  radial-gradient(circle 2px at 12px 7px,var(--hk-gold-fill) 98%,transparent),
+  radial-gradient(circle 2px at 4.5px 11.3px,var(--hk-gold-fill) 98%,transparent),
+  radial-gradient(circle 2px at 4.5px 2.7px,var(--hk-gold-fill) 98%,transparent)}
+.hk-toolcard__title{flex:none;color:var(--hk-dim);font-family:var(--hk-font-sys);font-size:11px;line-height:14px;font-weight:600;letter-spacing:.4px;text-transform:uppercase}
+.hk-toolcard__meta{flex:1 1 0;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--hk-ink);opacity:.78;font-family:var(--hk-font-sys);font-size:12.5px;line-height:16px}
+.hk-toolcard__chip{flex:none;color:var(--hk-faint-text);font-family:var(--hk-font-mono);font-size:10px;letter-spacing:.4px}
+.hk-toolcard__chip--live{color:var(--hk-gold-text);text-transform:uppercase;font-size:9.5px;letter-spacing:.6px}
+.hk-toolcard__rows{margin-top:8px}
+.hk-toolrow{display:flex;align-items:center;gap:8px;padding:4px 0;min-width:0;border-top:1px solid var(--hk-hairline)}
+.hk-toolrow:first-child{border-top:0}
+.hk-toolrow__name{flex:none;min-width:90px;color:var(--hk-ink);opacity:.85;font-family:var(--hk-font-mono);font-size:12px}
+.hk-toolrow__args{flex:1 1 0;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--hk-dim);font-family:var(--hk-font-mono);font-size:11.5px}
+.hk-toolrow__state{flex:none;width:16px;text-align:center;color:var(--hk-done);font-size:11px;line-height:14px}
+.hk-toolrow.is-running .hk-toolrow__name{color:var(--hk-gold-text);opacity:1}
+.hk-toolrow.is-running .hk-toolrow__state::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--hk-gold-fill)}
+
+/* Event card (EventCard): 32 px icon chip, tiny uppercase eyebrow, 13.5 title. */
+.hk-eventcard{display:flex;align-items:center;gap:12px;width:92%;max-width:680px;margin:4px auto;padding:12px 16px;border-radius:14px;
+  background:var(--hk-event-surface);border:1px solid var(--hk-event-border)}
+.hk-eventcard__chip{display:inline-flex;align-items:center;justify-content:center;flex:none;width:32px;height:32px;border-radius:16px;
+  background:var(--hk-idle-wash);border:1px solid var(--hk-hairline);color:var(--hk-dim)}
+.hk-eventcard__eyebrow{display:flex;align-items:center;gap:7px;color:var(--hk-faint-text);font-family:var(--hk-font-sys);font-size:9.5px;line-height:13px;font-weight:700;letter-spacing:1.3px;text-transform:uppercase}
+.hk-eventcard__eyebrow::before{content:"";width:4px;height:4px;border-radius:50%;background:var(--c,var(--hk-gold-fill))}
+.hk-eventcard__title{color:var(--hk-ink);opacity:.92;font-family:var(--hk-font-sys);font-size:13.5px;line-height:18px;font-weight:600;letter-spacing:.1px}
+.hk-eventcard__peek{margin-top:1px;color:var(--hk-faint-text);font-family:var(--hk-font-sys);font-size:12px;line-height:16px}
+.hk-eventcard__chev{flex:none;width:24px;text-align:center;color:var(--hk-faint);font-size:11px}
+
+/* Scheduled activity card (ScheduledActivityBundle): lives in the transcript. */
+.hk-sched{display:flex;align-items:center;gap:12px;width:100%;max-width:680px;min-height:48px;margin:8px auto;padding:10px 14px;
+  border-radius:16px;background:var(--hk-card);border:1px solid var(--hk-border)}
+.hk-sched .hk-ico--bell{--s:18px;color:var(--hk-mark)}
+.hk-sched__title{color:var(--hk-ink);font-size:12px;line-height:14px}
+.hk-sched__sub{margin-top:4px;color:var(--hk-dim);font-size:11px;line-height:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hk-sched .hk-ico--chevron{--s:16px;color:var(--hk-dim)}
+
+/* THE WORKING LINE (LoadingIndicator): 22 px gold emblem, italic 14 px dim
+   text, 16 px under it. It accepts ONE fixed label in place of the cycling
+   "Thinking..." copy, which is where a live step can ride. */
+.hk-working{display:flex;align-items:center;gap:8px;width:100%;margin-bottom:16px}
+.hk-working .hk-ico--logo{--s:22px;color:var(--hk-mark)}
+.hk-working__text{flex:1 1 0;min-width:0;color:var(--hk-dim);font-size:14px;line-height:20px;font-style:italic}
+.hk-working__text b{font-weight:400;color:var(--hk-ink)}
+.hk-working--slow .hk-working__text{color:var(--hk-gold-text)}
+
+/* THE DOCK above and around the composer (ChatWrapper webFloatingInput,
+   MessageInput container, SessionControlsStrip). */
+.hk-dock{flex:none;position:relative;z-index:3;padding:0 8px}
+.hk-dock__in{width:100%;max-width:820px;margin:0 auto;padding:6px 12px 10px}
+.hk-dock__stack{display:flex;flex-direction:column;gap:8px;padding:0 4px 6px}
+/* Context window card: glass, 18 px corners, system font like the real one. */
+.hk-ctxcard{padding:12px 14px;border-radius:18px;background:var(--hk-glass-card);border:1px solid var(--hk-glass-card-border);
+  -webkit-backdrop-filter:blur(30px) saturate(160%);backdrop-filter:blur(30px) saturate(160%);overflow:hidden}
+.hk-ctxcard__text{margin-bottom:10px;color:var(--hk-ink);font-family:var(--hk-font-sys);font-size:13px;line-height:19px}
+.hk-ctxcard__btns{display:flex;justify-content:flex-end;gap:8px}
+/* Context gauge: amber label, 26 cells, a mark at 80 percent. */
+.hk-gauge{padding:0 6px}
+.hk-gauge__labels{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;font-family:var(--hk-font-sys)}
+.hk-gauge__pct{color:#F2B130;font-size:11px;line-height:14px;font-weight:600;font-variant-numeric:tabular-nums}
+.hk-gauge__src{display:inline-flex;align-items:center;gap:8px;color:var(--hk-dim);font-size:10px;line-height:14px;font-weight:500}
+.hk-gauge__src b{font-size:14px;line-height:14px;font-weight:600;padding:0 2px}
+.hk-gauge__cells{display:flex;gap:3px;height:6px;position:relative}
+.hk-gauge__cells i{flex:1 1 0;border-radius:2px;background:var(--hk-cell-off)}
+.hk-gauge__cells i.on{background:var(--hk-gold)}
+.hk-gauge__cells::after{content:"";position:absolute;left:80%;top:-3px;bottom:-3px;width:2px;border-radius:1px;background:rgba(242,177,48,.55)}
+/* Resting banner (RestingBanner): card, a calm gold border, one tight line. */
+.hk-resting{display:flex;align-items:center;gap:4px;padding:4px 6px 4px 12px;border-radius:14px;background:var(--hk-card);border:1px solid #FFD54A;
+  color:var(--hk-ink);font-size:13px;line-height:18px;letter-spacing:-.1px}
+.hk-resting span{color:var(--hk-dim)}
+.hk-resting__x{display:inline-flex;align-items:center;justify-content:center;flex:none;width:28px;height:28px;margin-left:auto;color:var(--hk-dim);font-size:18px;line-height:20px}
+/* Composer row: glass attach circle, glass input pill, then the gold send
+   circle (when there is a draft) or the stop square, then the voice circle. */
+.hk-composer{display:flex;align-items:flex-end;gap:8px}
+.hk-composer .hk-ico--plus{--s:20px} .hk-composer .hk-ico--send,.hk-composer .hk-ico--voice,.hk-composer .hk-ico--mic{--s:18px}
+.hk-pill{display:flex;align-items:center;flex:1 1 0;min-width:0;min-height:38px;padding:4px 12px;border-radius:20px;
+  background:var(--hk-glass-pill);border:1px solid var(--hk-glass-pill-border);box-shadow:0 6px 20px rgba(0,0,0,.16);
+  -webkit-backdrop-filter:var(--hk-blur);backdrop-filter:var(--hk-blur)}
+.hk-pill__input{flex:1 1 0;min-width:0;padding:0 4px;color:var(--hk-ink);font-size:15px;line-height:22px}
+.hk-pill__input--placeholder{color:var(--hk-dim)}
+.hk-pill__input--command{color:var(--hk-gold-text)}
+.hk-disclaimer{padding-bottom:4px;text-align:center;color:var(--hk-dim);opacity:.7;font-size:11px;line-height:14px}
+
+/* --------------------------------------------------------------------------
+   7. SIDE PANEL AND THE MISSION VIEW  (MissionRail.tsx, MissionView.tsx)
+   -------------------------------------------------------------------------- */
+.hk-panel{display:flex;flex-direction:column;flex:none;width:var(--hk-panel-w);min-height:0;background:var(--hk-canvas);border-left:1px solid var(--hk-border)}
+.hk-panel__head{display:flex;align-items:center;gap:8px;flex:none;min-height:52px;padding:0 8px 0 16px;border-bottom:1px solid var(--hk-border)}
+.hk-panel__head>.hk-ico{--s:15px;color:var(--hk-gold-text)}
+.hk-panel__title{color:var(--hk-ink);font-size:14px;line-height:20px;font-weight:600}
+.hk-panel__head .hk-btn--text .hk-ico{--s:15px}
+
+.hk-mv{display:flex;flex-direction:column;flex:1 1 0;min-height:0}
+.hk-mv__scroll{flex:1 1 0;min-height:0;overflow:hidden;padding-bottom:12px}
+.hk-mv__head{padding:16px 16px 12px}
+.hk-mv__eyebrow-row{display:flex;align-items:center;gap:8px}
+.hk-mv__eyebrow-row>.hk-ico{--s:14px;color:var(--t-ink)}
+.hk-eyebrow{color:var(--hk-dim);font-size:11px;line-height:14px;font-weight:600;letter-spacing:.6px;text-transform:uppercase}
+.hk-badge{display:inline-flex;align-items:center;gap:4px;margin-left:auto;padding:4px 8px;border-radius:999px;background:var(--t-wash);color:var(--t-ink);
+  font-size:11px;line-height:14px;font-weight:600}
+.hk-mv__title{margin-top:8px;color:var(--hk-ink);font-size:18px;line-height:24px;font-weight:600}
+.hk-mv__meta{margin-top:3px;color:var(--hk-dim);font-size:12px;line-height:16px;font-variant-numeric:tabular-nums}
+.hk-bar{height:6px;margin-top:12px;border-radius:3px;background:var(--hk-track);overflow:hidden}
+.hk-bar>i{display:block;height:100%;width:var(--pct,0%);border-radius:3px;background:var(--t-fill)}
+/* View only note, for a person the agent is shared with. */
+.hk-note{display:flex;align-items:center;gap:8px;margin:0 12px 8px;padding:8px 12px;border-radius:10px;background:var(--hk-idle-wash);color:var(--hk-dim);font-size:13px;line-height:19px}
+.hk-note .hk-ico{--s:14px}
+/* NEXT UP callout: tone wash, 1 px tone line, 10 px corners. */
+.hk-next{margin:0 12px 8px;padding:8px 12px;border-radius:10px;background:var(--t-wash);border:1px solid var(--t-line)}
+.hk-next__label{color:var(--t-ink);font-size:11px;line-height:14px;font-weight:600;letter-spacing:.6px;text-transform:uppercase}
+.hk-next__name{margin-top:2px;color:var(--hk-ink);font-size:14px;line-height:20px;font-weight:600}
+.hk-next__when{margin-top:1px;color:var(--hk-dim);font-size:12px;line-height:16px}
+.hk-next__actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+/* Sections: MINI GOALS, SUMMARY, LATEST. */
+.hk-mv__section{padding:8px 12px 0}
+.hk-label{padding:0 4px 4px;color:var(--hk-dim);font-size:11px;line-height:14px;font-weight:600;letter-spacing:.6px;text-transform:uppercase}
+.hk-goal{display:flex;align-items:flex-start;gap:12px;padding:8px 4px}
+.hk-tick{display:inline-flex;align-items:center;justify-content:center;flex:none;width:20px;height:20px;margin-top:1px;border-radius:50%;
+  border:1.5px solid var(--hk-faint);color:var(--hk-gold-ink)}
+.hk-tick .hk-ico{--s:12px;display:none}
+.hk-tick.is-done{background:var(--t-fill);border-color:var(--t-fill)}
+.hk-tick.is-done .hk-ico{display:inline-block}
+.hk-goal__text{flex:1 1 0;min-width:0}
+.hk-goal__name{color:var(--hk-ink);font-size:14px;line-height:20px;font-weight:500}
+.hk-goal.is-done .hk-goal__name{color:var(--hk-dim)}
+.hk-goal__when{color:var(--hk-dim);font-size:12px;line-height:16px}
+.hk-summary{padding:0 4px 4px;color:var(--hk-ink);font-size:13px;line-height:19px}
+.hk-feed{display:flex;align-items:flex-start;gap:8px;padding:0 4px 4px}
+.hk-feed__time{flex:none;width:58px;white-space:nowrap;color:var(--hk-faint);font-size:12px;line-height:16px;font-variant-numeric:tabular-nums}
+.hk-feed__text{flex:1 1 0;min-width:0;color:var(--hk-dim);font-size:12px;line-height:16px}
+/* Action bar: Mark done (gold), Pause, Resume (outlined). Pills, 36 tall. */
+.hk-mv__actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;flex:none;padding:12px;border-top:1px solid var(--hk-hairline)}
+/* Empty state. */
+.hk-mv__empty{display:flex;flex-direction:column;align-items:flex-start;justify-content:center;gap:8px;flex:1 1 0;padding:24px 20px}
+.hk-mv__empty .hk-ico{--s:26px;color:var(--hk-dim)}
+.hk-mv__empty-title{color:var(--hk-ink);font-size:15px;line-height:22px;font-weight:600}
+.hk-mv__empty-body{color:var(--hk-dim);font-size:13px;line-height:19px}
+
+/* --------------------------------------------------------------------------
+   8. PHONE FRAME, 390 wide  (native shell header, the 38 px strip, the native
+      composer, and the Mission view in a bottom sheet: AnimatedSheet, 88
+      percent cap, 20 px top corners, a 38 by 4 grab handle, a labelled Close)
+   -------------------------------------------------------------------------- */
+.hk-phone{display:flex;flex-direction:column;flex:none;width:390px;height:var(--h,844px);border-radius:44px;overflow:hidden;position:relative;
+  background:var(--hk-canvas);border:1px solid var(--hk-border);box-shadow:0 0 0 7px #050505,0 0 0 8px var(--hk-border),0 24px 60px rgba(0,0,0,.45)}
+.hk-phone__status{display:flex;align-items:center;justify-content:space-between;flex:none;height:44px;padding:8px 28px 0;color:var(--hk-ink);
+  font-family:var(--hk-font-sys);font-size:14px;line-height:18px;font-weight:600}
+.hk-phone__status i{display:inline-block;width:24px;height:11px;border-radius:3px;border:1px solid var(--hk-dim);position:relative;opacity:.9}
+.hk-phone__status i::before{content:"";position:absolute;inset:1.5px;right:5px;border-radius:1.5px;background:var(--hk-ink)}
+.hk-phone__home{position:absolute;left:50%;bottom:8px;width:134px;height:5px;margin-left:-67px;border-radius:3px;background:var(--hk-ink);opacity:.55;z-index:9}
+.hk-phone .hk-header{margin:4px 10px 6px;gap:6px}
+.hk-phone .hk-header__pill{height:44px;padding:3px 8px 3px 4px;border-radius:22px}
+.hk-phone .hk-header__name{font-size:15px;line-height:18px}
+.hk-phone .hk-header__status{font-size:12px;line-height:15px}
+.hk-phone .hk-header__actions{gap:6px} .hk-phone .hk-header__actions .hk-ico{--s:18px}
+.hk-phone .hk-transcript{padding-right:0}
+.hk-phone .hk-transcript__in{padding:12px 16px 16px}
+.hk-phone .hk-dock{padding:0 2px}
+.hk-phone .hk-dock__in{padding:6px 12px 26px}
+.hk-phone .hk-circle{color:var(--hk-ink)}
+.hk-phone .hk-circle--gold{color:var(--hk-gold-ink)}
+.hk-phone .hk-composer .hk-circle{--d:42px}
+.hk-phone .hk-pill{min-height:42px;border-radius:21px}
+.hk-phone .hk-disclaimer{display:none}
+/* Sheet and its scrim. Put both inside .hk-phone (or any position:relative host). */
+.hk-scrim{position:absolute;inset:0;z-index:10;background:var(--hk-scrim);-webkit-backdrop-filter:blur(5px);backdrop-filter:blur(5px)}
+.hk-sheet{position:absolute;left:0;right:0;bottom:0;z-index:11;display:flex;flex-direction:column;max-height:88%;
+  background:var(--hk-card);border-radius:20px 20px 0 0;overflow:hidden;box-shadow:0 -12px 28px rgba(0,0,0,.35)}
+.hk-sheet__head{position:relative;flex:none;min-height:36px}
+.hk-sheet__grab{width:38px;height:4px;margin:8px auto 0;border-radius:2px;background:var(--hk-border)}
+.hk-sheet__close{position:absolute;top:4px;right:8px;min-height:0;padding:4px;border-radius:10px}
+.hk-sheet__close .hk-ico{--s:15px}
+.hk-sheet .hk-mv{flex:0 1 auto}
+.hk-sheet .hk-mv__scroll{flex:0 1 auto}
+.hk-sheet .hk-mv__actions{padding-bottom:28px}
+
+/* --------------------------------------------------------------------------
+   9. SHARED PROPOSAL PRIMITIVES. NOT SHIPPED. Every option (A, B, C) needs
+      these same few parts, so they live here once and look the same in all
+      three. They reuse the shipped anatomy: a struck row is a goal row, a
+      step is a smaller goal row, a reason callout is a NEXT UP callout.
+   -------------------------------------------------------------------------- */
+/* Crossed-off row: struck through AND dimmed (today a done row only dims). */
+.hk-goal.is-struck .hk-goal__name{color:var(--hk-dim);text-decoration:line-through;text-decoration-thickness:1px;text-decoration-color:var(--hk-faint)}
+/* Filled state tag (Needs you). The plain tag stays a soft wash. */
+.hk-strip__tag--filled,.hk-badge--filled{background:var(--t-fill);color:var(--hk-gold-ink)}
+.hk-strip__tag--outline,.hk-badge--outline{background:transparent;box-shadow:inset 0 0 0 1px var(--t-line)}
+/* "Now:" emphasis inside the strip's trailing text. */
+.hk-strip__next b{font-weight:600;color:var(--hk-ink)}
+.hk-strip__quiet{flex:none;color:var(--hk-faint-text);font-size:12px;line-height:16px}
+/* Steps, the live layer: small rows under a label that carries a "live" chip. */
+.hk-livechip{display:inline-flex;align-items:center;gap:5px;margin-left:6px;padding:1px 7px;border-radius:999px;background:var(--hk-gold-wash);
+  color:var(--hk-gold-text);font-size:10px;line-height:13px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;vertical-align:1px}
+.hk-livechip::before{content:"";width:5px;height:5px;border-radius:50%;background:var(--hk-gold-fill)}
+.hk-step{display:flex;align-items:flex-start;gap:10px;padding:5px 4px}
+.hk-step__mark{display:inline-flex;align-items:center;justify-content:center;flex:none;width:16px;height:16px;margin-top:2px;border-radius:50%;
+  border:1.5px solid var(--hk-faint);color:var(--hk-gold-ink)}
+.hk-step__mark .hk-ico{--s:10px;display:none}
+.hk-step__text{flex:1 1 0;min-width:0;color:var(--hk-ink);font-size:13px;line-height:19px}
+.hk-step__hint{color:var(--hk-faint-text);font-size:12px;line-height:16px}
+.hk-step.is-done .hk-step__mark{background:var(--hk-faint);border-color:transparent}
+.hk-step.is-done .hk-step__mark .hk-ico{display:inline-block;color:var(--hk-canvas)}
+.hk-step.is-done .hk-step__text{color:var(--hk-dim);text-decoration:line-through;text-decoration-thickness:1px;text-decoration-color:var(--hk-faint)}
+.hk-step.is-now .hk-step__mark{border-color:var(--hk-gold-fill);box-shadow:inset 0 0 0 3px var(--hk-canvas),inset 0 0 0 8px var(--hk-gold-fill)}
+.hk-sheet .hk-step.is-now .hk-step__mark{box-shadow:inset 0 0 0 3px var(--hk-card),inset 0 0 0 8px var(--hk-gold-fill)}
+.hk-step.is-now .hk-step__text{font-weight:600}
+.hk-step.is-wait .hk-step__text{color:var(--hk-dim)}
+.hk-step--more{padding-left:30px;color:var(--hk-faint-text);font-size:12px;line-height:16px}
+/* One-line collapsed Steps row ("Step 3 of 5 · Adding tests"). */
+.hk-stepline{display:flex;align-items:center;gap:8px;margin:0 12px 8px;padding:8px 12px;border-radius:10px;background:var(--hk-idle-wash);
+  border:1px solid var(--hk-idle-line);color:var(--hk-ink);font-size:13px;line-height:19px}
+.hk-stepline .hk-ico{--s:14px;color:var(--hk-dim)}
+.hk-stepline .hk-ico--chevron{margin-left:auto;--s:11px;color:var(--hk-faint)}
+
+/* --------------------------------------------------------------------------
+   10. MOCKUP PAGE HELPERS (not app surfaces): boards, rows, captions, slots.
+       Inline style attributes in a mockup should carry ONLY the parameters
+       this kit reads: --w --h --pct --s --d --gap --pad --max.
+   -------------------------------------------------------------------------- */
+.hk-board{display:flex;flex-direction:column;gap:var(--gap,24px);padding:var(--pad,24px)}
+.hk-section{padding:0 12px}
+.hk-section--end{padding-bottom:24px}
+.hk-row{display:flex;align-items:flex-start;gap:var(--gap,16px)}
+.hk-row>*,.hk-col>*,.hk-board>*{--gap:initial}   /* a gap set on a parent never leaks into a nested row or column */
+.hk-row--center{align-items:center} .hk-row--wrap{flex-wrap:wrap}
+.hk-col{display:flex;flex-direction:column;gap:var(--gap,14px);max-width:var(--max,none)}
+.hk-caption{color:var(--hk-dim);font-size:12px;line-height:16px}
+.hk-caption b{color:var(--hk-ink);font-weight:600}
+.hk-caption--head{padding:2px 4px 6px}
+.hk-phone-slot{padding:7px;flex:none}
+.hk-window--crop{border:0;border-radius:0;box-shadow:none}
+.hk-swatch{background:var(--hk-canvas);border:1px solid var(--hk-border);border-radius:14px;padding:8px 0 10px}
+.hk-swatch>*+*{margin-top:10px}
+.hk-swatch>.hk-next,.hk-swatch>.hk-stepline{margin-bottom:0}
+</style>
+</head>
+<body class="hk-stage">
+<!-- C-21 before / after (P5 stage 4). Built by build.py in the lane's scratchpad, which inlines the HOAI fidelity kit
+     above this body. Page chrome classes are prefixed c21-. No kit class is restyled. No long dashes anywhere.
+     Every frame in sections 01 and 02 is the real app (vtdist-base, one build for both sides). The only drawn parts are
+     the "When it appears" strip (section 03) and the refusal line (section 05), on the kit. -->
+<style>
+  /* ---------- page chrome (report scaffold, always dark) ---------- */
+  body.hk-stage{background:#0b0a09}
+  .c21-page{max-width:1560px;margin:0 auto;padding:40px 28px 72px;display:flex;flex-direction:column;gap:44px}
+  .c21-head{display:flex;flex-direction:column;gap:10px;max-width:960px}
+  .c21-tag{display:inline-flex;align-self:flex-start;align-items:center;min-height:22px;padding:3px 10px;border-radius:999px;text-align:center;
+    background:#FFD900;color:#1A1A18;font-size:11px;line-height:14px;font-weight:600;letter-spacing:.3px}
+  .c21-h1{margin:0;color:#fff;font-size:30px;line-height:38px;font-weight:600;letter-spacing:-.3px}
+  .c21-lede{margin:0;color:rgba(255,255,255,.72);font-size:16px;line-height:25px}
+  .c21-lede b{color:#fff;font-weight:600}
+  .c21-asks{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:6px}
+  .c21-ask{border:1px solid rgba(255,217,0,.28);background:rgba(255,217,0,.06);border-radius:14px;padding:14px 16px;min-width:0}
+  .c21-ask b{display:block;color:#FFD900;font-size:11px;line-height:14px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px}
+  .c21-ask span{color:rgba(255,255,255,.82);font-size:13.5px;line-height:20px}
+  .c21-ask code{font-family:var(--hk-font-mono);font-size:12px;color:#fff}
+
+  .c21-sec{display:flex;flex-direction:column;gap:16px;min-width:0}
+  .c21-sec__head{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .c21-sec__n{color:#FFD900;font-size:12px;line-height:16px;font-weight:600;letter-spacing:.5px;font-variant-numeric:tabular-nums}
+  .c21-sec__t{margin:0;color:#fff;font-size:19px;line-height:26px;font-weight:600}
+  .c21-sec__d{margin:0;color:rgba(255,255,255,.6);font-size:14px;line-height:21px;max-width:920px}
+  .c21-sec__d b{color:rgba(255,255,255,.88);font-weight:600}
+  .c21-sec__d code{font-family:var(--hk-font-mono);font-size:12px;color:rgba(255,255,255,.85)}
+
+  /* dark / light switch, one per section */
+  .c21-switch{display:inline-flex;margin-left:auto;padding:3px;border-radius:999px;border:1px solid #2a2926;background:#141311;gap:2px}
+  .c21-switch button{appearance:none;border:0;cursor:pointer;font:inherit;height:26px;padding:0 12px;border-radius:999px;background:transparent;
+    color:rgba(255,255,255,.62);font-size:12px;line-height:16px;font-weight:600}
+  .c21-switch button.is-on{background:#FFD900;color:#1A1A18}
+  .c21-switch button:focus-visible{outline:2px solid #FFD900;outline-offset:2px}
+
+  .c21-label{display:flex;align-items:center;gap:8px;color:rgba(255,255,255,.55);font-size:12px;line-height:16px;font-weight:600;letter-spacing:.5px;text-transform:uppercase}
+  .c21-label i{display:inline-block;width:7px;height:7px;border-radius:50%;background:rgba(255,255,255,.35);flex:none}
+  .c21-label.is-after{color:#FFD900} .c21-label.is-after i{background:#FFD900}
+  .c21-col{display:flex;flex-direction:column;gap:10px;min-width:0}
+
+  /* real frames */
+  .c21-shots{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px;align-items:start}
+  .c21-shots--3{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .c21-shots--4{grid-template-columns:repeat(4,minmax(0,1fr))}
+  .c21-shots figure{margin:0;display:flex;flex-direction:column;gap:8px;min-width:0}
+  .c21-shots img{width:100%;height:auto;display:block;border-radius:12px;border:1px solid #2a2926;background:#000}
+  .c21-shots .is-after img{border-color:rgba(255,217,0,.35)}
+  .c21-shots figcaption{color:rgba(255,255,255,.62);font-size:12.5px;line-height:18px}
+  .c21-shots figcaption b{color:#fff;font-weight:600}
+  .c21-shots figcaption code{font-family:var(--hk-font-mono);font-size:11px;color:rgba(255,255,255,.75)}
+  /* a short crop (a tool row, a single post) takes a full row of its own, picture left and caption beside it, so it never leaves a hole under itself in the tall frame grid */
+  .c21-shots figure.is-wide{grid-column:1/-1;flex-direction:row;align-items:flex-start;gap:20px}
+  .c21-shots figure.is-wide img{flex:none;width:auto;max-width:min(100%,var(--mw,740px))}
+  .c21-shots figure.is-wide figcaption{flex:1 1 0;min-width:0;padding-top:4px}
+  .c21-proofline{color:rgba(255,255,255,.45);font-size:12px;line-height:18px}
+  .c21-proofline code{font-family:var(--hk-font-mono);font-size:11px;color:rgba(255,255,255,.62)}
+
+  /* a drawn frame scaled to its column: --fw is the design width, JS sets the scale and the height */
+  .c21-fit{position:relative;width:100%;overflow:hidden}
+  .c21-fit__in{position:absolute;left:0;top:0;transform-origin:0 0;width:var(--fw)}
+
+  /* ---------- theme scopes for the drawn parts: build.py fills these from the kit's own token blocks ---------- */
+  .c21-dark{color-scheme:dark;
+  /* surfaces, the warm ladder */
+  --hk-canvas:#100F0D;          /* MAIN_BG, the chat stage */
+  --hk-rung:#161513;            /* SIDEBAR_BG, title bar, input rung */
+  --hk-raised:#1F1E1C;          /* DEEP, raised panel rung */
+  --hk-card:#2A2A2A;            /* CARD_BG: strip, sheet, cards */
+  --hk-hover:#323230;           /* ELEVATED: hover and pressed */
+  --hk-border:#3A3A3A;          /* BORDER */
+  /* ink */
+  --hk-ink:#FFFFFF;
+  --hk-ink-soft:rgba(255,255,255,.95);   /* assistant body text */
+  --hk-dim:rgba(255,255,255,.58);        /* DIM */
+  --hk-faint:rgba(255,255,255,.30);      /* FAINT: glyphs, rings, hairlines */
+  --hk-faint-text:rgba(255,255,255,.55); /* FAINT_TEXT */
+  --hk-nav:rgb(166,165,157);             /* sidebar row label */
+  --hk-nav-faint:rgba(166,165,157,.5);   /* sidebar section title */
+  /* brand gold */
+  --hk-gold:#FFD900;            /* buttons, send circle, user bubble */
+  --hk-gold-ink:#1A1A18;        /* text on gold */
+  --hk-gold-fill:#FFD900;       /* mission progress fill and ticks */
+  --hk-gold-text:#FFD900;       /* gold used as small text */
+  --hk-gold-wash:rgba(255,217,0,.12);
+  --hk-gold-line:rgba(255,217,0,.30);
+  --hk-mark:#FFD900;            /* logo, working emblem, bell: PRIMARY_1, which is charcoal in light */
+  --hk-voice-ink:rgba(255,217,0,.5);
+  /* state tones (gold and neutrals plus the three honest signals) */
+  --hk-amber:#F2B130;  --hk-amber-wash:rgba(242,177,48,.12);  --hk-amber-line:rgba(242,177,48,.30);
+  --hk-needs:#FF8A3B;  --hk-needs-wash:rgba(255,138,59,.14);  --hk-needs-line:rgba(255,138,59,.34);
+  --hk-done:#5FCF8F;   --hk-done-wash:rgba(95,207,143,.14);   --hk-done-line:rgba(95,207,143,.32);
+  --hk-error:#F0746A;  --hk-error-wash:rgba(240,116,106,.12); --hk-error-line:rgba(240,116,106,.34);
+  --hk-idle:#8A8A86;   --hk-idle-wash:rgba(255,255,255,.06);  --hk-idle-line:rgba(255,255,255,.12);
+  --hk-online:#4FB477;          /* presence dot */
+  /* glass (chat header, circles, composer pill, context card) */
+  --hk-glass-head:rgba(16,15,13,.72);
+  --hk-glass-head-border:rgba(255,255,255,.10);
+  --hk-glass-head-shadow:0 4px 16px rgba(0,0,0,.28);
+  --hk-glass-circle:rgba(22,21,19,.62);
+  --hk-glass-circle-border:rgba(255,255,255,.20);
+  --hk-circle-ink:rgba(255,255,255,.5);   /* measured: glyphs inside a desktop glass circle read at half strength */
+  --hk-action-ink:rgba(255,255,255,.82);  /* copy and retry under a message */
+  --hk-glass-pill:rgba(48,48,46,.55);
+  --hk-glass-pill-border:rgba(255,255,255,.10);
+  --hk-glass-card:rgba(24,23,21,.72);
+  --hk-glass-card-border:rgba(255,255,255,.08);
+  --hk-blur:blur(24px) saturate(160%);
+  /* small parts */
+  --hk-track:rgba(255,255,255,.10);
+  --hk-hairline:rgba(255,255,255,.07);
+  --hk-cell-off:rgba(255,255,255,.10);
+  --hk-tool-surface:#2F2E2C;  --hk-tool-border:#3A3A38;
+  --hk-event-surface:#2C2B29; --hk-event-border:rgba(255,255,255,.065);
+  --hk-code-bg:rgba(0,0,0,.28); --hk-code-border:rgba(255,255,255,.08);
+  --hk-code-ink:rgba(255,255,255,.8);
+  --hk-quote-bg:rgba(255,255,255,.06);
+  --hk-row-selected:rgba(255,255,255,.08);
+  --hk-row-selected-border:rgba(255,255,255,.12);
+  --hk-bubble:#FFD900;  --hk-bubble-ink:#1A1A18;
+  --hk-bubble-chip:rgba(255,255,255,.92); --hk-bubble-chip-ink:#201604;
+  --hk-scrim:rgba(0,0,0,.55);
+  --hk-shadow:rgba(0,0,0,.55);
+  --hk-page:#0A0908;            /* the mockup page behind the frames */
+  /* type */
+  --hk-font:"Styrene-B","Styrene B","Lexend","Segoe UI",system-ui,sans-serif;
+  --hk-font-sys:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  --hk-font-mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+  /* geometry */
+  --hk-sidebar-w:282px;
+  --hk-panel-w:547px;        /* 546 of view plus the 1 px seam, as measured */
+  --hk-titlebar-h:36px;;color:var(--hk-ink)}
+  .c21-light{color-scheme:light;
+  --hk-canvas:#F5F5F3; --hk-rung:#EAEAE8; --hk-raised:#EAEAE8; --hk-card:#FFFFFF;
+  --hk-hover:#E8E8E6; --hk-border:#D0D0CE;
+  --hk-ink:#1A1A18; --hk-ink-soft:#1A1A18; --hk-dim:rgba(0,0,0,.62);
+  --hk-faint:rgba(0,0,0,.38); --hk-faint-text:rgba(0,0,0,.55);
+  --hk-nav:rgba(0,0,0,.62); --hk-nav-faint:rgba(0,0,0,.42);
+  --hk-gold-fill:#E0B500; --hk-gold-text:#8F7400; --hk-mark:#1A1A18; --hk-voice-ink:rgba(26,26,24,.55);
+  --hk-gold-wash:rgba(224,181,0,.16); --hk-gold-line:rgba(143,116,0,.35);
+  --hk-amber:#9A6B00; --hk-amber-wash:rgba(154,107,0,.12); --hk-amber-line:rgba(154,107,0,.30);
+  --hk-needs:#D9701C; --hk-needs-wash:rgba(217,112,28,.12); --hk-needs-line:rgba(217,112,28,.32);
+  --hk-done:#2E9E5B;  --hk-done-wash:rgba(46,158,91,.12);   --hk-done-line:rgba(46,158,91,.30);
+  --hk-error:#C0392B; --hk-error-wash:rgba(192,57,43,.10);  --hk-error-line:rgba(192,57,43,.30);
+  --hk-idle:#7A7A76;  --hk-idle-wash:rgba(0,0,0,.05);       --hk-idle-line:rgba(0,0,0,.10);
+  --hk-online:#2E9E66;
+  --hk-glass-head:rgba(252,252,250,.70); --hk-glass-head-border:rgba(0,0,0,.08);
+  --hk-glass-head-shadow:0 4px 14px rgba(0,0,0,.10);
+  --hk-glass-circle:rgba(252,252,250,.72); --hk-glass-circle-border:rgba(0,0,0,.14); --hk-circle-ink:rgba(26,26,24,.62); --hk-action-ink:rgba(26,26,24,.8);
+  --hk-glass-pill:rgba(252,252,250,.62); --hk-glass-pill-border:rgba(0,0,0,.08);
+  --hk-glass-card:rgba(252,252,250,.78); --hk-glass-card-border:rgba(0,0,0,.08);
+  --hk-track:rgba(0,0,0,.08); --hk-hairline:rgba(0,0,0,.08); --hk-cell-off:rgba(26,26,24,.10);
+  --hk-tool-surface:rgba(107,107,104,.07); --hk-tool-border:rgba(107,107,104,.18);
+  --hk-event-surface:rgba(107,107,104,.07); --hk-event-border:rgba(107,107,104,.18);
+  --hk-code-bg:#FFFFFF; --hk-code-border:#D0D0CE; --hk-code-ink:rgba(0,0,0,.7);
+  --hk-quote-bg:rgba(0,0,0,.06);
+  --hk-row-selected:rgba(0,0,0,.06); --hk-row-selected-border:rgba(0,0,0,.10);
+  --hk-bubble:#1A1A18; --hk-bubble-ink:#FFFFFF;
+  --hk-scrim:rgba(0,0,0,.40); --hk-shadow:rgba(0,0,0,.16);
+  --hk-page:#DEDEDB;;color:var(--hk-ink)}
+
+  /* ---------- the drawn parts this stage needs, beside the kit ----------
+     The picture in an agent message: the real app draws the agent's image 480 wide at most on desktop (read from the
+     AFTER frames: 480 by 240 for a 1024 by 512 picture), radius 12, the caption under it as ordinary body text. */
+  .c21-pic{display:block;width:480px;max-width:100%;height:auto;border-radius:12px;margin:0 0 8px}
+  .c21-daterule{display:flex;align-items:center;gap:12px;margin:8px 0 12px;color:var(--hk-faint-text);font-size:11px;line-height:14px;letter-spacing:1px;text-transform:uppercase}
+  .c21-daterule i{flex:1 1 0;height:1px;background:var(--hk-border)}
+  /* a dock only stage: the bottom of a chat (transcript tail and composer) at a fixed design width */
+  .c21-dockstage{display:flex;flex-direction:column;justify-content:flex-end;position:relative;width:var(--fw);min-height:var(--mh,220px);background:var(--hk-canvas)}
+  .c21-dockstage .hk-transcript{flex:1 1 auto}
+  .c21-dockstage.is-not{opacity:.55}
+  .c21-nottag{position:absolute;left:14px;top:12px;z-index:5;padding:3px 9px;border-radius:999px;background:var(--hk-error-wash);border:1px solid var(--hk-error-line);color:var(--hk-error);font-size:11px;line-height:14px;font-weight:600;letter-spacing:.4px;text-transform:uppercase}
+  .c21-snip{display:flex;flex-direction:column;padding:16px 16px 18px;border-radius:16px;background:var(--hk-canvas);border:1px solid var(--hk-border)}
+
+  /* ---------- the "When it appears" cards ---------- */
+  .c21-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;align-items:start}
+  .c21-card{display:flex;flex-direction:column;border:1px solid #2a2926;border-radius:16px;overflow:hidden;background:#141311;min-width:0}
+  .c21-card.is-after{border-color:rgba(255,217,0,.35)}
+  .c21-card__cap{padding:14px 16px 12px;display:flex;flex-direction:column;gap:4px;border-bottom:1px solid #24231f}
+  .c21-card__t{display:flex;align-items:baseline;gap:8px;color:#fff;font-size:14px;line-height:20px;font-weight:600}
+  .c21-card__t i{flex:none;color:#FFD900;font-style:normal;font-size:11px;line-height:14px;font-weight:600;letter-spacing:.5px;font-variant-numeric:tabular-nums}
+  .c21-card__d{color:rgba(255,255,255,.6);font-size:12.5px;line-height:18px}
+  .c21-card__d b{color:rgba(255,255,255,.88);font-weight:600}
+  .c21-card__stage{flex:1 1 auto;background:var(--hk-canvas);position:relative}
+  .c21-card__foot{display:flex;align-items:flex-start;gap:10px;padding:10px 16px;border-top:1px solid #24231f;color:rgba(255,255,255,.5);font-size:12px;line-height:16px}
+  .c21-why{padding:14px 16px;border-radius:14px;background:rgba(255,217,0,.06);border:1px solid rgba(255,217,0,.28);color:rgba(255,255,255,.85);font-size:14px;line-height:21px}
+  .c21-why b{color:#FFD900;font-weight:600}
+  .c21-since{padding:16px 18px 18px;border-radius:14px;background:rgba(255,217,0,.06);border:1px solid rgba(255,217,0,.28);display:flex;flex-direction:column;gap:14px;min-width:0}
+  .c21-since__head{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .c21-since__t{margin:0;color:#FFD900;font-size:12px;line-height:16px;font-weight:600;letter-spacing:.5px;text-transform:uppercase}
+  .c21-since__d{margin:0;color:rgba(255,255,255,.82);font-size:14px;line-height:21px}
+  .c21-since ul{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:7px;color:rgba(255,255,255,.82);font-size:13.5px;line-height:20px}
+  .c21-since li b{color:#fff;font-weight:600}
+  .c21-since code{font-family:var(--hk-font-mono);font-size:12px;color:#fff;overflow-wrap:anywhere}
+
+  /* ---------- lists, canon, technical detail, footer ---------- */
+  .c21-notes{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 28px;max-width:1160px}
+  .c21-note{display:flex;gap:10px;align-items:flex-start;color:rgba(255,255,255,.72);font-size:13.5px;line-height:20px;min-width:0}
+  .c21-note i{flex:none;width:6px;height:6px;border-radius:50%;background:#FFD900;margin-top:7px}
+  .c21-note b{color:#fff;font-weight:600}
+  .c21-note code{font-family:var(--hk-font-mono);font-size:12px;color:rgba(255,255,255,.85)}
+  .c21-two{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:24px;align-items:start}
+  .c21-dec{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px;counter-reset:dec}
+  .c21-dec li{position:relative;padding-left:30px;color:rgba(255,255,255,.72);font-size:13.5px;line-height:20px;counter-increment:dec}
+  .c21-dec li::before{content:counter(dec);position:absolute;left:0;top:1px;width:20px;height:18px;border-radius:6px;background:rgba(255,217,0,.12);color:#FFD900;font-size:11px;line-height:18px;font-weight:600;text-align:center;font-variant-numeric:tabular-nums}
+  .c21-dec b{color:#fff;font-weight:600}
+  .c21-dec code{font-family:var(--hk-font-mono);font-size:12px;color:rgba(255,255,255,.85)}
+  .c21-canon{margin:0;padding:16px 18px;border-radius:12px;background:#141311;border:1px solid #2a2926;color:rgba(255,255,255,.82);
+    font-family:var(--hk-font-mono);font-size:12.5px;line-height:20px;white-space:pre-wrap;overflow-wrap:anywhere}
+  .c21-canon mark{background:rgba(255,217,0,.18);color:#FFE34D;border-radius:3px;padding:0 2px}
+  .c21-obs{display:flex;flex-direction:column;gap:10px;padding:14px 16px;border-radius:12px;background:#141311;border:1px solid #2a2926}
+  .c21-obs p{margin:0;color:rgba(255,255,255,.72);font-size:13.5px;line-height:20px}
+  .c21-obs p b{color:#fff;font-weight:600}
+  .c21-obs img{width:100%;height:auto;display:block;border-radius:10px;border:1px solid #2a2926}
+  .c21-obs figure{margin:0;display:flex;flex-direction:column;gap:6px}
+  .c21-obs figcaption{color:rgba(255,255,255,.5);font-size:12px;line-height:17px}
+  details.c21-tech{border:1px solid #2a2926;border-radius:14px;background:#141311;padding:0 18px}
+  details.c21-tech summary{cursor:pointer;list-style:none;padding:14px 0;color:rgba(255,255,255,.72);font-size:13.5px;line-height:20px;font-weight:600;display:flex;align-items:center;gap:10px}
+  details.c21-tech summary::-webkit-details-marker{display:none}
+  details.c21-tech summary::before{content:"";width:7px;height:7px;border-right:1.5px solid #FFD900;border-bottom:1.5px solid #FFD900;transform:rotate(-45deg);transition:transform 180ms cubic-bezier(0.22,1,0.36,1)}
+  details.c21-tech[open] summary::before{transform:rotate(45deg)}
+  details.c21-tech ol{margin:0 0 16px;padding-left:20px;display:flex;flex-direction:column;gap:6px;color:rgba(255,255,255,.66);font-size:12.5px;line-height:19px}
+  details.c21-tech code{font-family:var(--hk-font-mono);font-size:11.5px;color:rgba(255,255,255,.85);overflow-wrap:anywhere}
+  .c21-foot{color:rgba(255,255,255,.4);font-size:12px;line-height:18px;border-top:1px solid #24231f;padding-top:18px}
+
+  @media (max-width:1180px){.c21-grid,.c21-asks,.c21-notes,.c21-two,.c21-shots,.c21-shots--3{grid-template-columns:1fr}
+    .c21-shots--4{grid-template-columns:repeat(2,minmax(0,1fr))}.c21-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+  @media (max-width:760px){.c21-page{padding:28px 16px 56px;gap:34px}.c21-h1{font-size:24px;line-height:31px}.c21-grid,.c21-shots--4{grid-template-columns:1fr}
+    .c21-sec__head{gap:8px}.c21-switch{margin-left:0}
+    .c21-shots figure.is-wide{flex-direction:column;gap:8px}.c21-shots figure.is-wide img{width:100%;max-width:100%}.c21-shots figure.is-wide figcaption{padding-top:0}}
+</style>
+
+<div class="c21-page">
+
+  <header class="c21-head">
+    <span class="c21-tag">C-21 · STAGE 4 · BEFORE / AFTER · FOR YOUR COMMENTS</span>
+    <h1 class="c21-h1">A picture a Codex agent makes now appears in the chat by itself</h1>
+    <p class="c21-lede">Ask a Codex agent for a banner and today it makes one, says it is done, and the picture never reaches the chat unless the model remembers to attach it. After this change the picture <b>posts itself when the agent's turn finishes</b>, first in the reply, with the words it was made from as its caption (<b>Prompt: ...</b>). It opens in the viewer and shows in the gallery and in Artifacts like any other picture. <b>Codex only. Always on, nothing to switch on.</b> The app itself does not change.</p>
+    <div class="c21-asks">
+      <div class="c21-ask"><b>What I measured first</b><span>The real app, 24 frames, dark and light, desktop and phone, 57 of 57 checks. With the technical details switch on you see a tool row named <code>image_generation</code> and a text reply, and 0 pictures. With it off (the default) you see only the reply. The gallery and Artifacts are empty. Section 01 has the frames.</span></div>
+      <div class="c21-ask"><b>Always on, no setting</b><span>Codex only: Claude Code has no picture item, so there is nothing to catch there. Nothing to switch on, no per agent setting. If the agent also attaches the same picture itself, it is not posted twice.</span></div>
+      <div class="c21-ask"><b>What the AFTER frames are</b><span>The same build as BEFORE (both runs on <code>vtdist-base</code>), showing a fixture chat that holds the post exactly as the plugin sends it: one normal image message with the prompt as its text. The banner is a fixture picture, 1024 by 512. The file name and the caption are what the plugin's own code builds for it (<code>codex-image-7c0d9f13.png</code>), shot again at the stage 4 close.</span></div>
+    </div>
+  </header>
+
+  <!-- ===================================================== SINCE FIRST SHOWN ===================================================== -->
+  <section class="c21-since" aria-labelledby="c21-since-t">
+    <div class="c21-since__head"><h2 class="c21-since__t" id="c21-since-t">Since this page was first shown</h2>
+      <div class="c21-switch" data-switch="since" role="group" aria-label="Theme of the plain line screenshots"><button type="button" class="is-on" data-theme="dark">Dark</button><button type="button" data-theme="light">Light</button></div></div>
+    <p class="c21-since__d">The plugin took the premium review's owner facing items (<code>748ec4e</code>, tests written red first) and the AFTER frames in section 02 were shot again on the same build, so they show exactly what the code posts now. Section 05's drawn line and the version and sentence in section 06 are the first version; what they became is here.</p>
+    <ul>
+      <li><b>Version 0.14.0.</b> P2's next stage took 0.13.0, so this ships as 0.14.0, and the capability guide sentence is served to daemons at 0.14.0 or later.</li>
+      <li><b>Two lines when a picture does not show.</b> "Codex made a picture, but it could not be shown here." when Codex made one, followed by where it is saved when Codex kept a copy, and "Codex tried to make a picture, but nothing came back." when nothing came back. This replaces the fallback in section 05. Each distinct line posts once per turn.</li>
+      <li><b>The reset time is relative.</b> "Codex has used up its picture limit for now. It resets in about 2 hours.", counted from when the line posts (in a moment, or about so many minutes, hours or days), never a UTC clock time. Only the first sentence when no reset is ahead.</li>
+      <li><b>A shorter file name.</b> <code>codex-image-</code> plus the last 8 characters of the item id, here <code>codex-image-7c0d9f13.png</code> (24 characters). It reads whole in the viewer, the "View all photos" card and the Artifacts card at phone width, and it is the saved file's name. The first AFTER frames showed Codex's own <code>exec-&lt;uuid&gt;.png</code>, which the plugin never posts.</li>
+      <li><b>The caption stops at 200 characters</b> (it was 280), cut on a word with an ellipsis, so it stays the one or two sentences an image model writes back instead of a paragraph under every picture. A dash between two digits now reads "to" (2024 to 2026); any other long dash still becomes a comma.</li>
+      <li><b>The agent's hint is scoped to chat turns.</b> It now starts "In a chat turn, a picture you make with image generation posts itself to the chat when the turn finishes, with its prompt as the caption; do not send it again with MEDIA: or the reply tool." and goes on to say that in a meeting, a voice task or a consult nothing posts it, and what to do there. The capability guide carries the same words, byte for byte.</li>
+    </ul>
+    <div class="c21-label is-after"><i></i>The three plain lines, real frames, desktop 1440 by 900</div>
+    <div class="c21-shots">
+      <figure class="is-after is-wide" style="--mw:808px"><img data-dark="shots/after/33-images-line-tried-dark-desktop.png" data-light="shots/after/39-images-line-tried-light-desktop.png" src="shots/after/33-images-line-tried-dark-desktop.png" alt="Desktop: the agent message Codex tried to make a picture, but nothing came back."><figcaption><b>Nothing came back.</b> No bytes, no result and no saved copy, so the line says Codex only tried.</figcaption></figure>
+      <figure class="is-after is-wide" style="--mw:808px"><img data-dark="shots/after/34-images-line-made-dark-desktop.png" data-light="shots/after/40-images-line-made-light-desktop.png" src="shots/after/34-images-line-made-dark-desktop.png" alt="Desktop: the agent message Codex made a picture, but it could not be shown here, with where it is saved"><figcaption><b>Made, not shown, and where it is saved.</b> Here the upload was lost after its retries and Codex kept its own copy. Under the home folder the path starts <code>~\</code>, so the account name never shows.</figcaption></figure>
+      <figure class="is-after is-wide" style="--mw:808px"><img data-dark="shots/after/35-images-line-limit-dark-desktop.png" data-light="shots/after/41-images-line-limit-light-desktop.png" src="shots/after/35-images-line-limit-dark-desktop.png" alt="Desktop: the agent message Codex has used up its picture limit for now. It resets in about 2 hours."><figcaption><b>The limit, with a relative reset.</b> A plain agent message, not a red error.</figcaption></figure>
+    </div>
+    <div class="c21-label is-after"><i></i>Phone, 390 by 844</div>
+    <div class="c21-shots c21-shots--3">
+      <figure class="is-after"><img data-dark="shots/after/36-images-line-tried-dark-phone.png" data-light="shots/after/42-images-line-tried-light-phone.png" src="shots/after/36-images-line-tried-dark-phone.png" alt="Phone: Codex tried to make a picture, but nothing came back."><figcaption><b>Nothing came back,</b> phone.</figcaption></figure>
+      <figure class="is-after"><img data-dark="shots/after/37-images-line-made-dark-phone.png" data-light="shots/after/43-images-line-made-light-phone.png" src="shots/after/37-images-line-made-dark-phone.png" alt="Phone: Codex made a picture, but it could not be shown here, with where it is saved"><figcaption><b>Made, not shown,</b> phone. With Codex's real folder names the saved path runs to four lines.</figcaption></figure>
+      <figure class="is-after"><img data-dark="shots/after/38-images-line-limit-dark-phone.png" data-light="shots/after/44-images-line-limit-light-phone.png" src="shots/after/38-images-line-limit-dark-phone.png" alt="Phone: Codex has used up its picture limit for now. It resets in about 2 hours."><figcaption><b>The limit,</b> phone.</figcaption></figure>
+    </div>
+    <div class="c21-proofline">Frames 33 to 44: the same agent and chat with the technical details switch off, three turns each ending in one of the lines. Every word is what the plugin's own builders return for these cases (the inputs and outputs are in <code>shots/after/fixture.json</code>); the agent's own reply that would follow each line is left out. The whole AFTER run: 44 frames, 93 of 93 checks plus 4 observations, read only on every target, <code>shots/after/findings.jsonl</code>.</div>
+  </section>
+
+  <!-- ===================================================== 01 BEFORE ===================================================== -->
+  <section class="c21-sec">
+    <div class="c21-sec__head"><span class="c21-sec__n">01</span><h2 class="c21-sec__t">Before: the real app today</h2>
+      <div class="c21-switch" data-switch="before" role="group" aria-label="Theme of the BEFORE screenshots"><button type="button" class="is-on" data-theme="dark">Dark</button><button type="button" data-theme="light">Light</button></div></div>
+    <p class="c21-sec__d">Straight frames from the running build, cropped to the chat pane, no editing. The agent is Codey, treated as Codex by the app. The chat holds the owner's ask, the plugin's tool card exactly as it sends it today (one row, <code>image_generation</code>, 64 s, done, no file and no path), and the text reply. <b>Today the picture only reaches the chat if the model remembers to attach it.</b> The tool itself tells the model the picture is "already displayed to the user", so it usually does not.</p>
+
+    <div class="c21-label"><i></i>Desktop, 1440 by 900</div>
+    <div class="c21-shots">
+      <figure><img data-dark="shots/before/01-images-chat-techon-dark-desktop.png" data-light="shots/before/13-images-chat-techon-light-desktop.png" src="shots/before/01-images-chat-techon-dark-desktop.png" alt="Desktop today, technical details on: the ask, the folded tool card, the reply, and no picture"><figcaption><b>Technical details on: no picture anywhere.</b> The ask, the folded card "DONE Worked 1 min · 1 tool", then "Done, the banner is ready." 0 images of any kind in the agent's messages.</figcaption></figure>
+      <figure><img data-dark="shots/before/02-images-toolcard-open-dark-desktop.png" data-light="shots/before/14-images-toolcard-open-light-desktop.png" src="shots/before/02-images-toolcard-open-dark-desktop.png" alt="Desktop today, the tool card opened by a click: one row, image_generation, 64 s, done"><figcaption><b>The card opened by a click.</b> One row: <code>image_generation 64s ✓</code>. No file, no path, no picture. That is everything the plugin sends about the picture today.</figcaption></figure>
+      <figure><img data-dark="shots/before/04-images-chat-techoff-dark-desktop.png" data-light="shots/before/16-images-chat-techoff-light-desktop.png" src="shots/before/04-images-chat-techoff-dark-desktop.png" alt="Desktop today, technical details off: the ask and the text reply only"><figcaption><b>Technical details off, the default: only the reply.</b> The card is hidden, so the owner sees the ask, then "Done, the banner is ready." and nothing else. The owner never sees the banner.</figcaption></figure>
+      <figure><img data-dark="shots/before/05-images-gallery-dark-desktop.png" data-light="shots/before/17-images-gallery-light-desktop.png" src="shots/before/05-images-gallery-dark-desktop.png" alt="Desktop today: View all photos opens the chat's Artifacts, which is empty"><figcaption><b>"View all photos" is empty.</b> The chat's Artifacts opens on "No artifacts in this chat yet", 0 cards. The banner is not there.</figcaption></figure>
+      <figure><img data-dark="shots/before/06-images-artifacts-dark-desktop.png" data-light="shots/before/18-images-artifacts-light-desktop.png" src="shots/before/06-images-artifacts-dark-desktop.png" alt="Desktop today: the Artifacts screen has nothing from this chat"><figcaption><b>The Artifacts screen has nothing from this chat.</b> "Nothing here yet. Files your agents send and receive will show up here.", 0 cards.</figcaption></figure>
+      <figure class="is-wide"><img data-dark="shots/before/03-images-toolcard-row-dark-desktop.png" data-light="shots/before/15-images-toolcard-row-light-desktop.png" src="shots/before/03-images-toolcard-row-dark-desktop.png" alt="The opened tool card on its own"><figcaption><b>The opened card on its own.</b> The same row is what the AFTER frames show too: the card does not change, the picture is posted beside it.</figcaption></figure>
+    </div>
+    <div class="c21-proofline">Control: the picture detector was checked against a positive, the count rises by exactly 1 when a picture is on the page and falls back, so its 0 above means no picture. <code>shots/before/findings.jsonl</code>, 57 passes, 0 fails.</div>
+
+    <div class="c21-label"><i></i>Phone, 390 by 844 (the web build at phone width; the native shell differs only in the composer row)</div>
+    <div class="c21-shots c21-shots--3">
+      <figure><img data-dark="shots/before/07-images-chat-techon-dark-phone.png" data-light="shots/before/19-images-chat-techon-light-phone.png" src="shots/before/07-images-chat-techon-dark-phone.png" alt="Phone today, technical details on: the ask, the folded card, the reply, no picture"><figcaption><b>Technical details on.</b> The same three things: the ask, the folded card, the reply. No picture.</figcaption></figure>
+      <figure><img data-dark="shots/before/08-images-toolcard-open-dark-phone.png" data-light="shots/before/20-images-toolcard-open-light-phone.png" src="shots/before/08-images-toolcard-open-dark-phone.png" alt="Phone today, the tool card opened by a touch tap"><figcaption><b>The card opened by a touch tap.</b> One row, <code>image_generation 64s ✓</code>.</figcaption></figure>
+      <figure><img data-dark="shots/before/10-images-chat-techoff-dark-phone.png" data-light="shots/before/22-images-chat-techoff-light-phone.png" src="shots/before/10-images-chat-techoff-dark-phone.png" alt="Phone today, technical details off: the ask and the reply only"><figcaption><b>Technical details off, the default.</b> Only the reply.</figcaption></figure>
+      <figure><img data-dark="shots/before/11-images-gallery-dark-phone.png" data-light="shots/before/23-images-gallery-light-phone.png" src="shots/before/11-images-gallery-dark-phone.png" alt="Phone today: the chat's Artifacts sheet is empty"><figcaption><b>"View all photos" is empty</b> on the phone too: "No artifacts in this chat yet".</figcaption></figure>
+      <figure><img data-dark="shots/before/12-images-artifacts-dark-phone.png" data-light="shots/before/24-images-artifacts-light-phone.png" src="shots/before/12-images-artifacts-dark-phone.png" alt="Phone today: the Artifacts screen, nothing here yet"><figcaption><b>The Artifacts screen:</b> "Nothing here yet."</figcaption></figure>
+      <figure class="is-wide" style="--mw:420px"><img data-dark="shots/before/09-images-toolcard-row-dark-phone.png" data-light="shots/before/21-images-toolcard-row-light-phone.png" src="shots/before/09-images-toolcard-row-dark-phone.png" alt="The opened tool card on its own, phone"><figcaption><b>The opened card on its own,</b> phone.</figcaption></figure>
+    </div>
+  </section>
+
+  <!-- ===================================================== 02 AFTER ===================================================== -->
+  <section class="c21-sec">
+    <div class="c21-sec__head"><span class="c21-sec__n">02</span><h2 class="c21-sec__t">After: the picture posts itself, first, with its prompt</h2>
+      <div class="c21-switch" data-switch="after" role="group" aria-label="Theme of the AFTER screenshots"><button type="button" class="is-on" data-theme="dark">Dark</button><button type="button" data-theme="light">Light</button></div></div>
+    <p class="c21-sec__d">The same build, the same agent, the same tool card row. The one difference is the message the plugin now posts when the turn ends: <b>the picture, then the caption "Prompt: ..." in the same bubble, then the agent's own words</b>, in that order. Every frame is real; 93 checks passed, 0 failed, plus 4 recorded observations (section 06), 32 of the checks for the plain lines in the box at the top.</p>
+
+    <div class="c21-label is-after"><i></i>Desktop, 1440 by 900</div>
+    <div class="c21-shots">
+      <figure class="is-after"><img data-dark="shots/after/01-images-chat-techon-dark-desktop.png" data-light="shots/after/17-images-chat-techon-light-desktop.png" src="shots/after/01-images-chat-techon-dark-desktop.png" alt="Desktop after, technical details on: the ask, the folded card, the picture with its prompt, then the reply"><figcaption><b>The picture first, then the words.</b> Technical details on: the ask, the same folded card, then Codey's picture post (the banner, loaded at 1024 by 512) with "Prompt: A minimal launch banner, a gold wordmark on a charcoal background, soft light" in the same bubble, then "Done, the banner is ready."</figcaption></figure>
+      <figure class="is-after"><img data-dark="shots/after/02-images-toolcard-open-dark-desktop.png" data-light="shots/after/18-images-toolcard-open-light-desktop.png" src="shots/after/02-images-toolcard-open-dark-desktop.png" alt="Desktop after, the tool card opened: the same one row as before, and the picture below it"><figcaption><b>The card is unchanged.</b> Opened by a click it reads the same one row, <code>image_generation 64s ✓</code>. The picture is a message of its own, below the card, not a row inside it.</figcaption></figure>
+      <figure class="is-after"><img data-dark="shots/after/04-images-chat-techoff-dark-desktop.png" data-light="shots/after/20-images-chat-techoff-light-desktop.png" src="shots/after/04-images-chat-techoff-dark-desktop.png" alt="Desktop after, technical details off: the ask, the banner with its prompt, then the reply"><figcaption><b>Technical details off, the default: the owner now sees the banner.</b> The ask, the picture with its prompt, then "Done, the banner is ready."</figcaption></figure>
+      <figure class="is-after"><img data-dark="shots/after/06-images-viewer-dark-desktop.png" data-light="shots/after/22-images-viewer-light-desktop.png" src="shots/after/06-images-viewer-dark-desktop.png" alt="Desktop after: tapping the picture opens the viewer over the whole window"><figcaption><b>Tap it and the viewer opens</b> over the whole window: the banner at 1325 by 738 px (92 percent of the fit), with the close and save controls. Nothing of the sidebar or the transcript sits on top. The viewer names the file, not the prompt (an app matter, see section 06).</figcaption></figure>
+      <figure class="is-after"><img data-dark="shots/after/07-images-gallery-dark-desktop.png" data-light="shots/after/23-images-gallery-light-desktop.png" src="shots/after/07-images-gallery-dark-desktop.png" alt="Desktop after: View all photos opens the chat's Artifacts with the banner in it"><figcaption><b>"View all photos" now has it.</b> "Artifacts · 1 item", one card drawn from the picture itself, named <code>codex-image-7c0d9f13.png</code>, "Today" and the time, PNG.</figcaption></figure>
+      <figure class="is-after"><img data-dark="shots/after/08-images-artifacts-dark-desktop.png" data-light="shots/after/24-images-artifacts-light-desktop.png" src="shots/after/08-images-artifacts-dark-desktop.png" alt="Desktop after: the Artifacts screen lists the banner"><figcaption><b>The Artifacts screen lists it too:</b> 1 item, the banner, <code>codex-image-7c0d9f13.png</code>, "Codey · Today" and the time, PNG.</figcaption></figure>
+      <figure class="is-after is-wide" style="--mw:808px"><img data-dark="shots/after/05-images-post-dark-desktop.png" data-light="shots/after/21-images-post-light-desktop.png" src="shots/after/05-images-post-dark-desktop.png" alt="The picture post on its own: the banner above its prompt, in one bubble"><figcaption><b>The post on its own.</b> One bubble holding the banner above the text "Prompt: ...". The caption is the model's own revised prompt; any long dash in it becomes a comma, so nothing on screen carries one.</figcaption></figure>
+      <figure class="is-after is-wide"><img data-dark="shots/after/03-images-toolcard-row-dark-desktop.png" data-light="shots/after/19-images-toolcard-row-light-desktop.png" src="shots/after/03-images-toolcard-row-dark-desktop.png" alt="The opened tool card on its own, after: identical to before"><figcaption><b>The opened card on its own,</b> identical to BEFORE pixel for pixel in the row: the plugin's tool card is not what changes.</figcaption></figure>
+    </div>
+    <div class="c21-proofline">Every target stayed read only: every write the page issued was failed locally, no other API read reached production, no page exceptions, no em or en dashes on screen. <code>shots/after/findings.jsonl</code>, 93 passes, 0 fails, 4 observations.</div>
+
+    <div class="c21-label is-after"><i></i>Phone, 390 by 844</div>
+    <div class="c21-shots c21-shots--4">
+      <figure class="is-after"><img data-dark="shots/after/09-images-chat-techon-dark-phone.png" data-light="shots/after/25-images-chat-techon-light-phone.png" src="shots/after/09-images-chat-techon-dark-phone.png" alt="Phone after, technical details on: the card, the picture with its prompt, the reply"><figcaption><b>Technical details on.</b> The card, the picture with its prompt, the reply, in that order.</figcaption></figure>
+      <figure class="is-after"><img data-dark="shots/after/12-images-chat-techoff-dark-phone.png" data-light="shots/after/28-images-chat-techoff-light-phone.png" src="shots/after/12-images-chat-techoff-dark-phone.png" alt="Phone after, technical details off: the ask, the picture with its prompt, the reply"><figcaption><b>Technical details off, the default.</b> The ask, the banner with its prompt, the reply.</figcaption></figure>
+      <figure class="is-after"><img data-dark="shots/after/14-images-viewer-dark-phone.png" data-light="shots/after/30-images-viewer-light-phone.png" src="shots/after/14-images-viewer-dark-phone.png" alt="Phone after: the viewer over the whole screen"><figcaption><b>The viewer,</b> the banner at 359 by 692 px (92.1 percent of the fit), close and save at the top.</figcaption></figure>
+      <figure class="is-after"><img data-dark="shots/after/15-images-gallery-dark-phone.png" data-light="shots/after/31-images-gallery-light-phone.png" src="shots/after/15-images-gallery-dark-phone.png" alt="Phone after: View all photos, Artifacts · 1 item"><figcaption><b>"View all photos":</b> "Artifacts · 1 item", the one card.</figcaption></figure>
+      <figure class="is-after"><img data-dark="shots/after/16-images-artifacts-dark-phone.png" data-light="shots/after/32-images-artifacts-light-phone.png" src="shots/after/16-images-artifacts-dark-phone.png" alt="Phone after: the Artifacts screen lists the banner"><figcaption><b>The Artifacts screen,</b> 1 item. (The "1 item" wrapping into the subtitle at this width is an app matter, section 06.)</figcaption></figure>
+      <figure class="is-after"><img data-dark="shots/after/10-images-toolcard-open-dark-phone.png" data-light="shots/after/26-images-toolcard-open-light-phone.png" src="shots/after/10-images-toolcard-open-dark-phone.png" alt="Phone after, the tool card opened by a touch tap"><figcaption><b>The card opened by a touch tap,</b> the same one row.</figcaption></figure>
+      <figure class="is-after is-wide" style="--mw:420px"><img data-dark="shots/after/13-images-post-dark-phone.png" data-light="shots/after/29-images-post-light-phone.png" src="shots/after/13-images-post-dark-phone.png" alt="The picture post on its own, phone"><figcaption><b>The post on its own,</b> phone: the banner above its prompt.</figcaption></figure>
+      <figure class="is-after is-wide" style="--mw:420px"><img data-dark="shots/after/11-images-toolcard-row-dark-phone.png" data-light="shots/after/27-images-toolcard-row-light-phone.png" src="shots/after/11-images-toolcard-row-dark-phone.png" alt="The opened tool card on its own, phone, after"><figcaption><b>The opened card on its own,</b> phone, unchanged.</figcaption></figure>
+    </div>
+  </section>
+
+  <!-- ===================================================== 03 WHEN IT APPEARS ===================================================== -->
+  <section class="c21-sec">
+    <div class="c21-sec__head"><span class="c21-sec__n">03</span><h2 class="c21-sec__t">When it appears</h2>
+      <div class="c21-switch" data-switch="drawn" role="group" aria-label="Theme of the drawn strip"><button type="button" class="is-on" data-theme="dark">Dark</button><button type="button" data-theme="light">Light</button></div></div>
+    <p class="c21-sec__d"><b>When the agent's turn finishes, first in its reply, never mid turn.</b> Drawn on the fidelity kit at the real sizes, because the moment itself cannot be caught in a still frame of the fixture chat.</p>
+    <div class="c21-why"><b>Why not the instant the picture is made:</b> so the agent keeps showing as working until it is done. A picture posted mid turn would read as the agent's finished reply, and the working line and the Stop button would go away while it was still working.</div>
+    <div class="c21-grid c21-dark" data-themed>
+      <div class="c21-card">
+        <div class="c21-card__cap"><span class="c21-card__t"><i>1</i>While the turn runs</span><span class="c21-card__d">The picture is being made. The card is live, the working line is up, the slot shows <b>Stop</b>. Nothing is posted yet, even once the picture exists.</span></div>
+        <div class="c21-card__stage"><div class="c21-fit" style="--fw:560px"><div class="c21-fit__in">
+          <div class="c21-dockstage" style="--fw:560px;--mh:610px">
+            <div class="hk-transcript"><div class="hk-transcript__in">
+              <div class="c21-daterule"><i></i><span>Today · Sep 24</span><i></i></div>
+              <div class="hk-msg hk-msg--user"><div class="hk-bubble">Make me a banner for the launch</div></div>
+              <div class="hk-toolcard">
+                <div class="hk-toolcard__head"><i class="hk-toolcard__mark hk-toolcard__mark--live"></i><span class="hk-toolcard__title">Working</span><span class="hk-toolcard__meta">Making the picture</span><span class="hk-toolcard__chip hk-toolcard__chip--live">live</span></div>
+                <div class="hk-toolcard__rows"><div class="hk-toolrow is-running"><span class="hk-toolrow__name">image_generation</span><span class="hk-toolrow__args"></span><span class="hk-toolrow__state"></span></div></div>
+              </div>
+              <div class="hk-working"><i class="hk-ico hk-ico--logo"></i><span class="hk-working__text">I'm still on it...</span></div>
+            </div></div>
+            <div class="hk-dock"><div class="hk-dock__in"><div class="hk-composer">
+              <span class="hk-circle hk-circle--38"><i class="hk-ico hk-ico--plus"></i></span>
+              <div class="hk-pill"><span class="hk-pill__input hk-pill__input--placeholder">Type a message...</span></div>
+              <span class="hk-stop"></span>
+            </div></div><div class="hk-disclaimer">Codey can make mistakes. Please double-check responses.</div></div>
+          </div>
+        </div></div></div>
+        <div class="c21-card__foot">The agent reads as working the whole time, and Stop still stops it.</div>
+      </div>
+      <div class="c21-card is-after">
+        <div class="c21-card__cap"><span class="c21-card__t"><i>2</i>When the turn finishes</span><span class="c21-card__d"><b>The picture first, with its prompt, then the agent's words.</b> The card folds to done, the working line goes, the slot returns to voice. All in the same moment.</span></div>
+        <div class="c21-card__stage"><div class="c21-fit" style="--fw:560px"><div class="c21-fit__in">
+          <div class="c21-dockstage" style="--fw:560px;--mh:610px">
+            <div class="hk-transcript"><div class="hk-transcript__in">
+              <div class="hk-msg hk-msg--user"><div class="hk-bubble">Make me a banner for the launch</div></div>
+              <div class="hk-toolcard">
+                <div class="hk-toolcard__head"><i class="hk-toolcard__mark"></i><span class="hk-toolcard__title">Done</span><span class="hk-toolcard__meta">Worked 1 min · 1 tool</span><span class="hk-toolcard__chip">&#9656;</span></div>
+              </div>
+              <div class="hk-msg"><div class="hk-msg__head"><span class="hk-msg__name">Codey</span><span class="hk-msg__time">08:48</span></div>
+                <div class="hk-msg__body"><img class="c21-pic" src="shots/fixture-banner-1024x512.png" alt="The banner"><p>Prompt: A minimal launch banner, a gold wordmark on a charcoal background, soft light</p></div></div>
+              <div class="hk-msg"><div class="hk-msg__head"><span class="hk-msg__name">Codey</span><span class="hk-msg__time">08:48</span></div>
+                <div class="hk-msg__body"><p>Done, the banner is ready.</p></div>
+                <div class="hk-msg__actions"><span><i class="hk-ico hk-ico--copy"></i></span><span><i class="hk-ico hk-ico--retry"></i></span></div></div>
+            </div></div>
+            <div class="hk-dock"><div class="hk-dock__in"><div class="hk-composer">
+              <span class="hk-circle hk-circle--38"><i class="hk-ico hk-ico--plus"></i></span>
+              <div class="hk-pill"><span class="hk-pill__input hk-pill__input--placeholder">Type a message...</span></div>
+              <span class="hk-circle hk-circle--38 hk-circle--voice"><i class="hk-ico hk-ico--voice"></i></span>
+            </div></div><div class="hk-disclaimer">Codey can make mistakes. Please double-check responses.</div></div>
+          </div>
+        </div></div></div>
+        <div class="c21-card__foot">The picture reads before the sentence about it. If the reply ends in a question or buttons, they still come last.</div>
+      </div>
+      <div class="c21-card">
+        <div class="c21-card__cap"><span class="c21-card__t"><i>3</i>Never mid turn</span><span class="c21-card__d">What a post the instant the picture exists would do: the app takes it as the reply. <b>The working line is gone and Stop is gone</b> while the agent is still working on the words.</span></div>
+        <div class="c21-card__stage"><span class="c21-nottag">Not this</span><div class="c21-fit" style="--fw:560px"><div class="c21-fit__in">
+          <div class="c21-dockstage is-not" style="--fw:560px;--mh:610px">
+            <div class="hk-transcript"><div class="hk-transcript__in">
+              <div class="hk-msg hk-msg--user"><div class="hk-bubble">Make me a banner for the launch</div></div>
+              <div class="hk-toolcard">
+                <div class="hk-toolcard__head"><i class="hk-toolcard__mark hk-toolcard__mark--live"></i><span class="hk-toolcard__title">Working</span><span class="hk-toolcard__meta">Writing the reply</span><span class="hk-toolcard__chip hk-toolcard__chip--live">live</span></div>
+              </div>
+              <div class="hk-msg"><div class="hk-msg__head"><span class="hk-msg__name">Codey</span><span class="hk-msg__time">08:47</span></div>
+                <div class="hk-msg__body"><img class="c21-pic" src="shots/fixture-banner-1024x512.png" alt="The banner"><p>Prompt: A minimal launch banner, a gold wordmark on a charcoal background, soft light</p></div>
+                <div class="hk-msg__actions"><span><i class="hk-ico hk-ico--copy"></i></span><span><i class="hk-ico hk-ico--retry"></i></span></div></div>
+            </div></div>
+            <div class="hk-dock"><div class="hk-dock__in"><div class="hk-composer">
+              <span class="hk-circle hk-circle--38"><i class="hk-ico hk-ico--plus"></i></span>
+              <div class="hk-pill"><span class="hk-pill__input hk-pill__input--placeholder">Type a message...</span></div>
+              <span class="hk-circle hk-circle--38 hk-circle--voice"><i class="hk-ico hk-ico--voice"></i></span>
+            </div></div><div class="hk-disclaimer">Codey can make mistakes. Please double-check responses.</div></div>
+          </div>
+        </div></div></div>
+        <div class="c21-card__foot">No working line, no Stop, and the app's own stall watchers go blind for the rest of the turn. That is why the picture waits.</div>
+      </div>
+    </div>
+    <div class="c21-proofline">A turn you stop still posts the pictures it had finished (they exist and the quota is spent). A goal turn the agent adopted hands its pictures to the owner turn that takes over the thread. The cost of waiting: the reply text waits for the upload, up to the app's 120 s upload timeout.</div>
+  </section>
+
+  <!-- ===================================================== 04 WHAT STAYS THE SAME ===================================================== -->
+  <section class="c21-sec">
+    <div class="c21-sec__head"><span class="c21-sec__n">04</span><h2 class="c21-sec__t">What stays the same</h2></div>
+    <div class="c21-notes">
+      <div class="c21-note"><i></i><span><b>Claude Code and every other agent.</b> Nothing changes for them. Claude Code has no picture item of its own; a picture it makes with a tool reaches the chat the way it does today, when the agent attaches it.</span></div>
+      <div class="c21-note"><i></i><span><b>A picture the agent attaches itself.</b> <code>MEDIA:</code> lines and the reply tool's files still work exactly as before. If the agent attaches the very picture that already posted itself, that line is dropped, so you never get it twice.</span></div>
+      <div class="c21-note"><i></i><span><b>Nothing to switch on.</b> No setting, no per agent toggle, and the technical details switch does not affect it: the picture is a normal message, visible with the switch on or off.</span></div>
+      <div class="c21-note"><i></i><span><b>The tool card.</b> The <code>image_generation</code> row reads the same as today. The picture is a message beside the card, not a row inside it.</span></div>
+      <div class="c21-note"><i></i><span><b>The app.</b> No app UI code changes. The picture goes through the same path as any picture an agent sends: the chat, the viewer, the gallery, Artifacts, on desktop and both phones.</span></div>
+      <div class="c21-note"><i></i><span><b>Your repo.</b> No file is written into the agent's working folder. The picture's bytes go straight up from the plugin; Codex's own copy stays where Codex keeps it.</span></div>
+    </div>
+  </section>
+
+  <!-- ===================================================== 05 IF THE PICTURE CANNOT BE MADE ===================================================== -->
+  <section class="c21-sec">
+    <div class="c21-sec__head"><span class="c21-sec__n">05</span><h2 class="c21-sec__t">If the picture cannot be made</h2></div>
+    <p class="c21-sec__d">When Codex refuses because the image limit is used up, the chat gets <b>one plain line naming the reset time</b>, instead of silence or a red error. Drawn on the kit; the time is the one Codex reports, shown in UTC.</p>
+    <div class="c21-shots">
+      <div class="c21-col c21-dark"><div class="c21-label is-after"><i></i>After · dark</div>
+        <div class="c21-snip">
+          <div class="hk-msg hk-msg--user"><div class="hk-bubble">Make me a banner for the launch</div></div>
+          <div class="hk-toolcard"><div class="hk-toolcard__head"><i class="hk-toolcard__mark"></i><span class="hk-toolcard__title">Done</span><span class="hk-toolcard__meta">Worked 12 s · 1 tool</span><span class="hk-toolcard__chip">&#9656;</span></div></div>
+          <div class="hk-msg"><div class="hk-msg__head"><span class="hk-msg__name">Codey</span><span class="hk-msg__time">08:48</span></div>
+            <div class="hk-msg__body"><p>Codex could not make a picture because the image generation limit is used up. It resets 2026-09-24 08:53 UTC.</p></div>
+            <div class="hk-msg__actions"><span><i class="hk-ico hk-ico--copy"></i></span><span><i class="hk-ico hk-ico--retry"></i></span></div></div>
+        </div></div>
+      <div class="c21-col c21-light"><div class="c21-label is-after"><i></i>After · light</div>
+        <div class="c21-snip">
+          <div class="hk-msg hk-msg--user"><div class="hk-bubble">Make me a banner for the launch</div></div>
+          <div class="hk-toolcard"><div class="hk-toolcard__head"><i class="hk-toolcard__mark"></i><span class="hk-toolcard__title">Done</span><span class="hk-toolcard__meta">Worked 12 s · 1 tool</span><span class="hk-toolcard__chip">&#9656;</span></div></div>
+          <div class="hk-msg"><div class="hk-msg__head"><span class="hk-msg__name">Codey</span><span class="hk-msg__time">08:48</span></div>
+            <div class="hk-msg__body"><p>Codex could not make a picture because the image generation limit is used up. It resets 2026-09-24 08:53 UTC.</p></div>
+            <div class="hk-msg__actions"><span><i class="hk-ico hk-ico--copy"></i></span><span><i class="hk-ico hk-ico--retry"></i></span></div></div>
+        </div></div>
+    </div>
+    <div class="c21-proofline">If Codex gives no reset time the line stops after "used up." Two pictures refused by the same limit in one turn read as one line. A picture that was made but could not be uploaded falls back to today's behaviour: the agent's own words, or the usual "finished the turn without a text reply" line if there were none.</div>
+  </section>
+
+  <!-- ===================================================== 06 DECISIONS ===================================================== -->
+  <section class="c21-sec">
+    <div class="c21-sec__head"><span class="c21-sec__n">06</span><h2 class="c21-sec__t">Decisions I took, what the agent is told, and two things I saw</h2></div>
+    <div class="c21-two">
+      <div class="c21-col">
+        <div class="c21-label is-after"><i></i>Decisions I took (the ledger has the reasons)</div>
+        <ol class="c21-dec">
+          <li><b>Codex only.</b> Claude Code has no picture item, so there is nothing to catch there.</li>
+          <li><b>At the end of the turn, first in the reply.</b> A post mid turn marks the agent done for the rest of the turn: the working line, the Stop button and the stall catchers all go off. A stopped turn and an adopted goal turn still post the pictures they finished.</li>
+          <li><b>The bytes, not a file.</b> The picture's bytes are decoded (capped at the 10 MB image limit) and uploaded straight from the plugin, so no file lands in your repo and the media guard keeps its one root.</li>
+          <li><b>One post per picture, caption "Prompt: ..."</b> clipped, and any em or en dash in the model's prompt becomes a comma so nothing you see carries one. A refused picture gives one plain line naming the reset time.</li>
+          <li><b>One sentence in the capability guide, for Codex only,</b> served to daemons at 0.13.0 or later (version suffix <code>-images1</code>), mirrored in the doc and the sync test; the same sentence in the plugin's own hints.</li>
+          <li><b>No app change.</b> Agent pictures already render in the chat, the viewer, the gallery and Artifacts. A small app PR carries the sentence, the floor and the What's New card, and merges after the plugin release is out.</li>
+          <li><b>One live probe on this machine's Codex</b> to record the real picture shape, as a modest spend of the kind P2's probes made. It ran and could not make a picture: this box's Codex is not logged in (a 401 before the model). The shape was read from the runtime binary instead, and the code accepts bare base64 or a data URI and does not depend on the status words.</li>
+        </ol>
+      </div>
+      <div class="c21-col">
+        <div class="c21-label is-after"><i></i>What the agent is told</div>
+        <pre class="c21-canon">One sentence, in the capability guide a Codex agent reads on connect (daemons at 0.13.0 or later) and in the plugin's own hints:
+
+<mark>A picture you make posts itself to the chat when the turn finishes, with its prompt. Do not send it again with MEDIA:.</mark>
+
+The ledger's wording; a plugin test pins the final words and the no dash rule.</pre>
+        <div class="c21-label"><i></i>Two things I saw in the app (not caused by this change)</div>
+        <div class="c21-obs">
+          <p><b>The viewer shows the file name, never the prompt.</b> Open the picture and the strip at the bottom reads the file's name; the caption stays in the chat. Whatever name the plugin picks is what you read there, so the plugin names the file <code>codex-image-&lt;id&gt;.png</code> rather than Codex's <code>exec-&lt;uuid&gt;.png</code>. Showing the prompt there is an app change for another day.</p>
+          <figure><img src="shots/probe-artifacts-count/artifacts-count-dark-phone-3x.png" alt="The Artifacts screen header at phone width: the 1 item count wraps onto two lines and overlaps the subtitle"><figcaption><b>The Artifacts screen header breaks at phone width.</b> At 390 px, "1 item" wraps to two lines and overlaps the subtitle by 17.6 by 18 px, in both themes. Measured by <code>probe-artifacts-count.js</code> on the unchanged app; the frames lane's numbers are in <code>shots/probe-artifacts-count/</code>.</figcaption></figure>
+        </div>
+      </div>
+    </div>
+    <details class="c21-tech">
+      <summary>Technical detail (for the build)</summary>
+      <ol>
+        <li><b>Where:</b> the Codex plugin, branch <code>feat/p5-image-posts</code>, version 0.13.0, stacked on P2's <code>feat/p2-file-diffs</code> (a6a5c3a, 0.12.0). Merge order #12, #14, #15, then this. The map was written at 99a6ed7; every anchor below was re-checked on the branch head.</li>
+        <li><b>The seam, host side (<code>src/codex-host.ts</code>):</b> a REQUIRED <code>images</code> map on <code>ActiveTurn</code>, so the compiler forces both constructors (<code>execute()</code> and <code>adoptTurn()</code>) to initialise it. On <code>item/completed</code> of an <code>imageGeneration</code> item the picture is collected by <code>item.id</code> (the dedupe: a second completion for the same id does not add) and the branch falls through so the tool row still builds. <code>result()</code>, the one constructor for <code>turn/completed</code> and the watchdog, carries <code>images</code>, so a timed out turn keeps its pictures. When an owner turn takes over an adopted goal turn, <code>prior.images</code> is read before <code>release()</code> and seeded into the new turn.</li>
+        <li><b>The pure half (<code>src/generated-images.ts</code>):</b> <code>decodeImageResult</code> (bare base64 or a <code>data:</code> URI, MIME sniffed from the bytes, refused over <code>IMAGE_BYTES_MAX</code> 10 MB before allocating), <code>collectGeneratedImage</code> (bytes, prompt, <code>savedPath</code>, never the base64; null without an id; an <code>exec-</code> id collects the same as an <code>ig_</code> one), <code>imageCaption</code> ("Prompt: ..." clipped on a word boundary at <code>IMAGE_CAPTION_PROMPT_MAX</code>, dashes to commas, folded onto one line, none without a prompt), <code>imageFailureLine</code> (the one line, reset time in UTC, seconds or milliseconds, none without a time, a plain fallback for an unknown kind).</li>
+        <li><b>The post, adapter side (<code>src/adapter.ts</code>, <code>publishTurnResult</code>):</b> pictures FIRST, then the body, buttons or ask branch, then the <code>MEDIA:</code> loop, then <code>finalizeTurn</code>. The error early return posts the pictures before <code>finalizeTurn</code> and <code>sendAgentError</code>. The Stop branch posts finished pictures after <code>progressWork</code> and before <code>finalizeTurn</code>, with no text, no refusal line and no red error. The fallback guard counts SUCCESSFUL posts (<code>postedImages === 0</code>), because each post is caught. A <code>MEDIA:</code> path whose real path equals a posted picture's <code>savedPath</code> is dropped; it is kept when that picture's own post failed. Refused pictures post one line per limit.</li>
+        <li><b>Outbound (<code>src/outbound.ts</code>, <code>src/attachment-bridge.ts</code>):</b> <code>sendImageBytes</code> mirroring <code>sendFile</code> so <code>deliver()</code> retry (1 s, 5 s, 25 s) and the spool apply; <code>publishMediaBuffer</code> exported over the private <code>publishMediaBytes</code> (inline data URI under 500 KB, presigned PUT above; 120 s timeout). The media guard is untouched.</li>
+        <li><b>Canon and hints:</b> a Codex sentence constant in <code>backend/src/integrations/capability-canon.ts</code> gated by a floor at 0.13.0 (never ahead of the code, <code>capability-canon.version-gate.spec.ts</code>), <code>CAPABILITY_CANON_VERSION</code> suffix <code>-images1</code>, the markdown mirror and the sync spec both ways; <code>src/agent-hints.ts</code> one line; <code>test/capabilities.spec.ts</code> pins it word for word with the no dash assertion. <code>LATEST_PLUGIN_VERSIONS.codex</code> bump and the What's New card ride the same small app PR.</li>
+        <li><b>Tests, RED first, one suite at a time (<code>--minWorkers=1 --maxWorkers=4</code>):</b> <code>test/generated-images.spec.ts</code> (the pure half), <code>test/adapter-image-posts.spec.ts</code> (the decision guard: the post's call order is after <code>host.runTurn</code> resolved and before <code>reply.sendText</code>, and posting from a mid turn callback turns it red; image before an ask and before buttons; no fallback when a picture posted with no text; the fallback when every post failed; the refusal line; the error early return; the Stop branch; the adopted <code>deliver</code> path), <code>test/codex-host.spec.ts</code> (collected once, deduped, started alone adds nothing, failure carried, the watchdog result, the adopted hand over), <code>test/outbound-media.spec.ts</code> (bytes path, 10 MB cap), <code>test/activity-markers.spec.ts</code> (the row reads <code>savedPath</code>). Red proofs in <code>red-proofs.md</code>.</li>
+        <li><b>The live probe (<code>probe.md</code>):</b> the plugin's own bundled <code>codex.exe</code> 0.154.0, one live turn: 401 before the model, no picture, zero spend. Two zero cost stub runs showed a legacy <code>image_generation_call</code> is silently dropped by the runtime and the image tool is not offered without a ChatGPT login. The item shape (seven fields plus the type tag, <code>failure</code> with one variant <code>usageLimitExceeded {limitId, resetsAt}</code>) was read from the binary. To finish the live half: <code>codex login</code> on this machine, then <code>probe-image.js</code> once.</li>
+        <li><b>Frames:</b> both runs on <code>vtdist-base</code> (bundle <code>index-233ed400409bdd56c8afc32605b05cea.js</code>, hash matched its meta file), server 8817, Chrome CDP 9243, stopped afterwards. Fixture agent Codey (<code>code: 'codex'</code>, <code>integration: 'codex'</code>, <code>managedBy: 'pairing'</code>); the banner <code>fixture-banner-1024x512.png</code>, 85,938 bytes, sha1 <code>90e1fb98...</code>, posted inline as a data URI. <code>fixture.json</code> and <code>findings.jsonl</code> sit beside the frames.</li>
+      </ol>
+    </details>
+  </section>
+
+  <div class="c21-foot">C-21 · Stage 4 of P5 · a picture a Codex agent makes posts itself with its prompt · before and after for Kc's comments · 2026-09-24 · BEFORE and AFTER frames are the real, unchanged app on one build (24 frames, 57 of 57 checks; 44 frames, 93 of 93 checks plus 4 observations), the AFTER chat a fixture holding the post as the plugin sends it · committed on the plugin branch: the probe report (205c05f) · in the tree, not yet committed at the time of this page: the stage 4 tests, written red ahead of the code · not yet: the plugin change itself and the small app PR (canon sentence, floor, What's New) · nothing merged · since first shown (the box at the top): the plugin change committed through 7aaf7fa at 0.14.0, and the AFTER frames shot again on it.</div>
+</div>
+
+<script>
+(function(){
+  /* ---------- fit: scale every drawn frame to its column ---------- */
+  function fitOne(f,force){
+    var inner=f.firstElementChild; if(!inner) return;
+    var fw=parseFloat(getComputedStyle(f).getPropertyValue('--fw'))||560;
+    var w=f.clientWidth; if(!w) return;
+    if(!force && f.getAttribute('data-w')===String(w)) return;   /* only a width change refits: the height we set must not refit again */
+    f.setAttribute('data-w',String(w));
+    var s=Math.min(1,w/fw);
+    inner.style.transform='scale('+s+')';
+    f.style.height=Math.ceil(inner.offsetHeight*s)+'px';
+  }
+  function fitAll(force){document.querySelectorAll('.c21-fit').forEach(function(f){fitOne(f,force)})}
+  fitAll(true);
+  if(window.ResizeObserver){var ro=new ResizeObserver(function(entries){window.requestAnimationFrame(function(){entries.forEach(function(e){fitOne(e.target,false)})})});document.querySelectorAll('.c21-fit').forEach(function(f){ro.observe(f)})}
+  window.addEventListener('resize',function(){fitAll(false)});
+  if(document.fonts&&document.fonts.ready) document.fonts.ready.then(function(){fitAll(true)});
+  window.addEventListener('load',function(){fitAll(true)});
+  document.querySelectorAll('.c21-fit img').forEach(function(img){img.addEventListener('load',function(){fitAll(true)})});
+
+  /* ---------- switches ---------- */
+  function wireSwitch(el,onPick){
+    if(!el) return;
+    el.querySelectorAll('button').forEach(function(b){b.addEventListener('click',function(){
+      el.querySelectorAll('button').forEach(function(x){x.classList.toggle('is-on',x===b)});
+      onPick(b.getAttribute('data-theme'));
+    })});
+  }
+  function swapShots(section,theme){
+    section.querySelectorAll('.c21-shots img[data-dark]').forEach(function(img){img.src=img.getAttribute('data-'+theme)});
+  }
+  document.querySelectorAll('[data-switch="before"],[data-switch="after"],[data-switch="since"]').forEach(function(sw){
+    var section=sw.closest('.c21-sec,.c21-since');
+    wireSwitch(sw,function(theme){swapShots(section,theme)});
+  });
+  wireSwitch(document.querySelector('[data-switch="drawn"]'),function(theme){
+    document.querySelectorAll('[data-themed]').forEach(function(g){g.classList.toggle('c21-dark',theme==='dark');g.classList.toggle('c21-light',theme==='light')});
+    fitAll(true);
+  });
+  /* ?theme=light flips every switch on load (used by the render check; harmless otherwise) */
+  if(/[?&]theme=light\b/.test(location.search)) document.querySelectorAll('.c21-switch button[data-theme="light"]').forEach(function(b){b.click()});
+})();
+</script>
+</body>
+</html>

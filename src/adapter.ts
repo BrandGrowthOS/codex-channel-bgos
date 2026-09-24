@@ -18,7 +18,7 @@ import { join } from "node:path";
 
 import { BgosApi } from "./bgos-api.js";
 import { BgosWs } from "./bgos-ws.js";
-import { BgosOutbound } from "./outbound.js";
+import { BgosOutbound, OutboundSpooledError } from "./outbound.js";
 import { CommandsSync } from "./commands-sync.js";
 import { CommandUpgrade } from "./command-upgrade.js";
 import { ToolProgressOrchestrator } from "./tool-progress.js";
@@ -46,7 +46,23 @@ import {
 } from "./inbound-handler.js";
 import { pendingUnknownStats } from "./pending-unknown-store.js";
 import { pickCapabilitiesText } from "./capabilities.js";
-import { CodexHost, type AdoptedTurn, type RunTurnResult } from "./codex-host.js";
+import {
+  CodexHost,
+  type AdoptedTurn,
+  type GeneratedImage,
+  type RunTurnResult,
+} from "./codex-host.js";
+import {
+  imageCaption,
+  imageFailureLine,
+  imageNotShownLine,
+} from "./generated-images.js";
+import {
+  mediaLineIsPostedPicture,
+  newTurnPictures,
+  rememberPostedPicture,
+  type TurnPictures,
+} from "./posted-pictures.js";
 import type { RpcObject } from "./app-server.js";
 import {
   markerEventBody,
@@ -159,6 +175,23 @@ export class CodexAdapter {
    * chat by `replyQueues`, so a chat never has two turns publishing at once.
    */
   private readonly planCardFailures = new Set<number>();
+  /**
+   * Per chat, the line a /stop or /new is posting ("Stopped.", or the fresh
+   * conversation line) while it is on its way. A stopped turn's pictures
+   * wait for it, so they always land AFTER the stop line (review finding 6).
+   * Created on first use, like `pictureTails`.
+   */
+  private stopLines?: Map<number, Promise<void>>;
+  /**
+   * Per chat, a stopped turn's pictures still uploading. The Stop branch no
+   * longer waits for them (the card, the mission and the owner's next message
+   * would all wait on a presigned PUT), so the NEXT turn's own posts wait
+   * instead: its card rows, its requests (an approval card, an ask), a plan
+   * card it raises and its reply all land after them, and no done from an old
+   * picture runs over the new turn's working or its blocked. The next turn
+   * itself starts at once.
+   */
+  private pictureTails?: Map<number, Promise<void>>;
   /**
    * The `(mode, enforced)` pair last REPORTED for a chat, so an unchanged one
    * is not sent again.
@@ -791,30 +824,41 @@ export class CodexAdapter {
       ["new", "retry", "status", "stop", "compact"].includes(command.name)
     ) {
       if (command.name === "stop" || command.name === "new") {
-        this.nativeCommands.cancel(chatId);
-        this.generations.set(chatId, (this.generations.get(chatId) ?? 0) + 1);
-        for (const controller of this.turnControllers.get(chatId) ?? [])
-          controller.abort();
-        await this.host.stopTurn(chatId);
-      }
-      if (command.name === "stop") {
-        await replyHandle.sendText("Stopped.");
-        return;
+        // Held from BEFORE the abort until the line has posted: the stopped
+        // turn's pictures post after it, never racing it to the chat.
+        const stopLine = this.holdStopLine(chatId);
+        try {
+          this.nativeCommands.cancel(chatId);
+          this.generations.set(
+            chatId,
+            (this.generations.get(chatId) ?? 0) + 1,
+          );
+          for (const controller of this.turnControllers.get(chatId) ?? [])
+            controller.abort();
+          await this.host.stopTurn(chatId);
+          if (command.name === "stop") {
+            await replyHandle.sendText("Stopped.");
+            return;
+          }
+          // A picture the discarded turn had finished still posts, after
+          // this line: it exists, the quota is spent, and its caption says
+          // what it is. Dropping it would throw away work the owner asked for.
+          this.host.resetChat(chatId);
+          this.lastInput.delete(chatId);
+          this.lastNativeOptions.delete(chatId);
+          await replyHandle
+            .sendText(
+              "Started a fresh conversation. This chat's Codex thread was reset.",
+            )
+            .catch(() => {});
+          return;
+        } finally {
+          stopLine.release();
+        }
       }
       if (command.name === "compact") {
         await this.host.compact(chatId);
         await replyHandle.sendText("Context compaction started.");
-        return;
-      }
-      if (command.name === "new") {
-        this.host.resetChat(chatId);
-        this.lastInput.delete(chatId);
-        this.lastNativeOptions.delete(chatId);
-        await replyHandle
-          .sendText(
-            "Started a fresh conversation. This chat's Codex thread was reset.",
-          )
-          .catch(() => {});
         return;
       }
       if (command.name === "status") {
@@ -936,6 +980,16 @@ export class CodexAdapter {
     // replayed on every /retry.
     const turnInput = this.missionControl.applyBulletin(chatId, input);
 
+    // What this turn's pictures did in the chat, shared by the flush before a
+    // plan card and the end of the turn (stage 4, C-21).
+    const pictures = newTurnPictures();
+    // A stopped turn's pictures still uploading: this turn starts now, but
+    // its own posts wait for them (see `pictureTails`). That includes its
+    // REQUESTS (re-review item 3): an approval card or an ask carousel is read
+    // as blocked, and a stopped picture landing after it would run done over
+    // the owner's Needs you while the approval still waits. `earlier` never
+    // rejects, so a request is only ever delayed, never failed, by it.
+    const earlier = this.pictureTails?.get(chatId);
     let progressWork = Promise.resolve();
     const seenTools = new Set<string>();
     let result: RunTurnResult;
@@ -943,8 +997,10 @@ export class CodexAdapter {
       result = await this.host.runTurn(chatId, turnInput, {
         ...nativeOptions,
         signal: controller.signal,
-        onRequest: (method, params) =>
-          this.tools.handleRequest(method, params, context),
+        onRequest: async (method, params) => {
+          await earlier;
+          return this.tools.handleRequest(method, params, context);
+        },
         onUsage: (usage) => this.reportContextPct(assistantId, usage),
         onTool: (card, itemId) => {
           if (!seenTools.has(itemId)) {
@@ -953,7 +1009,10 @@ export class CodexAdapter {
           }
           // Native tools can complete in parallel. Serialize publication so a
           // completion cannot race the first POST or create duplicate cards.
+          // The first POST also waits for a stopped turn's pictures, so their
+          // done lands before this turn's working and never after it.
           progressWork = progressWork
+            .then(() => earlier)
             .then(() =>
               this.toolProgress.sendToolStart({
                 assistantId,
@@ -1024,8 +1083,18 @@ export class CodexAdapter {
           : undefined,
         // The plan the model PROPOSED, which the runtime lifts out of the
         // message into its own item. Posted inside the turn, so the card is
-        // on screen before the turn's own reply lands under it.
+        // on screen before the turn's own reply lands under it. The pictures
+        // this turn finished go FIRST (review finding 2): the card is read as
+        // blocked, and a picture posted after it would be read as done and
+        // close the owner's "Waiting on your go ahead" while the plan waits.
         onPlanProposal: async (signal) => {
+          await earlier;
+          await this.postGeneratedImages(
+            replyHandle,
+            signal.images,
+            {},
+            pictures,
+          );
           await this.postPlanCard(assistantId, chatId, signal.text);
         },
       });
@@ -1040,6 +1109,12 @@ export class CodexAdapter {
         });
         if (stepsAdmitted) await this.stepsLane?.finalizeTurn(chatId);
         await replyHandle.finalizeTurn().catch(() => {});
+        // A picture that FINISHED before the Stop is still posted: it exists,
+        // the quota is spent, and the stop line has already set done, so it
+        // costs no status honesty. Pictures only: no plain line, no text. And
+        // posted WITHOUT holding anything (review finding 6): the card and the
+        // mission are closed above, and the owner's next message runs now.
+        this.postStoppedPictures(chatId, replyHandle, result.images, pictures);
         return;
       }
     } catch (err) {
@@ -1087,12 +1162,15 @@ export class CodexAdapter {
     // out and the final PATCH is the only one that carries it.
     this.noteTurnClock(chatId, result);
 
+    // A stopped turn's pictures land before this turn's reply.
+    await earlier;
     await this.publishTurnResult({
       assistantId,
       chatId,
       replyHandle,
       result,
       sentViaTool,
+      pictures,
     });
   }
 
@@ -1117,8 +1195,154 @@ export class CodexAdapter {
   }
 
   /**
-   * Put one finished turn into the chat: the status line, the buttons or the
-   * questions, the text, the files, and the error when there is one.
+   * Post the pictures a turn made, in the order they finished: each one as a
+   * normal image with `Prompt: <revisedPrompt>` as its caption (no caption
+   * without one), and one plain line per distinct refusal, saying roughly how
+   * long until the limit resets when that is still ahead, measured from one
+   * clock reading per turn (`ledger.clockMs`).
+   *
+   * A picture that did not reach the chat says so in one plain line (review
+   * finding 3): one with no bytes the app can draw, or one whose upload
+   * failed after its retries. `imageNotShownLine` picks the words (re-review
+   * item 2): "made" and where it is saved when the runtime saved a copy,
+   * "made" alone when only the bytes came back or a non empty result came
+   * back that could not be drawn (Round 5), and "tried" when none of that did.
+   * Each distinct line posts once per turn, so two pictures saved at one
+   * place read as one line and two saved at two places name both.
+   * The runtime has already told the model the picture is "displayed to the
+   * user", so silence would leave the owner, and the model's next answer,
+   * believing it arrived. A picture the outbox QUEUED is not lost: it will
+   * land, so it counts as posted and says nothing (finding 8).
+   *
+   * Every post is best effort, like every other post in publishTurnResult.
+   * The record is the turn's `ledger`: a picture already dealt with (posted
+   * before a plan card, say) is never dealt with again, `posted` feeds the
+   * "finished without a text reply" guard, and the posted pictures' saved
+   * paths and bytes are what a later MEDIA: line is checked against.
+   *
+   * `picturesOnly` is the Stop branch: the owner asked for quiet, so no
+   * plain line of either kind.
+   */
+  private async postGeneratedImages(
+    replyHandle: ReplyHandle,
+    images: GeneratedImage[] | undefined,
+    opts: { picturesOnly?: boolean } = {},
+    ledger: TurnPictures = newTurnPictures(),
+  ): Promise<TurnPictures> {
+    const outcome = (sent: Promise<unknown>) =>
+      sent.then(
+        () => "landed" as const,
+        (error: unknown) =>
+          error instanceof OutboundSpooledError
+            ? ("queued" as const)
+            : ("lost" as const),
+      );
+    const say = async (line: string): Promise<void> => {
+      if (opts.picturesOnly || ledger.lines.has(line)) return;
+      ledger.lines.add(line);
+      if ((await outcome(replyHandle.sendText(line))) !== "lost")
+        ledger.posted += 1;
+    };
+    for (const image of images ?? []) {
+      if (ledger.handled.has(image.itemId)) continue;
+      ledger.handled.add(image.itemId);
+      if (image.failure) {
+        await say(
+          imageFailureLine(image.failure, { now: (ledger.clockMs ??= Date.now()) }),
+        );
+        continue;
+      }
+      if (!image.bytes || !image.mimeType) {
+        await say(imageNotShownLine(image));
+        continue;
+      }
+      const sent = await outcome(
+        replyHandle.sendImageBytes(
+          {
+            bytes: image.bytes,
+            fileName: image.fileName ?? "codex-image.png",
+            mimeType: image.mimeType,
+          },
+          imageCaption(image.revisedPrompt),
+        ),
+      );
+      if (sent === "lost") {
+        await say(imageNotShownLine(image));
+        continue;
+      }
+      ledger.posted += 1;
+      rememberPostedPicture(ledger, image);
+    }
+    return ledger;
+  }
+
+  /**
+   * Hold the chat's stop line open while a /stop or /new posts it. Taken
+   * BEFORE the turn is aborted and released once the line has posted (or
+   * failed to), so a stopped turn's pictures, which wait for it, always land
+   * after it. The race it closes: the runtime can end the turn before the
+   * interrupt's own answer comes back, and an upload could then beat
+   * "Stopped." to the chat.
+   */
+  private holdStopLine(chatId: number): { release: () => void } {
+    const lines = (this.stopLines ??= new Map());
+    let release!: () => void;
+    const line = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    lines.set(chatId, line);
+    return {
+      release: () => {
+        release();
+        if (lines.get(chatId) === line) lines.delete(chatId);
+      },
+    };
+  }
+
+  /**
+   * Post a stopped turn's finished pictures in the background (review
+   * finding 6): after the stop line, after any earlier stopped turn's
+   * pictures, and ahead of the next turn's own posts, which wait for this
+   * (see `pictureTails`). Nothing the stopped turn closes waits for it.
+   */
+  private postStoppedPictures(
+    chatId: number,
+    replyHandle: ReplyHandle,
+    images: GeneratedImage[] | undefined,
+    ledger: TurnPictures,
+  ): void {
+    const pending = (images ?? []).filter(
+      (image) => !ledger.handled.has(image.itemId),
+    );
+    if (pending.length === 0) return;
+    const tails = (this.pictureTails ??= new Map());
+    const after = Promise.all([
+      this.stopLines?.get(chatId),
+      tails.get(chatId),
+    ]);
+    const posting = after
+      .then(() =>
+        this.postGeneratedImages(
+          replyHandle,
+          pending,
+          { picturesOnly: true },
+          ledger,
+        ),
+      )
+      .then(
+        () => undefined,
+        () => undefined,
+      );
+    tails.set(chatId, posting);
+    void posting.then(() => {
+      if (tails.get(chatId) === posting) tails.delete(chatId);
+    });
+  }
+
+  /**
+   * Put one finished turn into the chat: the pictures it made, the status
+   * line, the buttons or the questions, the text, the files, and the error
+   * when there is one.
    *
    * Extracted so a CONTINUATION turn, which the app server starts by itself
    * while a goal is active, reaches the owner through exactly the same path
@@ -1131,8 +1355,11 @@ export class CodexAdapter {
     replyHandle: ReplyHandle;
     result: RunTurnResult;
     sentViaTool: boolean;
+    /** The turn's picture record, when a plan card already flushed some. */
+    pictures?: TurnPictures;
   }): Promise<void> {
     const { assistantId, chatId, replyHandle, result, sentViaTool } = params;
+    const ledger = params.pictures ?? newTurnPictures();
     /**
      * A helper this turn spawned is still working, so the card stays open:
      * the last patch it got said `running` and no later one closes it. A
@@ -1146,6 +1373,9 @@ export class CodexAdapter {
      */
     const helpersStillRunning = result.helpersStillRunning === true;
     if (result.error && !result.replyText.trim()) {
+      // A turn that made a picture and then failed still delivers the
+      // picture, BEFORE the card closes and the error lands.
+      await this.postGeneratedImages(replyHandle, result.images, {}, ledger);
       if (!helpersStillRunning)
         await replyHandle.finalizeTurn().catch(() => {});
       await this.outbound
@@ -1167,6 +1397,26 @@ export class CodexAdapter {
      * chat and every question would become a card.
      */
     let replyText = result.replyText;
+
+    // THE PICTURES THIS TURN MADE, FIRST (stage 4, C-21). Here, at the end of
+    // the turn, and never from inside it: a standard post mid turn marks a
+    // Codex agent done for the whole rest of the turn, because only the first
+    // tool of a turn POSTs its card and nothing puts working back (gap 04).
+    // The one exception is a plan card raised inside the turn, which posts
+    // the pictures finished so far just before itself; those are in the
+    // ledger and are not posted again. First in the reply means before EVERY
+    // card, ask and button post (review finding 2), the fallback plan card
+    // below included: each is read as blocked, and a picture posted after it
+    // would run done over it. Buttons belong on the last bubble, and the
+    // picture reads before the sentence about it. The cost, named: the text
+    // waits for the uploads (an S3 PUT above 500 KB, 120 s at most).
+    const pictures = await this.postGeneratedImages(
+      replyHandle,
+      result.images,
+      {},
+      ledger,
+    );
+
     // A plan card IS an answer. Without this, a turn whose whole reply was the
     // plan would get "(Codex finished the turn without a text reply.)" posted
     // under its own card.
@@ -1214,7 +1464,16 @@ export class CodexAdapter {
       }
     } else if (body) {
       await replyHandle.sendText(body).catch(() => {});
-    } else if (parsed.media.length === 0 && !sentViaTool && !planCardPosted) {
+    } else if (
+      parsed.media.length === 0 &&
+      !sentViaTool &&
+      !planCardPosted &&
+      // A picture answers the turn, but it never stands in for a lost plan
+      // (review finding 7): the "card could not be posted" line goes out
+      // whatever the pictures did. Counted on answers that LANDED or were
+      // queued, never on attempts.
+      (planCardFailed || pictures.posted === 0)
+    ) {
       await replyHandle
         .sendText(
           planCardFailed
@@ -1225,6 +1484,13 @@ export class CodexAdapter {
     }
 
     for (const path of parsed.media) {
+      // The model was told the picture posts itself, but a MEDIA: line naming
+      // the same file, or a copy of it (the runtime tells the model to COPY a
+      // picture it needs elsewhere), would be a second copy: dropped by real
+      // path and by the bytes' sha256 (review finding 9). Only once the
+      // picture itself landed or was queued; if it did not, the line is the
+      // owner's last chance.
+      if (await mediaLineIsPostedPicture(path, pictures)) continue;
       await replyHandle.sendFile(path).catch(() => {});
     }
 
@@ -1274,11 +1540,23 @@ export class CodexAdapter {
     };
     const seenTools = new Set<string>();
     let progressWork = Promise.resolve();
+    // The same picture record an ordinary turn keeps (stage 4, C-21).
+    const pictures = newTurnPictures();
+    // THE STOP PICTURE RULES, the same as an ordinary turn's (Round 7). A
+    // stopped turn's pictures still uploading: this turn's rows, requests,
+    // plan card and reply wait for them (see `pictureTails`). And the stop
+    // generation it started under: a /stop, a /new or the voice stop moves
+    // it, and that is how `deliver` knows the owner asked this turn to stop,
+    // because a goal turn has no controller of its own to abort.
+    const earlier = this.pictureTails?.get(chatId);
+    const generation = this.generations.get(chatId) ?? 0;
     this.goalLane.noteTurnStarted(chatId);
     return {
       callbacks: {
-        onRequest: (method, params) =>
-          this.tools.handleRequest(method, params, context),
+        onRequest: async (method, params) => {
+          await earlier;
+          return this.tools.handleRequest(method, params, context);
+        },
         // The row fields below are the SAME list as the ordinary turn's call
         // site, 230 lines up. A field spread there and not here is a field
         // missing for the whole of an autonomous goal run, which is exactly
@@ -1286,6 +1564,7 @@ export class CodexAdapter {
         onTool: (card, itemId) => {
           seenTools.add(itemId);
           progressWork = progressWork
+            .then(() => earlier)
             .then(() =>
               this.toolProgress.sendToolStart({
                 assistantId,
@@ -1353,8 +1632,16 @@ export class CodexAdapter {
         //
         // A proposed plan IS wired, and for the opposite reason: a continuation
         // turn that stops to propose one is a turn asking its owner a question,
-        // and a question nobody is shown is a run that stalls in silence.
+        // and a question nobody is shown is a run that stalls in silence. Its
+        // finished pictures go first, exactly as in an ordinary turn.
         onPlanProposal: async (signal) => {
+          await earlier;
+          await this.postGeneratedImages(
+            replyHandle,
+            signal.images,
+            {},
+            pictures,
+          );
           await this.postPlanCard(assistantId, chatId, signal.text);
         },
       },
@@ -1368,12 +1655,29 @@ export class CodexAdapter {
         // turn's work, re sent by the lane's keepalive until the backend
         // sweeps it.
         await this.stepsLane?.finalizeTurn(chatId);
+        if (generation !== (this.generations.get(chatId) ?? 0)) {
+          // The owner stopped this turn: the ordinary turn's Stop branch,
+          // word for word. "Stopped." already answered, so no partial text
+          // and no red error; the card closes now; a picture that finished
+          // posts in the background after the stop line and any earlier
+          // stopped pictures, pictures only, and the next turn waits for it.
+          await replyHandle.finalizeTurn().catch(() => {});
+          this.postStoppedPictures(chatId, replyHandle, result.images, pictures);
+          await this.goalLane.noteTurnFinished(chatId, {
+            text: result.finalAgentMessageText,
+            error: result.error,
+          });
+          return;
+        }
+        // A stopped turn's pictures land before this turn's reply.
+        await earlier;
         await this.publishTurnResult({
           assistantId,
           chatId,
           replyHandle,
           result,
           sentViaTool,
+          pictures,
         });
         // After the reply, never before: the run report is the record of a
         // turn that finished, and the cap is only reached at the end of one.
@@ -1842,13 +2146,26 @@ export class CodexAdapter {
         const active = this.turnControllers.get(chatId);
         const stoppedControl = this.nativeCommands.cancel(chatId);
         const stoppedTurn = !!active?.size;
-        this.generations.set(chatId, (this.generations.get(chatId) ?? 0) + 1);
-        for (const controller of active ?? []) controller.abort();
-        await this.host.stopTurn(chatId);
-        // The stop endpoint is advisory: its RPC result does not reach the
-        // chat UI. A reply also settles a pending picker or stale Thinking
-        // state when there is no native model turn left to emit completion.
-        await this.outbound.sendText({ assistantId, chatId, text: "Stopped." });
+        // The same hold the typed /stop takes: pictures after the line.
+        const stopLine = this.holdStopLine(chatId);
+        try {
+          this.generations.set(
+            chatId,
+            (this.generations.get(chatId) ?? 0) + 1,
+          );
+          for (const controller of active ?? []) controller.abort();
+          await this.host.stopTurn(chatId);
+          // The stop endpoint is advisory: its RPC result does not reach the
+          // chat UI. A reply also settles a pending picker or stale Thinking
+          // state when there is no native model turn left to emit completion.
+          await this.outbound.sendText({
+            assistantId,
+            chatId,
+            text: "Stopped.",
+          });
+        } finally {
+          stopLine.release();
+        }
         await this.api.postVoiceRpcResult(frame.rpcId, {
           ok: true,
           payload: { stopped: stoppedTurn || stoppedControl, supported: true },
