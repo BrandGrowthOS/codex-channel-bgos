@@ -1,0 +1,91 @@
+{
+  "expect": "after",
+  "agent": {
+    "id": 990501,
+    "name": "Codey",
+    "code": "codex",
+    "integration": "codex",
+    "managedBy": "pairing",
+    "note": "code and integration are what make the app treat it as a Codex agent (deriveType reads code; the backend resolves integration from the pairing)"
+  },
+  "chat": {
+    "id": 990601,
+    "title": "Launch banner"
+  },
+  "picture": {
+    "file": "fixture-banner-1024x512.png",
+    "generator": "gen-banner.js",
+    "width": 1024,
+    "height": 512,
+    "bytes": 85938,
+    "sha1": "90e1fb98b06b2bf14b6b8757cdab0b94ffbce0fb",
+    "fileName": "exec-8c1f3a52-5b7e-4d19-9a60-2e4b7c0d9f13.png",
+    "delivery": "inline data: URI (the plugin's path under 500 KB)"
+  },
+  "history": [
+    {
+      "id": 990901,
+      "sender": "user",
+      "messageType": "standard",
+      "text": "Make me a banner for the launch",
+      "toolProgress": null,
+      "files": []
+    },
+    {
+      "id": 990902,
+      "sender": "assistant",
+      "messageType": "tool_progress",
+      "text": "Used 1 tool · image_generation",
+      "toolProgress": {
+        "state": "done",
+        "startedAt": "2026-09-24T04:47:03.407Z",
+        "finishedAt": "2026-09-24T04:48:11.407Z",
+        "tools": [
+          {
+            "icon": "🖼️",
+            "name": "image_generation",
+            "status": "done",
+            "kind": "tool",
+            "durationMs": 64200
+          }
+        ]
+      },
+      "files": []
+    },
+    {
+      "id": 990903,
+      "sender": "assistant",
+      "messageType": "standard",
+      "text": "Prompt: A minimal launch banner, a gold wordmark on a charcoal background, soft light",
+      "toolProgress": null,
+      "files": [
+        {
+          "id": 990951,
+          "fileName": "exec-8c1f3a52-5b7e-4d19-9a60-2e4b7c0d9f13.png",
+          "fileMimeType": "image/png",
+          "isImage": true,
+          "width": 1024,
+          "height": 512,
+          "fileDataChars": 114606
+        }
+      ]
+    },
+    {
+      "id": 990904,
+      "sender": "assistant",
+      "messageType": "standard",
+      "text": "Done, the banner is ready.",
+      "toolProgress": null,
+      "files": []
+    }
+  ],
+  "attachmentsIndex": [
+    {
+      "id": 990951,
+      "messageId": 990903,
+      "chatId": 990601,
+      "fileName": "exec-8c1f3a52-5b7e-4d19-9a60-2e4b7c0d9f13.png"
+    }
+  ],
+  "note": "The tool card row is IDENTICAL on both sides (what the plugin sends today: no args, no path). The only difference between BEFORE and AFTER is message 990903, the picture post, and the attachments index that follows from it."
+}

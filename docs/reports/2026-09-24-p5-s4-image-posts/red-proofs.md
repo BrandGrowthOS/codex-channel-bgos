@@ -135,3 +135,63 @@ byte identical (`filecmp`, shallow off) before the next one. M1 was applied and 
   the status strings, decodes both result forms and captions nothing without a prompt.
 - No app side check: the app already renders an agent image in the chat, the viewer, the gallery and Artifacts;
   that is the next lane's visual pass, once one live Codex image turn is possible on a logged in machine.
+
+## Round 3: the review fixes (2026-09-24, after the 12 findings)
+
+The review (`_tools-p5/s4-findings.json`) found 10 real findings; #10 (the caption as markdown) and #11 (first
+wins dedupe) were refuted and are not touched. Every fix below was written test first. Logs are
+`_tools-p5/logs/s4-fix-*.log`; the mutation runner restores each file from a copy and compares it byte identical
+before the next mutation (`s4-fix-mutate.py`, `s4-fix-mutate2.py`).
+
+| Finding | Fix | Red before the code | Proof for a guard that could not be red |
+| --- | --- | --- | --- |
+| 1 version | 0.14.0, still stacked on #15 (P2 stage 5 holds 0.13.0 and is not pushed) | `publish-workflow.spec.ts`: "0.14.0 belongs in HELD-FROM-LATEST" (`s4-fix-red-version.log`) | none needed |
+| 4 past turns | `excludeTurns: true` on both resumes and the fork; the legacy upgrade pages `thread/turns/list` (summary, newest first, 4 a page) instead of `thread/read {includeTurns:true}` | 6 red: fork, both resumes, paging, budget (`s4-fix-red-history.log`) | H6 (a metadata read with turns), H7 (a page failure that throws), H8 (no budget stop): all red |
+| 8 queued | `deliver()` rejects a spooled send with `OutboundSpooledError`; a queued picture counts as posted | 1 red plus the adapter case | F8b (every failure called spooled), F8a (queued counted as lost): red |
+| 2 cards | pictures post above the fallback plan card; a card raised mid turn (ordinary and adopted) posts the pictures finished so far first (`PlanProposalSignal.images`), and the end of the turn skips them | 4 red (fallback, mid turn, adopted, the host's signal) | F2a, F2b, F2c: red |
+| 3 not shown | one plain line, once a turn: "A picture was made, but it could not be shown here." for no bytes or a failed upload; quiet on Stop | 2 red (the two old cases rewritten) | F3a, F3b: red |
+| 6 Stop | mission, steps and card close first; pictures post in the background after the stop line (held by /stop, /new and the voice stop_turn); the next turn starts at once and its posts wait for them | 3 red (the rewritten Stop case, the stop line, the next message) | F6a, F6b, F6c: red |
+| 7 lost plan | guard `(planCardFailed \|\| pictures.posted === 0)` | 2 red | F7: red |
+| 9 copies | a MEDIA: line is dropped by real path or by sha256 of the bytes (read only through the media guard, pictures only, 10 MB cap) | 2 red (a copy, a respelled path) | F9a, F9b, and F9c for the control that passed before the code |
+| 5 hint | the sentence is scoped to the chat turn, says what a meeting or a voice task does, and that a picture that cannot be shown is reported | 2 red (`s4-fix-red-hint.log`) | none needed |
+| 12 evidence | the gate page and its frames are committed with this report | not a test | not a test |
+
+Totals: 25 tests red before their code, 17 mutations red on their named case (H6 to H8, F2a to F9c), every file
+restored.
+
+```
+whole plugin suite (s4-fix-full-suite.log): Test Files  77 passed (77)   Tests  1092 passed | 1 skipped (1093)
+tsc --noEmit -p tsconfig.json (s4-fix-tsc.log): exit 0, no output
+```
+
+The hint sentence as it now reads (src/agent-hints.ts; the BGOS PR's served canon copies it):
+
+> In a chat turn, a picture you make with image generation posts itself to the chat when the turn finishes, with its
+> prompt as the caption; do not send it again with MEDIA: or the reply tool. If it cannot be shown, the chat says so
+> in one plain line. In a meeting or a voice task nothing posts it: a meeting takes text only, so describe the
+> picture there, and in a voice task copy it into the workspace and send it with the reply tool.
+
+### The 0.154.0 schema and one more probe, for finding 4
+
+`codex app-server generate-ts --experimental` on the vendored binary (output under
+`_tools-p5/probes/s4/schema-0.154`, not committed): `ThreadResumeParams.excludeTurns` and
+`ThreadForkParams.excludeTurns` return "only thread metadata ... without populating `thread.turns`";
+`ThreadReadParams.includeTurns` says full hydration "is deprecated for paginated threads; prefer a metadata-only
+read and page with `thread/turns/list`"; `ThreadTurnsListParams` takes `cursor`, `limit`, `sortDirection`
+(default descending) and `itemsView` (default summary).
+
+A zero cost probe (`_tools-p5/probes/s4-turns/probe-turns.js` and `run.out`, not committed) ran the vendored app
+server against an isolated `CODEX_HOME` holding copies of this stage's own two stub probe rollouts (no owner
+content, no auth file, no model call; the folder was deleted afterwards). Once the thread was loaded, a summary
+turn carried its `userMessage` and `agentMessage`, `nextCursor` and `backwardsCursor` behaved as the schema says,
+and `thread/resume {excludeTurns:true}` answered 1,983 characters with no turns. A thread the fresh index had not
+seen answered every paged read, and the old full read, with no turns at all; the upgrade then starts the new
+thread without the old text, as it did before.
+
+### The gate page and its frames
+
+`before-after.html` and `shots/` (before, after, the fixture banner and the artifacts count probe) are the approved
+look for this stage, made by the frames lane before the review. They are committed as approved and not edited, so
+three things on the page predate the fixes above: it names 0.13.0 (now 0.14.0), it says a picture that could not
+be uploaded "falls back to today's behaviour" (it now posts the one plain line), and it quotes the earlier, unscoped
+hint sentence (now the one above). The raw probe files stay under `_tools-p5` and are not copied here.
