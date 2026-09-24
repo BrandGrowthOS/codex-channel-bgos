@@ -77,10 +77,21 @@ jobs:
           # tells the model not to resend it. A picture over the line cap
           # never posts either: its line is too large to read, and only that
           # "could not be shown" line reaches the chat.
+          # 0.15.0: adds no hold of its own either. A steer with nothing to
+          # steer runs as an ordinary message and a landed steer posts no
+          # reply, which every backend already accepts (P5 stage 5, the steer
+          # fallback, stacked on 0.14.0). It is held only because it carries
+          # the holds of the releases before it, 0.14.0's included, so it is
+          # promoted only after 0.14.0 is on latest, never before or in the
+          # same step: npm dist-tag add points latest at whichever version ran
+          # last, so promoting an older version after 0.15.0 moves latest back
+          # to that older version. The HOAI app steers only daemons at 0.15.0
+          # or later, so until it is promoted Send now on a Codex agent is a
+          # plain send.
           # 0.13.0 is P2 stage 5's release, which merges first and brings its
           # own line here; merge order #12, #14, #15, P2 stage 5 (0.13.0),
-          # then 0.14.0.
-          HELD_FROM_LATEST="0.10.1 0.11.0 0.12.0 0.14.0"
+          # then 0.14.0, then 0.15.0.
+          HELD_FROM_LATEST="0.10.1 0.11.0 0.12.0 0.14.0 0.15.0"
           DIST_TAG=latest
           for held in $HELD_FROM_LATEST; do
             if [ "$CURRENT" = "$held" ]; then
@@ -120,6 +131,10 @@ jobs:
           if [ "$VERSION" = "0.14.0" ]; then
             echo "::warning::0.14.0 needs no backend of its own. It is promoted only after 0.13.0 is on latest, never before or in the same step, and only after one logged in live image turn confirms the real item (result bytes and their form, the result size (under 12 MiB, the line cap), revisedPrompt, savedPath, the failure shape; probe.md, decision 7)."
             echo "::warning::npm points latest at whichever version was promoted last: promoting an older version after 0.14.0 moves latest back to that older version."
+          fi
+          if [ "$VERSION" = "0.15.0" ]; then
+            echo "::warning::0.15.0 needs no backend of its own. It is promoted only after 0.14.0 is on latest, never before or in the same step. Until then the HOAI app keeps Send now on a Codex agent a plain send, because it steers only daemons at 0.15.0 or later."
+            echo "::warning::npm points latest at whichever version was promoted last: promoting an older version after 0.15.0 moves latest back to that older version."
           fi
           echo "Only once that reason is met, remove $VERSION from HELD_FROM_LATEST"
           echo "in this workflow and its HELD-FROM-LATEST line in src/interactions.ts,"
