@@ -301,7 +301,7 @@ describe("BUNDLED_CAPABILITIES justification sentence", () => {
 
   it("tells the model to write the justification, beside the line that says it fills no card field", () => {
     expect(flat).toContain(
-      "You fill none of these fields. One thing on an approval card IS yours to write, and it is a tool argument rather than a card field: when you ask to run a command with escalated permissions, exec_command's justification is passed to your owner word for word as the card's reason line, so write it as a plain sentence saying why this command is needed, for a reader who cannot see your reasoning.",
+      "You fill none of these fields. One thing on an approval card IS yours to write, and it is a tool argument rather than a card field: when you ask to run a command with escalated permissions, exec_command's justification is passed to your owner word for word as the card's reason line, so write it as one plain sentence of at most 280 characters saying why this command is needed, for a reader who cannot see your reasoning; a longer one is cut short.",
     );
   });
 

@@ -289,9 +289,12 @@ export interface ApprovalMeta {
    * button never did: a live probe on app server 0.154.0 proved that answering
    * with `acceptWithExecpolicyAmendment` APPENDS a permanent line to
    * `~/.codex/rules/default.rules`, which outlives the session and the
-   * project, and that the amendment is the WHOLE argv rather than a prefix,
-   * so the sentence must never imply a family of commands. At most 500 units
-   * (REQUEST_RULE_TEXT_MAX_UNITS).
+   * project. The amendment is the WHOLE argv, but the line it saves is a
+   * PREFIX rule: `codex execpolicy check` against a scratch rules file answers
+   * `allow` for the same argv with anything added after it (the stage 5 codex
+   * review's offline check, recorded on EXECPOLICY_RULE_LEAD). So the
+   * sentence says exactly that, and never "this exact command". At most 500
+   * units (REQUEST_RULE_TEXT_MAX_UNITS).
    *
    * Both ride the CREATE, like every other field here: the backend's update
    * path replaces the whole column and four of its fields are required.

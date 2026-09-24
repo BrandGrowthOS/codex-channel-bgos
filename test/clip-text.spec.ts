@@ -7,7 +7,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-import { clipText } from "../src/clip-text.js";
+import { clipText, clipWithEllipsis } from "../src/clip-text.js";
 
 /** Halves of a surrogate pair with no partner. */
 function loneSurrogates(text: string): number {
@@ -56,6 +56,27 @@ describe("clipText", () => {
     expect(clipText({ path: "x" }, 10)).toBe("");
     expect(clipText("hello", 0)).toBe("");
     expect(clipText("hello", -3)).toBe("");
+  });
+
+  it("never leaves half a character in front of the ellipsis", () => {
+    // clipWithEllipsis keeps max - 1 units and adds the mark, so the cut lands
+    // at max - 1. Here an emoji's pair STRADDLES that unit: "abc" then the
+    // pair at units 3 and 4, clipped to 5, cuts at 4, between the halves.
+    // A bare `text.slice(0, max - 1)` would send "abc\uD83D\u2026", and
+    // Postgres refuses a lone surrogate inside JSONB, so the owner would lose
+    // the whole card (a title, reason, rule_text or tool) rather than a tail.
+    const text = "abc\u{1F600}defgh";
+    const clipped = clipWithEllipsis(text, 5);
+    expect(clipped.length).toBeLessThanOrEqual(5);
+    expect(clipped.endsWith("\u2026")).toBe(true);
+    expect(loneSurrogates(clipped)).toBe(0);
+    const beforeMark = clipped.charCodeAt(clipped.length - 2);
+    expect(beforeMark >= 0xd800 && beforeMark <= 0xdbff).toBe(false);
+    expect(clipped).toBe("abc\u2026");
+    // And a pair that fits whole before the mark is kept whole.
+    expect(clipWithEllipsis(text, 6)).toBe("abc\u{1F600}\u2026");
+    // A string inside the cap is left exactly as it is, mark and all.
+    expect(clipWithEllipsis(text, text.length)).toBe(text);
   });
 
   it("is the clip both senders use", () => {

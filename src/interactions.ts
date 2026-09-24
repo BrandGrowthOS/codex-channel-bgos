@@ -18,6 +18,7 @@ import {
   diskPendingApprovals,
   type PendingApprovalStore,
 } from "./pending-approvals-store.js";
+import { redactOutput } from "./redact-output.js";
 
 export interface InteractionContext {
   assistantId: number;
@@ -174,19 +175,32 @@ export function storedWaitSeconds(created: unknown): number | null {
  *
  * 120 because the title is one line under a name and above a mono panel that
  * still carries the whole argv: past a line's worth the title stops being the
- * ask and starts being the command a second time.
+ * ask and starts being the command a second time. ONE line is a promise
+ * `titleCommandText` below keeps, not only a budget: it folds every run of
+ * whitespace (a heredoc's newlines included) to a single space.
  */
 export const TITLE_COMMAND_MAX_UNITS = 120;
 
 /**
  * The lead in of the sentence drawn under an offered Always button.
  *
- * Every clause of it is a probe finding rather than a guess (app server
- * 0.154.0, two runs with a control):
- *  - "this exact command": `proposedExecpolicyAmendment` arrived as the WHOLE
- *    argv, and stayed the whole argv even when the model supplied the
- *    `prefix_rule` the tool schema advertises for narrowing it. A sentence
- *    implying a family of commands would be worse than today's silence.
+ * Every clause of it is a finding rather than a guess:
+ *  - "this command, and the same command with anything added after it": the
+ *    line an Always answer saves is a PREFIX rule,
+ *    `prefix_rule(pattern=[<the argv>], decision="allow")`, and the 0.154.0
+ *    schema describes the amendment as allowing "similar commands without
+ *    prompting". Checked offline with Codex's own evaluator (`codex
+ *    execpolicy check --rules <a scratch rules file>`, a scratch CODEX_HOME,
+ *    no approval answered): a rule saved for `["rm","-rf","build"]` answers
+ *    `allow` for `rm -rf build /`, and the probe's own amendment
+ *    `[powershell.exe, -Command, "echo exec-probe > probe.txt"]` answers
+ *    `allow` for the same argv plus a fourth token `; Remove-Item -Recurse
+ *    x`, which PowerShell joins into the same script. This clause read "this
+ *    exact command" until the stage 5 codex review ran that check: the probe
+ *    had shown only that the amendment is the WHOLE argv (the model's
+ *    `prefix_rule` argument does not narrow it), not how the saved rule
+ *    MATCHES. A sentence that understated a permanent, global allow rule was
+ *    the one thing this line exists to prevent.
  *  - "in every project on this computer ... your Codex rules file": answering
  *    with the amendment APPENDED a permanent line to
  *    `C:\Users\<owner>\.codex\rules\default.rules`, a file already holding
@@ -198,11 +212,21 @@ export const TITLE_COMMAND_MAX_UNITS = 120;
  * verbatim after it, so this string starts mid sentence on purpose.
  */
 export const EXECPOLICY_RULE_LEAD =
-  "this exact command runs without asking again, in every project on this computer, until you remove the rule from your Codex rules file: ";
+  "this command, and the same command with anything added after it, runs without asking again, in every project on this computer, until you remove the rule from your Codex rules file: ";
 
 /**
  * The runtime's own parsed command for this request, without the shell wrapper
- * it will be run through, or null when the request carried no action.
+ * it will be run through, or null when the request did not carry EXACTLY ONE
+ * action.
+ *
+ * One, and never the first of several. The 0.154.0 schema says of
+ * `commandActions` that it "returns a list ... because a single shell command
+ * may be composed of many commands piped together", and Codex parses a plain
+ * `a && b` into one action per command. The title is also the push body, the
+ * only text the phone gets, so `git add -A && git push --force` titled from
+ * its first action would read `Run git add -A` on a lock screen. With more
+ * than one action the caller falls back to the wrapped `params.command`, which
+ * is less readable and never less than what runs.
  *
  * `commandActions` is one of the twelve fields a `commandExecution` approval
  * carries and no other method sends; this daemon read none of them before this
@@ -210,14 +234,35 @@ export const EXECPOLICY_RULE_LEAD =
  * probed one must fall back to the wrapped command rather than throw inside an
  * RPC the model is parked on.
  */
-export function firstActionCommand(actions: unknown): string | null {
-  if (!Array.isArray(actions)) return null;
-  const first: unknown = actions[0];
-  if (typeof first !== "object" || first === null) return null;
-  const command = (first as Record<string, unknown>).command;
+export function soleActionCommand(actions: unknown): string | null {
+  if (!Array.isArray(actions) || actions.length !== 1) return null;
+  const only: unknown = actions[0];
+  if (typeof only !== "object" || only === null) return null;
+  const command = (only as Record<string, unknown>).command;
   return typeof command === "string" && command.trim().length > 0
     ? command.trim()
     : null;
+}
+
+/**
+ * The command as the TITLE draws it: masked, on one line, clipped.
+ *
+ * The title is also the push body and the chat list preview, so it reaches
+ * APNs, FCM and a lock screen, where `approvalMeta.tool` (which keeps the
+ * literal argv for the mono panel) never goes. Three steps, in this order:
+ *  1. `redactOutput`, the platform's secret mask this daemon already runs on a
+ *     command's output, over the WHOLE command, so `curl -H 'Authorization:
+ *     Bearer sk-...'` or `psql postgres://user:pass@...` never leaves the
+ *     machine in a notification. First, because a key block is matched across
+ *     its lines and folding the lines would hide it from the mask.
+ *  2. Every run of whitespace folded to one space, so a heredoc's newlines do
+ *     not become a four line title and a four line notification.
+ *  3. The clip, inside the cap and last, so the mask never meets half a
+ *     secret the cut left behind.
+ */
+export function titleCommandText(command: string): string {
+  const folded = redactOutput(command).replace(/\s+/g, " ").trim();
+  return clipWithEllipsis(folded, TITLE_COMMAND_MAX_UNITS);
 }
 
 /**
@@ -244,7 +289,10 @@ export function differingReason(raw: unknown, title: string): string | null {
  * The argv is joined with single spaces and a token holding WHITESPACE is
  * wrapped in double quotes, because `-Command` and `echo exec-probe >
  * probe.txt` are two arguments and a bare join reads as five. Any whitespace,
- * not only U+0020: a tab inside a token is just as invisible at a join.
+ * not only U+0020: a tab inside a token is just as invisible at a join. An
+ * EMPTY token is quoted too, as `""`: `git commit -m ""` joined bare reads
+ * `git commit -m ` with a trailing space nobody can see, which is a different
+ * command.
  *
  * This is a rendering FOR A READER and never a shell quoting: nothing
  * re-parses this string, and the array itself is what is sent back to the
@@ -260,7 +308,9 @@ export function execpolicyRuleText(amendment: unknown): string | null {
   if (!Array.isArray(amendment) || amendment.length === 0) return null;
   if (!amendment.every((token) => typeof token === "string")) return null;
   const argv = (amendment as string[])
-    .map((token) => (/\s/.test(token) ? `"${token}"` : token))
+    .map((token) =>
+      token === "" || /\s/.test(token) ? `"${token}"` : token,
+    )
     .join(" ");
   return clipWithEllipsis(
     `${EXECPOLICY_RULE_LEAD}${argv}`,
@@ -829,25 +879,38 @@ export class Interactions {
     // does, so the reason below can say why.
     //
     // The command path only. A file change keeps stage 4's ask sentence, and
-    // a permissions request carries no command at all.
+    // a permissions request keeps its own sentence even when it carries a
+    // command. And a COMMAND request only: the 0.154.0 schema gives this
+    // method a `kind` of `command` or `writeStdin` ("distinguishes a command
+    // approval from input sent to an existing terminal"), and a stdin request
+    // carries no field holding the input, so `Run python` over it would tell
+    // the owner they are starting a program that is already running. Absent
+    // `kind` is the probed shape of a command request and reads as one.
+    //
+    // ONE action, or the wrapped command: see `soleActionCommand`. And never
+    // the raw string: `titleCommandText` masks it and folds it onto one line,
+    // because this title is the push body below and a notification is the
+    // one place the literal argv must not go.
     //
     // `cardText` is ALSO the push body: the backend never puts `approvalMeta`
     // on a notification, so the phone shows this string and nothing else. The
     // WHY cannot ride along, and on a request that carried no
-    // `commandActions` the body falls back to the wrapped command, which is
-    // the least readable string on the card. That is the spec's call (4.2 and
+    // `commandActions`, or more than one, the body falls back to the wrapped
+    // command, which is the least readable string on the card. That is the spec's call (4.2 and
     // 4.3) rather than an accident; it is written down here, and pinned in
     // test/interactions.spec.ts, so the next edit of `cardText` is an edit of
     // the notification and knows it.
-    const actionCommand = firstActionCommand(params.commandActions);
+    const actionCommand = soleActionCommand(params.commandActions);
     const titleCommand =
       actionCommand ??
       (typeof params.command === "string" && params.command.trim().length > 0
         ? params.command.trim()
         : null);
+    const commandKind =
+      params.kind === undefined || params.kind === "command";
     const askTitle =
-      commandExecution && titleCommand
-        ? `Run ${clipWithEllipsis(titleCommand, TITLE_COMMAND_MAX_UNITS)}`
+      commandExecution && commandKind && titleCommand
+        ? `Run ${titleCommandText(titleCommand)}`
         : null;
     const cardText: string = askTitle
       ? askTitle
