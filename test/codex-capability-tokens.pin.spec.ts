@@ -31,6 +31,14 @@
  * request_reason"), the declared list's request_reason case, both heartbeat
  * list pins, and both canon fetch cases in test/capabilities.spec.ts. The
  * BGOS pin spec records the same flip on its own copy.
+ *
+ * The last case replaced one that hashed the file plus a newline IN MEMORY
+ * and asserted the digest differed, which only SHA-256 itself could fail
+ * (the stage 5 token review). MUTATION PROOF for its replacement (recorded
+ * 2026-09-24, through the test lock, spec restored and re-hashed): FILE
+ * pointed at a byte identical copy in a sibling folder (test/mutcopy/) ->
+ * 1 of 5 red, that case alone, while the digest, the list and the no-CR
+ * cases stayed green: exactly the stale copy the digest case cannot see.
  */
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -113,9 +121,22 @@ describe("the Codex capability token file shared with BGOS", () => {
     expect(attrs).toMatch(/^\*\s+text=auto eol=lf$/m);
   });
 
-  it("a changed byte is actually caught, so a passing pin is not vacuous", () => {
-    const real = readFileSync(FILE);
-    const tampered = Buffer.concat([real, Buffer.from("\n")]);
-    expect(createHash("sha256").update(tampered).digest("hex")).not.toBe(SHA256);
+  it("hashes the very file the declared list imports, not a copy that merely matches", () => {
+    // The digest case above proves FILE has the pinned bytes. It cannot
+    // prove FILE is the module that runs: pointed at a stale byte identical
+    // copy somewhere else, it stays green while the live file drifts. So the
+    // path it hashes must be the one the declared list's import names, and
+    // the bytes it hashes must spell the token that import handed over.
+    const specifier = /^import \{ REQUEST_REASON \} from "(\.\/[^"]+)";$/m.exec(
+      withoutComments(readFileSync(DECLARED, "utf8")),
+    )?.[1];
+    expect(specifier).toBe("./codex-capability-tokens.js");
+    // NodeNext: the source imports the .js the build emits, from the .ts.
+    expect(
+      join(dirname(DECLARED), (specifier ?? "").replace(/\.js$/, ".ts")),
+    ).toBe(FILE);
+    expect(readFileSync(FILE, "utf8")).toContain(
+      `export const REQUEST_REASON = '${FILE_REQUEST_REASON}';`,
+    );
   });
 });
