@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fileURLToPath } from "node:url";
-import { AppServer, codexEnvironment } from "../src/app-server.js";
+import {
+  AppServer,
+  RequestTimeoutError,
+  codexEnvironment,
+} from "../src/app-server.js";
 import {
   PROBE_THREAD,
   PROBE_TURN,
@@ -58,6 +62,24 @@ describe("app-server process transport", () => {
     await s.start();
     await expect(s.request("never", {}, 30)).rejects.toThrow(/timed out/);
     expect(await s.request("echo", { alive: true })).toEqual({ alive: true });
+  });
+  it("names a timed out request by its own error class, so a caller can tell unanswered from refused", async () => {
+    // A steer that timed out may still land; one the runtime answered with an
+    // error did not. The /steer fallback (P5 stage 5, Build C) runs the text
+    // as a normal message only in the second case, so the two must differ by
+    // TYPE, not by a message someone may reword.
+    const s = server();
+    await s.start();
+    const timedOut = await s.request("never", {}, 30).catch((e) => e);
+    expect(timedOut).toBeInstanceOf(RequestTimeoutError);
+    expect(timedOut).toBeInstanceOf(Error);
+    expect(timedOut.message).toBe("Codex never timed out.");
+    const refused = await s.request("refuse").catch((e) => e);
+    expect(refused).toBeInstanceOf(Error);
+    expect(refused).not.toBeInstanceOf(RequestTimeoutError);
+    expect(refused.message).toBe("no active turn to steer");
+    const died = await s.request("crash").catch((e) => e);
+    expect(died).not.toBeInstanceOf(RequestTimeoutError);
   });
   it("a dead runtime rejects waiters and restarts on the next start", async () => {
     const s = server();

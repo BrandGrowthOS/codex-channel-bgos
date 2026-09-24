@@ -6,6 +6,23 @@ import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
 
 export type RpcObject = Record<string, any>;
+
+/**
+ * A request the runtime never answered within its timeout.
+ *
+ * Its own class because "unanswered" and "refused" mean different things to a
+ * caller that must not do a thing twice. A request the runtime answered with
+ * an error did not happen; one it never answered may still have happened.
+ * The `/steer` fallback (native-commands.ts) runs the owner's words as a
+ * normal message only in the first case, so the two are told apart by TYPE,
+ * never by a message someone may reword. The message itself is unchanged.
+ */
+export class RequestTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RequestTimeoutError";
+  }
+}
 const require = createRequire(import.meta.url);
 
 /**
@@ -222,7 +239,7 @@ export class AppServer extends EventEmitter {
       const id = ++this.nextId;
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`Codex ${method} timed out.`));
+        reject(new RequestTimeoutError(`Codex ${method} timed out.`));
       }, timeout);
       this.pending.set(id, { resolve, reject, timer });
       try {
