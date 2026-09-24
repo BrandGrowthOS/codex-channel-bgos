@@ -19,6 +19,7 @@ import {
   type PendingApprovalStore,
 } from "./pending-approvals-store.js";
 import { redactOutput } from "./redact-output.js";
+import { redactCommandLine } from "./redact-command.js";
 
 export interface InteractionContext {
   assistantId: number;
@@ -215,33 +216,65 @@ export const EXECPOLICY_RULE_LEAD =
   "this command, and the same command with anything added after it, runs without asking again, in every project on this computer, until you remove the rule from your Codex rules file: ";
 
 /**
- * The runtime's own parsed command for this request, without the shell wrapper
- * it will be run through, or null when the request did not carry EXACTLY ONE
- * action.
- *
- * One, and never the first of several. The 0.154.0 schema says of
- * `commandActions` that it "returns a list ... because a single shell command
- * may be composed of many commands piped together", and Codex parses a plain
- * `a && b` into one action per command. The title is also the push body, the
- * only text the phone gets, so `git add -A && git push --force` titled from
- * its first action would read `Run git add -A` on a lock screen. With more
- * than one action the caller falls back to the wrapped `params.command`, which
- * is less readable and never less than what runs.
- *
- * `commandActions` is one of the twelve fields a `commandExecution` approval
- * carries and no other method sends; this daemon read none of them before this
- * stage. Defensive about every level of it, because a shape that is not the
- * probed one must fall back to the wrapped command rather than throw inside an
- * RPC the model is parked on.
+ * What a shell reads as the join between two commands, or as a command run
+ * inside another: a pipe, `&&`, `||`, a background `&`, `;`, a newline, a
+ * backtick, `$(`, and a process substitution `<(` or `>(`.
  */
-export function soleActionCommand(actions: unknown): string | null {
+const SHELL_CONNECTOR_RE = /[|&;\r\n`]|\$\(|[<>]\(/;
+
+/**
+ * The runtime's own parsed command for this request, without the shell wrapper
+ * it will be run through, or null when that parse cannot be shown to BE the
+ * whole command.
+ *
+ * `commandActions` is a DISPLAY SUMMARY, not a transcript. The 0.154.0 schema
+ * says it "returns a list ... because a single shell command may be composed
+ * of many commands piped together", and Codex parses a plain `a && b` into one
+ * action per command. But the parser also DROPS parts it treats as
+ * formatting: codex-rs's `parse_command` leaves the small helpers of a
+ * pipeline out of the list (the token chain wc, tr, column, printf, sort,
+ * uniq, head, tail, xargs, cut, tee, yes, awk, sed sits beside
+ * `shell-command\src\parse_command.rs` in the 0.154.0 binary) and skips a
+ * leading `cd`. So ONE action does not mean one command: `ls | xargs rm -rf`
+ * can come back as a single `ls`, and `curl URL | tee ~/.bashrc` as a single
+ * `curl URL`. The title is also the push body, the only text the phone gets,
+ * and `Run ls` on a lock screen for a delete is the failure this exists to
+ * prevent. (The stage 5 codex review took exactly one action to mean the whole
+ * command; the whole diff review found the drop list.)
+ *
+ * So the action is used only when all four hold, and otherwise the caller
+ * falls back to the wrapped `params.command`, which is less readable and never
+ * less than what runs:
+ *  1. exactly one action, carrying a non empty string `command`;
+ *  2. the wrapped command is a string (without it nothing can say what the
+ *     parser left out);
+ *  3. neither the wrapped command nor the action holds a shell connector
+ *     (`SHELL_CONNECTOR_RE`), so the script is one command and nothing was
+ *     there to drop; a quoted `|` inside an argument also falls back, which
+ *     costs a nicer title and never a truer one;
+ *  4. the action's command appears VERBATIM inside the wrapped one, so the
+ *     title never names text that is not literally in what runs.
+ *
+ * Defensive about every level of it, because a shape that is not the probed
+ * one must fall back to the wrapped command rather than throw inside an RPC
+ * the model is parked on.
+ */
+export function soleActionCommand(
+  actions: unknown,
+  wrapped: unknown,
+): string | null {
   if (!Array.isArray(actions) || actions.length !== 1) return null;
   const only: unknown = actions[0];
   if (typeof only !== "object" || only === null) return null;
   const command = (only as Record<string, unknown>).command;
-  return typeof command === "string" && command.trim().length > 0
-    ? command.trim()
-    : null;
+  if (typeof command !== "string") return null;
+  const trimmed = command.trim();
+  if (trimmed.length === 0) return null;
+  if (typeof wrapped !== "string") return null;
+  if (SHELL_CONNECTOR_RE.test(wrapped) || SHELL_CONNECTOR_RE.test(trimmed)) {
+    return null;
+  }
+  return wrapped.includes(trimmed) ? trimmed : null;
 }
 
 /**
@@ -249,19 +282,28 @@ export function soleActionCommand(actions: unknown): string | null {
  *
  * The title is also the push body and the chat list preview, so it reaches
  * APNs, FCM and a lock screen, where `approvalMeta.tool` (which keeps the
- * literal argv for the mono panel) never goes. Three steps, in this order:
+ * literal argv for the mono panel) never goes. Four steps, in this order:
  *  1. `redactOutput`, the platform's secret mask this daemon already runs on a
  *     command's output, over the WHOLE command, so `curl -H 'Authorization:
  *     Bearer sk-...'` or `psql postgres://user:pass@...` never leaves the
- *     machine in a notification. First, because a key block is matched across
- *     its lines and folding the lines would hide it from the mask.
- *  2. Every run of whitespace folded to one space, so a heredoc's newlines do
+ *     machine in a notification. First, because a private key block is
+ *     matched across its lines: its BEGIN line opens the block and every line
+ *     to the END marker becomes one placeholder. Folded first, the block is
+ *     one line, the BEGIN header alone is masked, and the base64 body rides
+ *     the push (pinned by "removes a private key block before it folds").
+ *  2. `redactCommandLine`, the shapes a COMMAND carries a credential in and
+ *     output does not (`curl -u user:pass`, a URL's `user:pass@`, a short
+ *     `PGPASSWORD=`, `--password x`, `mysql -px`); the output mask was built
+ *     for output and misses every one of them.
+ *  3. Every run of whitespace folded to one space, so a heredoc's newlines do
  *     not become a four line title and a four line notification.
- *  3. The clip, inside the cap and last, so the mask never meets half a
- *     secret the cut left behind.
+ *  4. The clip, inside the cap and last, so a mask never meets half a secret
+ *     the cut left behind.
  */
 export function titleCommandText(command: string): string {
-  const folded = redactOutput(command).replace(/\s+/g, " ").trim();
+  const folded = redactCommandLine(redactOutput(command))
+    .replace(/\s+/g, " ")
+    .trim();
   return clipWithEllipsis(folded, TITLE_COMMAND_MAX_UNITS);
 }
 
@@ -900,7 +942,10 @@ export class Interactions {
     // 4.3) rather than an accident; it is written down here, and pinned in
     // test/interactions.spec.ts, so the next edit of `cardText` is an edit of
     // the notification and knows it.
-    const actionCommand = soleActionCommand(params.commandActions);
+    const actionCommand = soleActionCommand(
+      params.commandActions,
+      params.command,
+    );
     const titleCommand =
       actionCommand ??
       (typeof params.command === "string" && params.command.trim().length > 0

