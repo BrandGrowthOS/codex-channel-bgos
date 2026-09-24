@@ -46,7 +46,17 @@ import {
 } from "./inbound-handler.js";
 import { pendingUnknownStats } from "./pending-unknown-store.js";
 import { pickCapabilitiesText } from "./capabilities.js";
-import { CodexHost, type AdoptedTurn, type RunTurnResult } from "./codex-host.js";
+import {
+  CodexHost,
+  type AdoptedTurn,
+  type GeneratedImage,
+  type RunTurnResult,
+} from "./codex-host.js";
+import {
+  imageCaption,
+  imageFailureLine,
+  sameFilePath,
+} from "./generated-images.js";
 import type { RpcObject } from "./app-server.js";
 import {
   markerEventBody,
@@ -1033,6 +1043,12 @@ export class CodexAdapter {
         // Stop already acknowledges in chat. Native interruption may resolve
         // with partial text and an error; neither is a new assistant reply.
         await progressWork;
+        // A picture that FINISHED before the Stop is still posted: it exists,
+        // the quota is spent, and "Stopped." has already set done, so it
+        // costs no status honesty. Pictures only: no refusal line, no text.
+        await this.postGeneratedImages(replyHandle, result.images, {
+          picturesOnly: true,
+        });
         await this.missionLane.finalizeTurn({
           chatId,
           turnToken: missionTurn,
@@ -1117,8 +1133,62 @@ export class CodexAdapter {
   }
 
   /**
-   * Put one finished turn into the chat: the status line, the buttons or the
-   * questions, the text, the files, and the error when there is one.
+   * Post the pictures a turn made, in the order they finished: each one as a
+   * normal image with `Prompt: <revisedPrompt>` as its caption (no caption
+   * without one), and one plain line per distinct refusal, naming the reset
+   * time when the runtime gave one. A picture with no usable bytes posts
+   * nothing.
+   *
+   * Every post is best effort, like every other post in publishTurnResult,
+   * and the answer is what actually LANDED: `posted` feeds the "finished
+   * without a text reply" guard, and `postedPaths` are the saved copies of
+   * pictures that reached the chat, so a MEDIA: line naming one is dropped.
+   *
+   * `picturesOnly` is the Stop branch: the owner asked for quiet.
+   */
+  private async postGeneratedImages(
+    replyHandle: ReplyHandle,
+    images: GeneratedImage[] | undefined,
+    opts: { picturesOnly?: boolean } = {},
+  ): Promise<{ posted: number; postedPaths: string[] }> {
+    let posted = 0;
+    const postedPaths: string[] = [];
+    const lines = new Set<string>();
+    for (const image of images ?? []) {
+      if (image.failure) {
+        if (opts.picturesOnly) continue;
+        const line = imageFailureLine(image.failure);
+        if (lines.has(line)) continue;
+        lines.add(line);
+        if (await replyHandle.sendText(line).then(() => true, () => false))
+          posted += 1;
+        continue;
+      }
+      if (!image.bytes || !image.mimeType) continue;
+      const landed = await replyHandle
+        .sendImageBytes(
+          {
+            bytes: image.bytes,
+            fileName: image.fileName ?? "codex-image.png",
+            mimeType: image.mimeType,
+          },
+          imageCaption(image.revisedPrompt),
+        )
+        .then(
+          () => true,
+          () => false,
+        );
+      if (!landed) continue;
+      posted += 1;
+      if (image.savedPath) postedPaths.push(image.savedPath);
+    }
+    return { posted, postedPaths };
+  }
+
+  /**
+   * Put one finished turn into the chat: the pictures it made, the status
+   * line, the buttons or the questions, the text, the files, and the error
+   * when there is one.
    *
    * Extracted so a CONTINUATION turn, which the app server starts by itself
    * while a goal is active, reaches the owner through exactly the same path
@@ -1146,6 +1216,9 @@ export class CodexAdapter {
      */
     const helpersStillRunning = result.helpersStillRunning === true;
     if (result.error && !result.replyText.trim()) {
+      // A turn that made a picture and then failed still delivers the
+      // picture, BEFORE the card closes and the error lands.
+      await this.postGeneratedImages(replyHandle, result.images);
       if (!helpersStillRunning)
         await replyHandle.finalizeTurn().catch(() => {});
       await this.outbound
@@ -1200,6 +1273,16 @@ export class CodexAdapter {
         .catch(() => {});
     }
 
+    // THE PICTURES THIS TURN MADE, FIRST (stage 4, C-21). Here, at the end of
+    // the turn, and never from inside it: a standard post mid turn marks a
+    // Codex agent done for the whole rest of the turn, because only the first
+    // tool of a turn POSTs its card and nothing puts working back (gap 04).
+    // First in the reply, because a picture posted after an ask would run
+    // done over the ask's blocked, buttons belong on the last bubble, and the
+    // picture reads before the sentence about it. The cost, named: the text
+    // waits for the uploads (an S3 PUT above 500 KB, 120 s at most).
+    const pictures = await this.postGeneratedImages(replyHandle, result.images);
+
     const body = parsed.cleanText;
     if (parsed.buttons) {
       await replyHandle
@@ -1214,7 +1297,14 @@ export class CodexAdapter {
       }
     } else if (body) {
       await replyHandle.sendText(body).catch(() => {});
-    } else if (parsed.media.length === 0 && !sentViaTool && !planCardPosted) {
+    } else if (
+      parsed.media.length === 0 &&
+      !sentViaTool &&
+      !planCardPosted &&
+      // Counted on posts that LANDED: a picture whose upload failed is not an
+      // answer, and a turn that said nothing else still says so.
+      pictures.posted === 0
+    ) {
       await replyHandle
         .sendText(
           planCardFailed
@@ -1225,6 +1315,11 @@ export class CodexAdapter {
     }
 
     for (const path of parsed.media) {
+      // The model was told the picture posts itself, but a MEDIA: line naming
+      // the same file would be a second copy. Dropped only once the picture
+      // itself landed; if it did not, the line is the owner's last chance.
+      if (pictures.postedPaths.some((saved) => sameFilePath(saved, path)))
+        continue;
       await replyHandle.sendFile(path).catch(() => {});
     }
 
