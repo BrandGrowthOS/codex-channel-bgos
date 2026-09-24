@@ -120,6 +120,96 @@ describe("the publish workflow never advertises a held version as latest", () =>
     }
   });
 
+  /**
+   * What one step PRINTS, not its comments: every `echo "..."` line, with the
+   * version its `if [ "$VERSION" = "<v>" ]; then ... fi` branch is for (null
+   * outside a branch), in order. The printed text is the only thing a person
+   * reading a publish run sees.
+   */
+  function printedBy(stepName: string): { text: string; only: string | null }[] {
+    const lines = workflow.split(/\r?\n/);
+    const start = lines.findIndex((line) =>
+      new RegExp(`^\\s*- name: ${stepName}\\s*$`).test(line),
+    );
+    expect(start, `publish.yml lost its "${stepName}" step`).toBeGreaterThanOrEqual(0);
+    const out: { text: string; only: string | null }[] = [];
+    let only: string | null = null;
+    for (const line of lines.slice(start + 1)) {
+      if (/^\s*- name: /.test(line)) break;
+      const branch = line.match(/^\s*if \[ "\$VERSION" = "([^"]+)" \]; then\s*$/);
+      if (branch) {
+        only = branch[1]!;
+        continue;
+      }
+      if (/^\s*fi\s*$/.test(line)) {
+        only = null;
+        continue;
+      }
+      const echo = line.match(/^\s*echo "(.*)"\s*$/);
+      if (echo) out.push({ text: echo[1]!, only });
+    }
+    return out;
+  }
+
+  it("never hands anyone a bare promote command when a held version lands on next", () => {
+    // Round 5. The "Held from latest" step printed ONE version's reason (the
+    // backend that clamps the approval hold, 0.10.1's) as every version's,
+    // then the promote command. For 0.14.0, which needs no backend at all,
+    // that reads as "promote now", with nothing about 0.13.0 or the live
+    // image turn the release is waiting for. So the step must say to promote
+    // only when THAT version's reason is met, point at where the reason is
+    // written, name 0.14.0's own condition, and say all of it BEFORE the
+    // command, in a ::warning:: annotation a run summary shows.
+    const printed = printedBy("Held from latest");
+    const command = printed.findIndex((line) =>
+      line.text.includes("npm dist-tag add codex-channel-bgos@"),
+    );
+    const everyVersion = printed.filter((line) => line.only === null);
+    const general = printed.findIndex(
+      (line) =>
+        line.only === null &&
+        line.text.startsWith("::warning::") &&
+        /\bonly when the reason it is held is met\b/i.test(line.text) &&
+        line.text.includes("HELD_FROM_LATEST comment") &&
+        /\bpromote block of the README\b/.test(line.text),
+    );
+    expect(
+      general,
+      "the warning does not say to promote only when this version's own reason, in the HELD_FROM_LATEST comment and the README promote block, is met",
+    ).toBeGreaterThanOrEqual(0);
+    if (command >= 0)
+      expect(
+        general,
+        "the promote command is printed before the condition that gates it",
+      ).toBeLessThan(command);
+    // One version's reason printed for every version is the defect itself.
+    for (const line of everyVersion)
+      expect(
+        line.text,
+        "a line printed for every held version names one version's backend",
+      ).not.toMatch(/approval hold|clamps/i);
+
+    if (!heldFromLatest().includes("0.14.0")) return;
+    const own = printed.findIndex(
+      (line) =>
+        line.only === "0.14.0" &&
+        line.text.startsWith("::warning::") &&
+        /\b0\.13\.0 or after it, never before\b/.test(line.text) &&
+        line.text.includes(
+          "only after one logged in live image turn confirms the real item (result bytes and their form, revisedPrompt, savedPath, the failure shape; probe.md, decision 7)",
+        ),
+    );
+    expect(
+      own,
+      "the warning does not name 0.14.0's condition: with 0.13.0 or after it, and only after one logged in live image turn",
+    ).toBeGreaterThanOrEqual(0);
+    if (command >= 0)
+      expect(
+        own,
+        "the promote command is printed before 0.14.0's condition",
+      ).toBeLessThan(command);
+  });
+
   it("keeps package-lock.json on the same version package.json is on", () => {
     // The stage bumped package.json to 0.11.0 and left the lock at 0.10.1, in
     // BOTH of its version fields. Every previous release in this repo moved the

@@ -103,13 +103,20 @@ jobs:
 
       - name: Held from latest
         if: steps.ver.outputs.publish == 'true' && steps.ver.outputs.dist_tag != 'latest'
+        # Every held version is held for its OWN reason, so nothing printed
+        # here for every version names one version's backend, and the promote
+        # command comes last, after the condition that gates it
+        # (test/publish-workflow.spec.ts reads what this step prints).
         run: |
           VERSION="${{ steps.ver.outputs.current }}"
           TAG="${{ steps.ver.outputs.dist_tag }}"
-          echo "::warning::$VERSION was published under the npm dist tag $TAG, not latest."
-          echo "Nothing installs it by default. Promote it by hand once the BGOS"
-          echo "backend that clamps the approval hold is deployed, then remove the"
-          echo "version from HELD_FROM_LATEST in this workflow:"
+          echo "::warning::$VERSION was published under the npm dist tag $TAG, not latest, so nothing installs it by default. Promote it only when the reason it is held is met: that reason is written beside $VERSION in the HELD_FROM_LATEST comment in this workflow and in the promote block of the README."
+          if [ "$VERSION" = "0.14.0" ]; then
+            echo "::warning::0.14.0 needs no backend of its own. It is promoted only with 0.13.0 or after it, never before, and only after one logged in live image turn confirms the real item (result bytes and their form, revisedPrompt, savedPath, the failure shape; probe.md, decision 7)."
+          fi
+          echo "Only once that reason is met, remove $VERSION from HELD_FROM_LATEST"
+          echo "in this workflow and its HELD-FROM-LATEST line in src/interactions.ts,"
+          echo "then promote the already published package by hand:"
           echo "  npm dist-tag add codex-channel-bgos@$VERSION latest"
 
       - name: Tag release
