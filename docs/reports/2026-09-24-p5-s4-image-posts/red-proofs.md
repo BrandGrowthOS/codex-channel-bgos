@@ -293,3 +293,66 @@ The two lines the step now prints before the command, as a run summary shows the
 **Known limit, named.** `returnedOutput` is evidence the runtime handed something over, not that it was a picture: a
 non empty result that is not an image still reads "made". That is the truthful reading of an item the runtime marked
 finished with output, and the live image turn that holds 0.14.0 is what confirms the real result's form.
+
+## Round 6: the premium review's owner facing items (2026-09-24)
+
+The premium pass (`_tools-p5/s4-premium.md`) ranked six items; the orchestrator took all six. This round carries items
+1, 2, 3, 5 and 6, each written test first; item 4 (the AFTER frames and the gate page) is evidence, not code, and is
+not in this round. Logs are `_tools-p5/logs/s4-close-*.log`. Commit: `748ec4e`, and this report.
+
+| Item | What changed | Red before the code | Proof for a guard that could not be red |
+| --- | --- | --- | --- |
+| 1 reset | `imageFailureLine` says "Codex has used up its picture limit for now. It resets in about 2 hours.", relative to the moment it posts, never a clock time: the plugin cannot know the viewer's zone and this host's zone need not be the owner's; the bubble's timestamp anchors the phrase. Buckets: `in a moment` under a minute, `in about N minutes` under an hour, `in about N hours` under two days, else `in about N days`, each count rounded and the bucket chosen by the ROUNDED count. A reset already past, exactly now, or none, not finite, zero or negative: the line ends after `for now.`. Seconds and milliseconds both still read. The adapter measures from one clock reading per turn (`TurnPictures.clockMs`), so two pictures refused by the same limit stay one line | 22 in `generated-images.spec.ts` (the headline line, ten buckets, milliseconds, past and exactly now, six missing or bad resets, the real clock, "no clock time, date or zone"); 3 in `adapter-image-posts.spec.ts` (the limit line, the lost plan card beside a refusal, and the clock case on its wording) | C1, C2, C5 below |
+| 2 name | `imageFileName` keeps the last 8 safe characters of the id: `codex-image-d1ba2874.png` for `ig_01a0d1ba2874`, `codex-image-7c0d9f13.png` for `exec-8c1f3a52-5b7e-4d19-9a60-2e4b7c0d9f13`, 24 characters at most. The adapter fixtures now carry the real name | 2: the `ig_` and `exec-` cases | the short id (`codex-image-ig_1.png`) and the all unsafe id (`codex-image-1.png`) pin the other side, green before and after |
+| 3 tried | `IMAGE_TRIED_NOT_SHOWN_LINE` is "Codex tried to make a picture, but nothing came back." ("could not be shown" implied a picture existed) | 3: the two pure cases and the adapter's tried case | none needed |
+| 5 range | `withoutDashes` first turns an en dash closed up between two digits into " to " (`2024 to 2026`, `3 to 4 people`, `1 to 2 to 3`), then every other dash into a comma. A spaced en dash is the parenthetical dash, even between numbers, so it stays a comma | 2: the ranges, and a range beside an em dash | C3, C4 below; "keeps a spaced en dash between numbers a pause" was green before and pins the scope |
+| 6 cap | `IMAGE_CAPTION_PROMPT_MAX` is 200 (two or three lines on a phone; 280 was about nine) | 1: the pin, and a 239 character prompt clipped on a word to between 181 and 200 | none needed |
+
+Totals: **33 tests red before their code** (`s4-close-red-plugin.clean.log`: `Tests 33 failed | 63 passed (96)`),
+each for its named reason: the 40 character names, `2024, 2026` where `2024 to 2026` was expected, `280` where `200`
+was, the old "could not make a picture because the image generation limit is used up ... UTC" line where the
+relative one was, a UTC time where none may be, and "but it could not be shown here" where "but nothing came back"
+was.
+
+**Mutations**, each applied to the fixed tree by `_tools-p5/s4-close-mutate.py`, run against the two changed spec
+files, then restored with its sha256 checked identical (`s4-close-mut-<name>.log`):
+
+| Mutation | What it does | Result |
+| --- | --- | --- |
+| C1 clock per line | the adapter passes `Date.now()` to every line instead of the turn's one reading | 1 red: "reads the clock once a turn, so one limit stays one line while the clock moves" (a clock that jumps a day per read splits the limit into two lines) |
+| C2 unrounded bucket | the minutes bucket is chosen by the raw time left, not the rounded count | 1 red: "59 minutes 40 seconds (never 60 minutes)" |
+| C3 spaced range | the range rule also takes a spaced en dash | 1 red: "keeps a spaced en dash between numbers a pause" |
+| C4 range after comma | the comma pass runs before the range pass | 2 red: both range cases |
+| C5 past kept | a reset already past is not dropped | 2 red: "already past" and "exactly now" |
+
+```
+the two changed spec files (s4-close-green-plugin.log): Test Files  2 passed (2)    Tests  96 passed (96)
+whole plugin suite (s4-close-full-suite.log):           Test Files  77 passed (77)  Tests  1144 passed | 1 skipped (1145)
+tsc --noEmit -p tsconfig.json (s4-close-tsc.log):        exit 0, no output
+```
+
+**The served sentence is untouched.** sha256 of the hint sentence, UTF-8, 530 bytes, after this round:
+`fe528db206e5ac09a296e624695e368f87bfb9fe904111305b0a889da436db98` in `src/agent-hints.ts`, `SERVED_TRUTH`, the BGOS
+`CODEX_GENERATED_IMAGES_SENTENCE`, the BGOS spec's `SENTENCE` and the BGOS mirror line. The BGOS mirror paragraph
+quotes none of the changed strings (it says only that the plugin "posts one plain line when a picture cannot be
+shown"), and no other file on the BGOS branch does, so the BGOS worktree is unchanged by this round.
+
+What the owner now reads:
+
+> Prompt: A plain gold circle centred on a dark charcoal background
+
+> Codex made a picture, but it could not be shown here. It is saved at ~\.codex\generated_images\thread-1\ig_1.png.
+
+> Codex made a picture, but it could not be shown here.
+
+> Codex tried to make a picture, but nothing came back.
+
+> Codex has used up its picture limit for now. It resets in about 2 hours.
+
+and the picture's file name, in the viewer strip, the photos card, the Artifacts card and the saved file:
+`codex-image-7c0d9f13.png`.
+
+**Left for item 4's lane, named.** The gate page (`before-after.html`) still shows the old limit line twice in
+section 05 (the two kit drawn bubbles, "It resets 2026-09-24 08:53 UTC.") and its section text says "naming the reset
+time"; the AFTER frames that show a file name show `exec-8c1f3a52-5b7e-4d19-9a60-2e4b7c0d9f13.png`, where the plugin
+posts `codex-image-7c0d9f13.png` for that id.
