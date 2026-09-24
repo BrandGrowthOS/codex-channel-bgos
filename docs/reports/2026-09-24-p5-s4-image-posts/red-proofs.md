@@ -447,3 +447,90 @@ turn is a logged in model call and stays with the promotion gate. A picture whos
 16 MiB is now dropped with that line, so it does not post and no plain line says so; the connection and every other
 turn survive, which is the item. `src/agent-hints.ts` is not in this round's diff, so the served hint sentence is
 untouched.
+
+## Round 8: the last check's finding on Round 7 (2026-09-24)
+
+The check (`_tools-p5/s4-final-result.json`, `result.chk.defects[0]`) found review item 3 only partly done, in two
+gaps. Both were written test first. Logs are `_tools-p5/logs/s4-r8-*.log`; the mutation runner is
+`_tools-p5/s4-r8-mutate.py`.
+
+**Gap 1: a picture over about 12 MiB vanished with no line.** Since Round 7 an `item/completed` line over the 16 MiB
+cap is dropped, and the host records a picture on `item/completed` only, so the owner got no picture and no plain
+line, against the served canon's "If it cannot be shown, the chat says so in one plain line".
+
+The check proposed reading the ids from the line's first 256 characters, on the premise that the runtime writes
+`threadId` before the item. It does for `turn/completed` (probe.md), but NOT for `item/completed`: the probe's own
+capture (`_tools-p5/probes/s4/raw.jsonl`, the real 0.154.0 binary) has the message keys in the order `method`,
+`params`, `emittedAtMs` and the `params` keys in the order `item`, `threadId`, `turnId`, `completedAtMs`. On a
+picture that order puts the ids behind the 16 MiB `result`, so the head holds the method, the item type and the item
+id, and never the thread. A head only read would never fire on the real runtime (mutation T1 below proves exactly
+that). So the transport now keeps BOTH ends of an oversized line: the first 256 characters, as before, and the last
+256, stitched across chunks.
+
+| What changed | Where |
+| --- | --- |
+| `AppServer.read` keeps the head and the tail of a line past the cap (`LINE_TAIL_KEPT = 256`, `keepTail` stitches the end across chunks) and hands both to `dropOversized` | `src/app-server.ts` |
+| `oversizedImage(head, tail)`: the head must open `{"method":"item/completed","params":{...` with `"item":{"type":"imageGeneration","id":"<id>"`; the thread and turn come from the head when they are written first, else from the end, anchored on the line's close (`},"threadId":"..","turnId":"..", number fields},number fields}`), so nothing inside the item can pass for them. Identified: the host gets one `item/completed` with `{item: {type: "imageGeneration", id, tooLarge: true}, threadId, turnId}` and no result. Not identified: dropped in silence, as before | `src/app-server.ts` |
+| `collectGeneratedImage` counts `tooLarge === true` as returned output, so the picture is kept as MADE and the adapter posts "Codex made a picture, but it could not be shown here." (never the tried line); the row closes as done | `src/generated-images.ts` |
+
+**Gap 2: the result size was never on the live image turn checklist.** The checklist now reads "result bytes and
+their form, the result size (under 12 MiB, the line cap), revisedPrompt, savedPath, the failure shape; probe.md,
+decision 7" in the `publish.yml` comment and its 0.14.0 `::warning::` line, in `src/interactions.ts`, and in the
+README paragraph and promote block. The BGOS notes' gate step 2 says the same (the BGOS Round 8).
+
+### Red before the code
+
+`s4-r8-red-plugin.clean.log`: `Test Files 4 failed (4)`, `Tests 7 failed | 168 passed (175)`.
+
+```
+x app-server > a picture too large to read still reaches the host as made > hands the host the picture, from the ids at the line's end (the real order)
+  AssertionError: expected [ [ 'tick', { n: 1 } ] ] to deeply equal [ [ 'item/completed', ...(1) ], ...(1) ]
+x app-server > a picture too large to read still reaches the host as made > hands the host the picture when the ids come first
+  AssertionError: expected [ [ 'tick', { n: 1 } ] ] to deeply equal [ [ 'item/completed', ...(1) ], ...(1) ]
+x app-server > a picture too large to read still reaches the host as made > reads the ids however the line is cut into chunks, even through the turn id
+  AssertionError: expected [ [ 'tick', { n: 1 } ], ...(1) ] to deeply equal [ [ 'item/completed', ...(1) ], ...(3) ]
+x codex-host > pictures a turn made > keeps a picture too large to read as made, so the made line posts, and closes its row
+  AssertionError: expected { itemId: 'ig_big_1' } to match object { itemId: 'ig_big_1', ...(1) }
+x generated-images > collectGeneratedImage > records it for a picture whose line was too large to read (Round 8)
+  AssertionError: expected { itemId: 'ig_big_1' } to deeply equal { itemId: 'ig_big_1', ...(1) }
+x publish-workflow > holds 0.14.0 for the live image turn in all three texts a release reads
+  AssertionError: publish.yml does not ask the live image turn for the result size (under 12 MiB, the line cap)
+x publish-workflow > never hands anyone a bare promote command when a held version lands on next
+  AssertionError: the warning does not name 0.14.0's condition: ... the result size (under 12 MiB, the line cap) ...: expected -1 to be greater than or equal to 0
+```
+
+Each for its named reason: the transport dropped every picture line (three cases), the host and the collector kept a
+too large picture as tried (two), and no text named the size (two). Green before the code, on purpose, and green
+after: "still drops a picture line that names no thread, in silence" and "still drops any other item's line over the
+cap, in silence" (the other side of the rule).
+
+The two ends are tied by one fixture: `oversizedImageCompleted` in `test/fixtures/image-generation.ts` is what the
+transport cases require the transport to emit and what the host case feeds the host.
+
+### Mutations
+
+Each applied to the fixed `src/app-server.ts`, run against `test/app-server.spec.ts`, then restored with its sha256
+checked identical (`s4-r8-mutations.txt`, `s4-r8-mut-<name>.log`):
+
+| Mutation | What it does | Result |
+| --- | --- | --- |
+| T1 head only | the ids are read from the head alone, as the check proposed | 2 red: the real order case and the chunk case |
+| T2 no stitch | the kept end is only the last chunk's, not stitched across chunks | 1 red: the chunk case |
+
+### Green
+
+```
+the four changed spec files (s4-r8-green-plugin.clean.log): Test Files  4 passed (4)    Tests  175 passed (175)
+whole plugin suite, once (s4-r8-full-suite.clean.log):      Test Files  77 passed (77)  Tests  1163 passed | 1 skipped (1164)
+tsc --noEmit -p tsconfig.json, once (s4-r8-tsc.log):         exit 0, no output
+```
+
+The whole suite was 1156 passed and 1 skipped at Round 7; the seven new cases make 1163.
+
+**What stays true, named.** A line over the cap whose two ends cannot say which picture of which turn it was (a
+future runtime that moves the ids into the middle, say) is still dropped with no line; that is the only silent case
+left, and the live image turn's size check is there to see how near a real picture comes. The picture itself still
+never posts past the cap, and its saved copy is not named in the line: the rebuilt item carries only the id, and
+reading `savedPath` off the line's end (it is the item's last field) was left out of this round, so the owner reads
+the made line without "It is saved at". `src/agent-hints.ts` is not in this round's diff, so the served hint sentence
+is untouched.
