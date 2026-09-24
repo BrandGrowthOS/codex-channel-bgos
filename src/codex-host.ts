@@ -463,6 +463,63 @@ function workerStatesOf(
 const CHILD_READ_TIMEOUT_MS = 5_000;
 
 /**
+ * PAST_TURNS_NOTE: no request this host sends brings a thread's past turns
+ * back in its reply (stage 4, C-21, review finding 4).
+ *
+ * The runtime keeps every generated picture's full base64 `result` in the
+ * rollout, and `thread/resume`, `thread/fork` and `thread/read
+ * {includeTurns:true}` all hydrate `thread.turns` unless told not to. A chat
+ * with about six pictures then answers ONE resume with a single line over the
+ * 16 MiB cap in src/app-server.ts, which closes the connection and fails every
+ * live turn on this daemon, for every chat, and again on every later resume of
+ * that chat. Measured on the vendored 0.154.0 binary: 14.23 MiB for five
+ * pictures without the flag, 3.9 KB with it.
+ *
+ * The 0.154.0 schema (`codex app-server generate-ts --experimental`) offers
+ * the cure in so many words. ThreadResumeParams.excludeTurns and
+ * ThreadForkParams.excludeTurns: "When true, return only thread metadata ...
+ * without populating `thread.turns` ... Full-history hydration is deprecated
+ * for paginated threads; use this with `thread/turns/list` and
+ * `thread/items/list` instead." ThreadReadParams.includeTurns: "prefer a
+ * metadata-only read and page with `thread/turns/list`". So both resumes and
+ * the fork pass `excludeTurns: true` (none of them reads a turn), every
+ * metadata read passes `includeTurns: false`, and the one reader that needs
+ * old text, the legacy tool upgrade below, pages `thread/turns/list` a few
+ * turns at a time instead.
+ */
+/** How much recent conversation a legacy tool upgrade carries over. */
+const LEGACY_CONTEXT_CHARS = 60_000;
+/**
+ * Turns per `thread/turns/list` page for that upgrade, newest first. Small, so
+ * that even a page whose summary view did carry pictures (not seen on the
+ * 0.154.0 probe, where a summary turn holds its userMessage and agentMessage)
+ * stays far below the line cap.
+ */
+const LEGACY_HISTORY_PAGE_TURNS = 4;
+/** The most pages one upgrade reads (100 turns): the budget ends it sooner. */
+const LEGACY_HISTORY_MAX_PAGES = 25;
+
+/** The user and agent text of one turn, in the turn's own order. */
+function turnMessages(turn: RpcObject): Array<{ role: string; text: string }> {
+  const items: RpcObject[] = Array.isArray(turn?.items) ? turn.items : [];
+  return items.flatMap((item) =>
+    item.type === "agentMessage"
+      ? [{ role: "assistant", text: String(item.text ?? "") }]
+      : item.type === "userMessage"
+        ? [
+            {
+              role: "user",
+              text: (Array.isArray(item.content) ? item.content : [])
+                .filter((c: RpcObject) => c.type === "text")
+                .map((c: RpcObject) => c.text)
+                .join("\n"),
+            },
+          ]
+        : [],
+  );
+}
+
+/**
  * The child's readable name off its own thread: its nickname, else its role.
  *
  * The parent's stream carries no name for a child anywhere, so this metadata
@@ -971,6 +1028,8 @@ export class CodexHost {
         threadId,
         cwd: this.workdir,
         developerInstructions: this.hints,
+        // Only the identity is read below. See PAST_TURNS_NOTE.
+        excludeTurns: true,
       });
       if (result.thread?.id !== threadId)
         throw new Error("Codex returned a different conversation.");
@@ -986,6 +1045,9 @@ export class CodexHost {
       const result = await this.server.request("thread/fork", {
         threadId: parent,
         cwd: this.workdir,
+        // The fork still copies every turn; only its REPLY leaves them out,
+        // and only the new id is read below. See PAST_TURNS_NOTE.
+        excludeTurns: true,
       });
       const id = result.thread?.id;
       if (typeof id !== "string" || !id || id === parent)
@@ -1226,6 +1288,47 @@ export class CodexHost {
       relay,
     );
   }
+  /**
+   * A thread's recent user and agent text, oldest first, read a few summary
+   * turns at a time from the newest, until `budget` characters are in hand or
+   * the history ends. Best effort: a page that cannot be read (a thread the
+   * runtime has not indexed, an older runtime) ends the walk with what was
+   * read, and the upgrade goes ahead without it rather than failing the turn.
+   */
+  private async recentThreadMessages(
+    threadId: string,
+    budget: number,
+  ): Promise<Array<{ role: string; text: string }>> {
+    const newestFirst: Array<{ role: string; text: string }> = [];
+    let collected = 0;
+    let cursor: string | null = null;
+    for (let page = 0; page < LEGACY_HISTORY_MAX_PAGES; page += 1) {
+      let result: RpcObject;
+      try {
+        result = await this.server.request("thread/turns/list", {
+          threadId,
+          itemsView: "summary",
+          sortDirection: "desc",
+          limit: LEGACY_HISTORY_PAGE_TURNS,
+          ...(cursor ? { cursor } : {}),
+        });
+      } catch {
+        break;
+      }
+      const turns: RpcObject[] = Array.isArray(result?.data) ? result.data : [];
+      for (const turn of turns)
+        for (const message of turnMessages(turn).reverse()) {
+          newestFirst.push(message);
+          collected += message.text.length;
+        }
+      cursor =
+        typeof result?.nextCursor === "string" && result.nextCursor
+          ? result.nextCursor
+          : null;
+      if (!cursor || collected >= budget) break;
+    }
+    return newestFirst.reverse();
+  }
   private async ensureThread(chatId: number): Promise<string> {
     await this.server.start();
     let threadId: string | undefined = this.map[String(chatId)];
@@ -1260,29 +1363,13 @@ export class CodexHost {
         // Dynamic tools are fixed at thread creation. Keep the old native
         // transcript intact and carry recent attributed text to a new thread.
         // Never silently resume a legacy thread that cannot call HOAI tools.
-        const previous = await this.server.request("thread/read", {
+        // Never `thread/read {includeTurns:true}`: that is the whole history
+        // in one line, pictures and all. See PAST_TURNS_NOTE.
+        const messages = await this.recentThreadMessages(
           threadId,
-          includeTurns: true,
-        });
-        const messages = (previous.thread.turns ?? []).flatMap(
-          (turn: RpcObject) =>
-            (turn.items ?? []).flatMap((item: RpcObject) =>
-              item.type === "agentMessage"
-                ? [{ role: "assistant", text: item.text }]
-                : item.type === "userMessage"
-                  ? [
-                      {
-                        role: "user",
-                        text: (item.content ?? [])
-                          .filter((c: RpcObject) => c.type === "text")
-                          .map((c: RpcObject) => c.text)
-                          .join("\n"),
-                      },
-                    ]
-                  : [],
-            ),
+          LEGACY_CONTEXT_CHARS,
         );
-        let budget = 60_000;
+        let budget = LEGACY_CONTEXT_CHARS;
         const recent: RpcObject[] = [];
         for (const message of messages.slice().reverse()) {
           if (budget <= 0) break;
@@ -1300,7 +1387,12 @@ export class CodexHost {
         threadId = undefined;
       }
       const result = threadId
-        ? await this.server.request("thread/resume", { ...params, threadId })
+        ? await this.server.request("thread/resume", {
+            ...params,
+            threadId,
+            // Only the identity is read below. See PAST_TURNS_NOTE.
+            excludeTurns: true,
+          })
         : await this.server.request("thread/start", {
             ...params,
             developerInstructions: this.hints + priorContext,
