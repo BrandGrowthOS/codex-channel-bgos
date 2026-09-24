@@ -356,3 +356,94 @@ and the picture's file name, in the viewer strip, the photos card, the Artifacts
 section 05 (the two kit drawn bubbles, "It resets 2026-09-24 08:53 UTC.") and its section text says "naming the reset
 time"; the AFTER frames that show a file name show `exec-8c1f3a52-5b7e-4d19-9a60-2e4b7c0d9f13.png`, where the plugin
 posts `codex-image-7c0d9f13.png` for that id.
+
+## Round 7: the final review's plugin items (2026-09-24)
+
+The final review (`_tools-p5/s4-close-result.json`, `result.review.defects`) named five items. Four are the plugin's
+and are here; the fifth (the BGOS branch behind main) is the BGOS lane's. Each was written test first. Logs are
+`_tools-p5/logs/s4-final-*.log`; the mutation runner is `_tools-p5/s4-final-mutate.py`.
+
+| Item | What changed | Red before the code | Proof for a guard that could not be red |
+| --- | --- | --- | --- |
+| 1 medium, history | `recentThreadMessages` pages `thread/turns/list` COLD first. Only a first page that fails, or comes back with no turns and no cursor, resumes the thread (`{threadId, cwd, excludeTurns: true}`, no config), pages it again and unsubscribes it (in a `finally`). A thread whose goal is `active` (cold `thread/goal/get`), or whose goal read fails, is never resumed. While the read runs, the host drops every notification for that thread (`historyReads`), so no goal update and no turn reaches the chat that still maps to it | 2: "resumes a thread the history index has not seen, metadata only, pages it, then lets it go" (the fake answers `data: []` until the thread is resumed; the carried text lost "first ask") and "lets the thread go even when the page after the resume fails" | H2 to H5 below; "pages an indexed thread cold and never resumes it", "never resumes a legacy thread whose goal is active", "lets nothing the legacy thread says during the read reach the chat" and "still upgrades the thread when the history resume fails" were green before and pin the other side |
+| 2 low, one line | `AppServer.read` holds one line at a time. A line past 16 MiB is thrown away up to its newline and read by its first 256 characters only: a reply (`{"id":N,"result"` or `"error"`) fails only request N ("Codex sent a reply too large to read."), a request from the runtime (`{"id":X,"method"`) is answered with error -32600 so the runtime is not left waiting, a notification is dropped. Nothing closes | 3: the reply, the notification and the request cases (each got "Codex sent an oversized event." and a closed connection) | A1 to A3 below |
+| 3 low, hold wording | `publish.yml` (the comment and the printed warning), `src/interactions.ts` (the paragraph and the retire order) and the README (the paragraph and the promote block) say 0.14.0 is promoted "only after 0.13.0 is on latest, never before or in the same step", and each file says that promoting an older version after 0.14.0 moves latest back; the workflow prints that as its own `::warning::` line in the 0.14.0 branch, before the promote command | 2: the three texts case ("publish.yml does not say ... in both places: expected 0") and the printed warning case | P1 to P3 below |
+| 4 low, goal turn Stop | `adoptGoalTurn` reads the chat's stop generation and its stopped pictures (`pictureTails`) when the turn is adopted. A goal turn the owner stopped (the generation moved: /stop, /new or the voice stop) takes the ordinary turn's Stop branch: the card closes, the finished pictures post in the background through `postStoppedPictures` (after the stop line and any earlier stopped pictures, pictures only), and no partial text and no red error follow "Stopped.". Any other goal turn's first row, requests, plan card and reply wait for a stopped turn's pictures. The README row says a turn a goal runs follows the same rules. The three adopted turn fixtures in other spec files gained the `generations` map the adapter always has | 3: the stopped goal turn (its picture reached the chat before "Stopped."), its reply after a stopped picture, and its first row and request after it | G1 to G3 below |
+
+Totals: **10 tests red before their code** (`s4-final-red-plugin.clean.log`: `Tests 10 failed | 123 passed (133)`),
+each for its named reason.
+
+**The zero cost probes, and what they change about item 1.** Three probes under `_tools-p5/probes/s4-turns` (not
+committed), each against an isolated `CODEX_HOME` created and deleted by the probe, no auth file,
+`OPENAI_API_KEY` and `CODEX_API_KEY` scrubbed from the child's environment, and every provider pointed at a local
+address (127.0.0.1:9, where nothing listens, or an in-process stub on an OS-assigned port). No login, no model
+call, no spend.
+
+- `probe-turns-cold.js` (`run-cold.out`), the review's case, on copies of this stage's two stub rollouts: cold,
+  `thread/turns/list` answers `turns=0 nextCursor=null`, and so does the old `thread/read {includeTurns:true}`,
+  now actually sent cold (`thread.turns=0`). `thread/resume {threadId, cwd, excludeTurns:true}` answers about 2 KB,
+  and the same page then returns the turn (userMessage 99 characters, agentMessage 24). A resume with no config
+  fails when the thread's recorded provider is not defined (`run-cold-1.out`: "Model provider `stub` not found");
+  a real chat's thread records `openai`, which always is. After `thread/unsubscribe` answers `unsubscribed`,
+  `thread/loaded/list` still lists the thread, so the unsubscribe does not unload it at once.
+- The same probe, part 2: a thread with an ACTIVE goal, stored by one app server and resumed COLD by a second one
+  on the same home, **started a continuation turn by itself within 10 seconds of the resume**. The review's
+  proposed fix (resume every legacy thread before paging) would therefore run the model on a legacy thread whose
+  goal is active, with its old tools, in a turn the host would adopt into the chat. Hence the goal check.
+- `probe-turns-indexed.js` (`run-indexed.out`), the case the review could not run: two threads made NATIVELY by
+  the app server (two turns each, answered by the in-process stub), then a second app server on the same home,
+  nothing loaded. Cold, `thread/turns/list` returned both turns of each thread, `thread/read {includeTurns:true}`
+  returned them too, and `thread/loaded/list` stayed empty. So the empty page is a thread the runtime's history
+  index (`thread_history_1.sqlite` in a real home) has not seen, not a thread that is not loaded. A chat's own
+  thread, made by this daemon's app server, pages cold with no resume, as the reviewed 0.14.0 code assumed; the
+  review's probe read copied rollouts, which no index had seen. The fallback resume now covers the thread the
+  index has not seen (an older rollout, or one copied in), which neither the 0.14.0 read nor the old full read
+  ever covered.
+- `probe-turns-fork.js` (`run-fork.out`), for the record: an ephemeral fork refuses `thread/turns/list` ("ephemeral
+  threads do not support thread/turns/list"), and started no turn on a goal thread. Not used.
+- The owner's real `CODEX_HOME` was not copied: it holds the owner's conversations. Making the threads natively in
+  an isolated home answers the same question (does a cold page read an indexed thread) with no owner content.
+
+**Mutations**, each applied to the fixed tree, run against its spec file, then restored with its sha256 checked
+identical (`s4-final-mut-<name>.log`, summary `s4-final-mutations.txt`; `sha256sum -c s4-final-premut.sha` OK for
+all five files afterwards):
+
+| Mutation | What it does | Result |
+| --- | --- | --- |
+| H1 no resume | the unread branch returns the cold page | 2 red: the unindexed case and the failed page case |
+| H2 always resume | every legacy thread is resumed, indexed or not | 3 red: the indexed case, and the two older paging cases (their page counts) |
+| H3 no goal check | the active goal is ignored | 1 red: the active goal case |
+| H4 no history guard | `notification` routes the legacy thread's events | 1 red: "lets nothing the legacy thread says during the read reach the chat" |
+| H5 no unsubscribe | the thread is never let go | 2 red: the unindexed case and the failed page case |
+| A1 close again | an oversized line fails everything and closes, as before | 3 red: all three line cases |
+| A2 fail all | an oversized reply rejects every pending request | 1 red: the reply case (the parked request failed too) |
+| A3 request unanswered | an oversized request from the runtime gets no answer | 1 red: the request case (timed out) |
+| P1 echo old order | the printed warning says "with 0.13.0 or after it" again | 2 red: the three texts case and the printed warning case |
+| P2 README block old order | the promote block says "with 0.13.0 or after it" again | 1 red: the three texts case (README said it once) |
+| P3 no moves back line | the workflow stops printing that promoting an older version moves latest back | 1 red: the printed warning case |
+| G1 stop through publish | an owner's stop takes publishTurnResult again | 1 red: the stopped goal turn |
+| G2 no stop line wait | stopped pictures stop waiting for the stop line | 2 red: the stopped goal turn and the ordinary Stop case |
+| G3 goal turn no tail wait | a goal turn stops waiting for stopped pictures | 2 red: its reply and its row and request |
+
+All 14 red on their named case.
+
+```
+the six changed spec files (s4-final-green-plugin.clean.log): Test Files  6 passed (6)    Tests  191 passed (191)
+whole plugin suite (s4-final-full-suite.clean.log):          Test Files  77 passed (77)  Tests  1156 passed | 1 skipped (1157)
+tsc --noEmit -p tsconfig.json (s4-final-tsc.log):             exit 0, no output
+```
+
+After the whole suite ran, two comments were brought up to date and nothing else: PAST_TURNS_NOTE in
+`src/codex-host.ts` and the header of its spec block both said an oversized resume reply closes the connection,
+which since item 2 it does not. The host spec re-ran green on its own (`s4-final-host-after-comments.log`:
+`Tests 85 passed (85)`).
+
+One guard was changed on purpose: "reads a child thread and resumes only the owner's own" counted two
+`"thread/resume"` call sites in `src/codex-host.ts`. The history read is a third, on a thread from this process's
+chat map, so the count is three and the case now also checks that the third sits in `recentThreadMessages`.
+
+**Not done here, named.** The review also asked to record the real result size in the gated live image turn; that
+turn is a logged in model call and stays with the promotion gate. A picture whose `item/completed` line is past
+16 MiB is now dropped with that line, so it does not post and no plain line says so; the connection and every other
+turn survive, which is the item. `src/agent-hints.ts` is not in this round's diff, so the served hint sentence is
+untouched.
