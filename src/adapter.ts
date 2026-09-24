@@ -53,9 +53,9 @@ import {
   type RunTurnResult,
 } from "./codex-host.js";
 import {
-  IMAGE_NOT_SHOWN_LINE,
   imageCaption,
   imageFailureLine,
+  imageNotShownLine,
 } from "./generated-images.js";
 import {
   mediaLineIsPostedPicture,
@@ -186,9 +186,10 @@ export class CodexAdapter {
    * Per chat, a stopped turn's pictures still uploading. The Stop branch no
    * longer waits for them (the card, the mission and the owner's next message
    * would all wait on a presigned PUT), so the NEXT turn's own posts wait
-   * instead: its card rows, a plan card it raises and its reply all land
-   * after them, and no done from an old picture runs over the new turn's
-   * working. The next turn itself starts at once.
+   * instead: its card rows, its requests (an approval card, an ask), a plan
+   * card it raises and its reply all land after them, and no done from an old
+   * picture runs over the new turn's working or its blocked. The next turn
+   * itself starts at once.
    */
   private pictureTails?: Map<number, Promise<void>>;
   /**
@@ -983,7 +984,11 @@ export class CodexAdapter {
     // plan card and the end of the turn (stage 4, C-21).
     const pictures = newTurnPictures();
     // A stopped turn's pictures still uploading: this turn starts now, but
-    // its own posts wait for them (see `pictureTails`).
+    // its own posts wait for them (see `pictureTails`). That includes its
+    // REQUESTS (re-review item 3): an approval card or an ask carousel is read
+    // as blocked, and a stopped picture landing after it would run done over
+    // the owner's Needs you while the approval still waits. `earlier` never
+    // rejects, so a request is only ever delayed, never failed, by it.
     const earlier = this.pictureTails?.get(chatId);
     let progressWork = Promise.resolve();
     const seenTools = new Set<string>();
@@ -992,8 +997,10 @@ export class CodexAdapter {
       result = await this.host.runTurn(chatId, turnInput, {
         ...nativeOptions,
         signal: controller.signal,
-        onRequest: (method, params) =>
-          this.tools.handleRequest(method, params, context),
+        onRequest: async (method, params) => {
+          await earlier;
+          return this.tools.handleRequest(method, params, context);
+        },
         onUsage: (usage) => this.reportContextPct(assistantId, usage),
         onTool: (card, itemId) => {
           if (!seenTools.has(itemId)) {
@@ -1193,9 +1200,13 @@ export class CodexAdapter {
    * without one), and one plain line per distinct refusal, naming the reset
    * time when the runtime gave one.
    *
-   * A picture that was made but did not reach the chat says so in one plain
-   * line, IMAGE_NOT_SHOWN_LINE, once per turn (review finding 3): one with no
-   * bytes the app can draw, or one whose upload failed after its retries.
+   * A picture that did not reach the chat says so in one plain line (review
+   * finding 3): one with no bytes the app can draw, or one whose upload
+   * failed after its retries. `imageNotShownLine` picks the words (re-review
+   * item 2): "made" and where it is saved when the runtime saved a copy,
+   * "made" alone when only the bytes came back, and "tried" when neither did.
+   * Each distinct line posts once per turn, so two pictures saved at one
+   * place read as one line and two saved at two places name both.
    * The runtime has already told the model the picture is "displayed to the
    * user", so silence would leave the owner, and the model's next answer,
    * believing it arrived. A picture the outbox QUEUED is not lost: it will
@@ -1238,7 +1249,7 @@ export class CodexAdapter {
         continue;
       }
       if (!image.bytes || !image.mimeType) {
-        await say(IMAGE_NOT_SHOWN_LINE);
+        await say(imageNotShownLine(image));
         continue;
       }
       const sent = await outcome(
@@ -1252,7 +1263,7 @@ export class CodexAdapter {
         ),
       );
       if (sent === "lost") {
-        await say(IMAGE_NOT_SHOWN_LINE);
+        await say(imageNotShownLine(image));
         continue;
       }
       ledger.posted += 1;

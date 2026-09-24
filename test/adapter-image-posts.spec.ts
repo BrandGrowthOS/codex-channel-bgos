@@ -64,8 +64,33 @@ function refused(patch: Partial<GeneratedImage> = {}): GeneratedImage {
 const LIMIT_LINE =
   "Codex could not make a picture because the image generation limit is used up. It resets 2026-09-24 08:53 UTC.";
 const FALLBACK = "(Codex finished the turn without a text reply.)";
-/** Finding 3: a picture that was made but never reached the chat says so. */
-const NOT_SHOWN = "A picture was made, but it could not be shown here.";
+/**
+ * Finding 3, and the re-review's item 2: a picture that never reached the
+ * chat says so in one of two lines. "made" only when the runtime saved a copy
+ * or handed over the bytes, and then naming the saved file when there is one
+ * (shortened, the way every row shortens a path); "tried" when neither came
+ * back, because a generation that failed without a failure object made
+ * nothing and must not be said to have.
+ *
+ * The home directory is pinned per test (HOME and USERPROFILE both, so
+ * `os.homedir()` answers the same on Windows, macOS and Linux), which is what
+ * makes the shortened path below a fixed string.
+ */
+const OWNER_HOME = "C:\\Users\\owner";
+const SAVED_SHORT =
+  "~\\.codex\\generated_images\\01a0d1b7-8827-74c2-8882-b5d8555d38e5\\ig_01a0d1ba2874.png";
+const NOT_SHOWN_SAVED = `Codex made a picture, but it could not be shown here. It is saved at ${SAVED_SHORT}.`;
+const NOT_SHOWN_MADE = "Codex made a picture, but it could not be shown here.";
+const NOT_SHOWN_TRIED =
+  "Codex tried to make a picture, but it could not be shown here.";
+
+function pinOwnerHome(): void {
+  vi.stubEnv("HOME", OWNER_HOME);
+  vi.stubEnv("USERPROFILE", OWNER_HOME);
+}
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 const PLAN_LOST =
   "(Codex proposed a plan, but the card could not be posted. Ask it to write the plan out in chat.)";
 const PLAN = "## Add retry\n\n1. Add the helper\n2. Wrap the call";
@@ -265,18 +290,43 @@ describe("a picture Codex made posts itself at the end of the turn", () => {
     expect(reply.sendText).not.toHaveBeenCalled();
   });
 
-  it("says a picture could not be shown when its upload failed, once, and no fallback", async () => {
+  it("says a picture could not be shown when its upload failed, names its saved file, once, and no fallback", async () => {
     // Finding 3. The runtime told the model the picture is "already displayed
     // to the user"; without this line the owner never learns one was made,
-    // and the generic fallback line would say Codex made nothing at all.
+    // and the generic fallback line would say Codex made nothing at all. The
+    // saved copy sits under the Codex home, outside the media root, so the
+    // line is the only place the owner learns where it is.
+    pinOwnerHome();
     const { adapter, reply } = fixture(async () =>
       done({ images: [picture(), picture({ itemId: "ig_2" })] }),
     );
     reply.sendImageBytes.mockRejectedValue(new Error("S3 PUT failed: HTTP 500"));
     await adapter.executeAndReply(10, 20, "Draw", reply);
     expect(reply.sendImageBytes).toHaveBeenCalledTimes(2);
-    // Two pictures that could not be shown read as ONE line.
-    expect(reply.sendText.mock.calls).toEqual([[NOT_SHOWN]]);
+    // Two pictures that could not be shown, saved at one place, read as ONE line.
+    expect(reply.sendText.mock.calls).toEqual([[NOT_SHOWN_SAVED]]);
+  });
+
+  it("says Codex made a picture when its upload failed and the runtime saved no copy", async () => {
+    // The bytes came back, so a picture WAS made; there is just no file to name.
+    const { adapter, reply } = fixture(async () =>
+      done({ images: [picture({ savedPath: undefined })] }),
+    );
+    reply.sendImageBytes.mockRejectedValue(new Error("S3 PUT failed: HTTP 500"));
+    await adapter.executeAndReply(10, 20, "Draw", reply);
+    expect(reply.sendText.mock.calls).toEqual([[NOT_SHOWN_MADE]]);
+  });
+
+  it("says Codex only TRIED when an item came back with no picture and no saved file", async () => {
+    // Status failed, an empty result, no failure object: nothing was made,
+    // and the chat must not say a picture was.
+    const { adapter, reply } = fixture(async () =>
+      done({ replyText: "Done.", images: [{ itemId: "ig_nothing" }] }),
+    );
+    await adapter.executeAndReply(10, 20, "Draw", reply);
+    expect(reply.sendImageBytes).not.toHaveBeenCalled();
+    expect(reply.sendText.mock.calls).toEqual([[NOT_SHOWN_TRIED], ["Done."]]);
+    expect(reply.sendText.mock.calls[0]![0]).not.toMatch(/\bmade\b/);
   });
 
   it("counts a picture the outbox took as posted: it will land, so no line", async () => {
@@ -303,7 +353,10 @@ describe("a picture Codex made posts itself at the end of the turn", () => {
     expect(reply.sendText.mock.calls).toEqual([[LIMIT_LINE]]);
   });
 
-  it("says a picture with no bytes to show could not be shown, first in the reply", async () => {
+  it("names the saved file when only the saved copy came back, first in the reply", async () => {
+    // The savedPath only shape (ledger decision 3's open question, still not
+    // seen live): the owner is told where the picture is.
+    pinOwnerHome();
     const { adapter, reply } = fixture(async () =>
       done({
         replyText: "Done.",
@@ -312,7 +365,7 @@ describe("a picture Codex made posts itself at the end of the turn", () => {
     );
     await adapter.executeAndReply(10, 20, "Draw", reply);
     expect(reply.sendImageBytes).not.toHaveBeenCalled();
-    expect(reply.sendText.mock.calls).toEqual([[NOT_SHOWN], ["Done."]]);
+    expect(reply.sendText.mock.calls).toEqual([[NOT_SHOWN_SAVED], ["Done."]]);
   });
 
   it("drops a MEDIA: line naming the picture it already posted", async () => {
@@ -360,17 +413,27 @@ describe("a picture Codex made posts itself at the end of the turn", () => {
         error: "Stopped by you.",
         replyText: "Late partial response",
         turnCompleted: false,
-        images: [picture(), refused()],
+        images: [
+          picture(),
+          refused(),
+          { itemId: "ig_empty", savedPath: SAVED },
+          { itemId: "ig_nothing" },
+        ],
       });
     });
     await adapter.executeAndReply(10, 20, "Draw", reply);
     // The picture exists and the quota is spent; "Stopped." already set done.
-    // No text, no refusal line and no red error after an intentional stop.
+    // No text, no refusal line, no not shown line of either kind, and no red
+    // error after an intentional stop.
     // Finding 6: the mission and the card close first, and the picture
     // follows without holding them.
     await vi.waitFor(() =>
       expect(order).toEqual(["finalize", `image:Prompt: ${PROMPT}`]),
     );
+    // Wait for the background post to finish, so a line posted after the
+    // picture would be in the order below and not merely late.
+    await vi.waitFor(() => expect(adapter.pictureTails?.get(20)).toBeUndefined());
+    expect(order).toEqual(["finalize", `image:Prompt: ${PROMPT}`]);
     expect(
       adapter.missionLane.finalizeTurn.mock.invocationCallOrder[0],
     ).toBeLessThan(reply.sendImageBytes.mock.invocationCallOrder[0]!);
@@ -651,6 +714,72 @@ describe("a stopped turn's pictures hold nothing up", () => {
       "second turn ran",
       `image:Prompt: ${PROMPT}`,
       "text:Second answer.",
+      "finalize",
+    ]);
+  });
+});
+
+/**
+ * Re-review item 3: the next turn's REQUESTS wait for a stopped turn's
+ * pictures too. An approval card and an ask_user_input carousel are both read
+ * as blocked; the stopped picture's standard post is read as done, and landing
+ * after the card it would close the owner's Needs you while the approval still
+ * waits. The next turn still STARTS at once; only what it posts waits.
+ *
+ * MUTATION PROOF: pass `this.tools.handleRequest` straight through again (no
+ * `await earlier`) and this case goes red.
+ */
+describe("a stopped turn's pictures land before the next turn's requests", () => {
+  it("holds the next turn's approval card until the stopped picture has posted", async () => {
+    let turnNo = 0;
+    const { adapter, reply, order } = fixture(async (cb) => {
+      turnNo += 1;
+      if (turnNo === 1) {
+        for (const controller of adapter.turnControllers.get(20))
+          controller.abort();
+        return done({
+          error: "Stopped by you.",
+          turnCompleted: false,
+          images: [picture()],
+        });
+      }
+      order.push("second turn ran");
+      // The new turn's first command needs the owner's approval.
+      await cb.onRequest?.("item/commandExecution/requestApproval", {
+        threadId: "thread-20",
+        turnId: "turn-2",
+        itemId: "cmd-1",
+        command: "npm run deploy",
+      });
+      return done({ replyText: "Deployed." });
+    });
+    adapter.tools.handleRequest = vi.fn(async () => {
+      order.push("approval card");
+      return { decision: "accept" };
+    });
+    let land!: () => void;
+    reply.sendImageBytes.mockImplementation(
+      async (_image: unknown, caption?: string) => {
+        await new Promise<void>((resolve) => (land = resolve));
+        order.push(`image:${caption ?? ""}`);
+        return { id: 6 };
+      },
+    );
+    const first = adapter.runAndReply(10, 20, "Draw", reply);
+    const second = adapter.runAndReply(10, 20, "Deploy it", reply);
+    // The next turn starts at once, while the picture is still uploading.
+    await vi.waitFor(() => expect(order).toContain("second turn ran"));
+    await first;
+    await vi.waitFor(() => expect(reply.sendImageBytes).toHaveBeenCalled());
+    expect(order).not.toContain("approval card");
+    land();
+    await second;
+    expect(order).toEqual([
+      "finalize",
+      "second turn ran",
+      `image:Prompt: ${PROMPT}`,
+      "approval card",
+      "text:Deployed.",
       "finalize",
     ]);
   });

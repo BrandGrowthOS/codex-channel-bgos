@@ -10,6 +10,7 @@ import {
   appServerInput,
   rememberChanges,
   waitsForOwner,
+  type RunTurnCallbacks,
   type RunTurnResult,
 } from "../src/codex-host.js";
 import { verifyModel } from "../src/setup/verify-model.js";
@@ -1534,11 +1535,14 @@ describe("pictures a turn made", () => {
   let home: string, server: Server, host: CodexHost;
   let adopted: number[];
   let delivered: RunTurnResult[];
+  /** What an adopted turn is handed, read when the turn is adopted. */
+  let adoptedCallbacks: RunTurnCallbacks;
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "hoai-images-"));
     vi.stubEnv("CODEX_BGOS_HOME", home);
     adopted = [];
     delivered = [];
+    adoptedCallbacks = {};
     server = new Server();
     host = new CodexHost({
       auth: { ok: true, mode: "chatgpt", label: "test" },
@@ -1547,7 +1551,7 @@ describe("pictures a turn made", () => {
       onAdoptedTurn: (chatId) => {
         adopted.push(chatId);
         return {
-          callbacks: {},
+          callbacks: adoptedCallbacks,
           deliver: (result) => {
             delivered.push(result);
           },
@@ -1742,6 +1746,61 @@ describe("pictures a turn made", () => {
     server.finish("thread-1", "Here it is.");
     const result = await owner;
     expect(result.images?.map((i) => i.itemId)).toEqual(["ig_01a0d1ba2874"]);
+    expect(delivered).toHaveLength(0);
+  });
+
+  /**
+   * Re-review item 4. A picture an adopted goal turn handed to its plan card
+   * was posted there (the adapter posts a card's pictures first). If the
+   * owner then takes the thread over, the handover must not copy that picture
+   * into the owner's turn too, whose fresh picture record would post it a
+   * second time. A picture finished AFTER the card still carries across.
+   *
+   * MUTATION PROOF: copy every prior picture again (drop the handed off
+   * skip) and this case goes red.
+   */
+  it("does not hand an owner turn a picture the adopted turn already handed to its plan card", async () => {
+    const signals: any[] = [];
+    adoptedCallbacks = {
+      onPlanProposal: (signal) => {
+        signals.push(signal);
+      },
+    };
+    const first = host.runTurn(20, "hello");
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.finish("thread-1", "hi");
+    await first;
+    server.emit("notification", "turn/started", {
+      threadId: "thread-1",
+      turn: { id: "turn-continuation", status: "inProgress" },
+    });
+    expect(adopted).toEqual([20]);
+    server.emit("notification", "item/completed", itemCompleted(imageItem(), "thread-1"));
+    server.emit("notification", "item/completed", {
+      threadId: "thread-1",
+      turnId: "turn-continuation",
+      item: { id: "plan-1", type: "plan", text: "## Logo\n\n1. Draw it" },
+    });
+    await vi.waitFor(() => expect(signals).toHaveLength(1));
+    expect(signals[0].images.map((i: any) => i.itemId)).toEqual([
+      "ig_01a0d1ba2874",
+    ]);
+    // A second picture, finished after the card: nothing has posted it yet.
+    server.emit(
+      "notification",
+      "item/completed",
+      itemCompleted(imageItem({ id: "ig_after_card" }), "thread-1"),
+    );
+
+    const owner = host.runTurn(20, "and make it bigger");
+    await vi.waitFor(() =>
+      expect(
+        server.request.mock.calls.filter((c) => c[0] === "turn/start").length,
+      ).toBe(2),
+    );
+    server.finish("thread-1", "Here it is.");
+    const result = await owner;
+    expect(result.images?.map((i) => i.itemId)).toEqual(["ig_after_card"]);
     expect(delivered).toHaveLength(0);
   });
 });

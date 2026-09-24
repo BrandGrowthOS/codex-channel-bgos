@@ -319,6 +319,15 @@ interface ActiveTurn {
    */
   images: Map<string, GeneratedImage>;
   /**
+   * The ids of the pictures this turn already handed to `onPlanProposal`
+   * (re-review item 4). The adapter deals with every one of them before the
+   * card, by posting it or by posting its line, so when an owner turn takes
+   * this thread over, `execute` must not copy them into that turn as well:
+   * its picture record starts empty and would post them a second time.
+   * REQUIRED for the same reason `images` is.
+   */
+  handedOff: Set<string>;
+  /**
    * The runtime already handed this turn a finished `plan` item, so the
    * adapter's `<proposed_plan>` fallback must not post a second card. Read on
    * the result, never inside the notification loop.
@@ -338,7 +347,8 @@ interface ActiveTurn {
    * server steers a running turn rather than starting a second one), and the
    * outcome then belongs to the turn that replaced it. That includes the
    * pictures it already finished: `execute` copies `images` across before it
-   * calls this, because nothing else would ever post them.
+   * calls this, because nothing else would ever post them, except the ones in
+   * `handedOff`, which its plan card already dealt with.
    */
   release?: () => void;
 }
@@ -1486,6 +1496,7 @@ export class CodexHost {
         childState: new Map(),
         childBaseName: new Map(),
         images: new Map(),
+        handedOff: new Set(),
         parkWatchdog,
         resumeWatchdog,
         finish: (result) => {
@@ -1517,11 +1528,13 @@ export class CodexHost {
       // The pictures it already finished come across first. The release
       // delivers nothing, and the app server steers the same runtime turn, so
       // this turn's result is the only place those pictures can still reach
-      // the chat: they exist and the quota is spent.
+      // the chat: they exist and the quota is spent. Not the ones its plan
+      // card was handed (re-review item 4): those were posted before the
+      // card, and this turn's fresh picture record would post them again.
       const prior = this.active.get(id);
       if (prior?.release)
         for (const [itemId, image] of prior.images)
-          turn.images.set(itemId, image);
+          if (!prior.handedOff.has(itemId)) turn.images.set(itemId, image);
       prior?.release?.();
       this.active.set(id, turn);
       void this.server
@@ -1704,6 +1717,13 @@ export class CodexHost {
       if (item.type === "plan") {
         if (!started && typeof item.text === "string" && item.text.trim()) {
           turn.sawPlanProposal = true;
+          // The pictures finished BEFORE this plan, taken now rather than a
+          // microtask later, and recorded as handed off when a card is there
+          // to take them (re-review item 4): the adapter posts them ahead of
+          // the card, so a turn that takes this thread over must not.
+          const images = [...turn.images.values()];
+          if (turn.callbacks.onPlanProposal)
+            for (const image of images) turn.handedOff.add(image.itemId);
           turn.pending.push(
             Promise.resolve()
               .then(() =>
@@ -1711,9 +1731,7 @@ export class CodexHost {
                   turnId: params.turnId ?? null,
                   itemId: itemKey,
                   text: String(item.text),
-                  ...(turn.images.size > 0
-                    ? { images: [...turn.images.values()] }
-                    : {}),
+                  ...(images.length > 0 ? { images } : {}),
                 }),
               )
               .catch(() => {}),
@@ -2182,6 +2200,7 @@ export class CodexHost {
       childState: new Map(),
       childBaseName: new Map(),
       images: new Map(),
+      handedOff: new Set(),
       finish: (result) => {
         if (!forget()) return;
         void Promise.allSettled(turn.pending)

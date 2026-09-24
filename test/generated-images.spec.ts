@@ -7,6 +7,7 @@ import {
   decodeImageResult,
   imageCaption,
   imageFailureLine,
+  imageNotShownLine,
 } from "../src/generated-images.js";
 import { GOLD_PNG, imageItem } from "./fixtures/image-generation.js";
 
@@ -196,6 +197,60 @@ describe("imageFailureLine", () => {
       imageFailureLine({ type: "usageLimitExceeded", resetsAt: 1790240000 }),
       imageFailureLine({ type: "usageLimitExceeded" }),
       imageFailureLine({ type: "x" }),
+    ])
+      expect(line).not.toMatch(/[\u2013\u2014]/);
+  });
+});
+
+/**
+ * Re-review item 2: the line a picture posts in its place when it never
+ * reached the chat. Two claims have to be earned: "made" only when the
+ * runtime saved a copy or handed over the bytes, and the saved file named when
+ * there is one, shortened by the same `shortenPath` every activity row uses
+ * (the Codex home copy sits outside the media root, so the line is the only
+ * place the owner learns where it is).
+ */
+describe("imageNotShownLine", () => {
+  const HOME = "C:\\Users\\owner";
+  const SAVED =
+    "C:\\Users\\owner\\.codex\\generated_images\\thread-1\\ig_1.png";
+
+  it("names the saved file, shortened under the home directory", () => {
+    expect(imageNotShownLine({ savedPath: SAVED }, { home: HOME })).toBe(
+      "Codex made a picture, but it could not be shown here. It is saved at ~\\.codex\\generated_images\\thread-1\\ig_1.png.",
+    );
+  });
+
+  it("names the file and its folder when the saved copy is outside the home directory", () => {
+    expect(
+      imageNotShownLine(
+        { savedPath: "/srv/codex/generated_images/thread-1/ig_1.png" },
+        { home: "/home/owner" },
+      ),
+    ).toBe(
+      "Codex made a picture, but it could not be shown here. It is saved at thread-1/ig_1.png.",
+    );
+  });
+
+  it("says made, with no place, when the bytes came back and no copy was saved", () => {
+    expect(imageNotShownLine({ bytes: GOLD_PNG }, { home: HOME })).toBe(
+      "Codex made a picture, but it could not be shown here.",
+    );
+  });
+
+  it("says only tried when neither the bytes nor a saved copy came back", () => {
+    const line = imageNotShownLine({}, { home: HOME });
+    expect(line).toBe(
+      "Codex tried to make a picture, but it could not be shown here.",
+    );
+    expect(line).not.toMatch(/\bmade\b/);
+  });
+
+  it("carries no em dash and no en dash", () => {
+    for (const line of [
+      imageNotShownLine({ savedPath: SAVED }, { home: HOME }),
+      imageNotShownLine({ bytes: GOLD_PNG }),
+      imageNotShownLine({}),
     ])
       expect(line).not.toMatch(/[\u2013\u2014]/);
   });

@@ -29,6 +29,7 @@
  * revised prompt comes back at all. So nothing here reads `status`, both
  * `result` forms decode, and the MIME type comes from the bytes themselves.
  */
+import { shortenPath } from "./activity-markers.js";
 import type { RpcObject } from "./app-server.js";
 import { decodeBase64Capped } from "./attachment-guard.js";
 import { clipText } from "./clip-text.js";
@@ -198,15 +199,46 @@ function resetTime(resetsAt: number | null | undefined): string | null {
 }
 
 /**
- * The one plain line a picture posts in its place when it was made but never
- * reached the chat: no bytes the app can draw (an empty or unreadable
- * `result`, over the image cap, a format the app does not draw, a save only
- * item), or an upload that failed after its retries and was not queued. The
- * runtime has already told the model the picture is "displayed to the user",
- * so without this line the owner never learns one was made (review finding 3).
+ * The plain line a picture posts in its place when it never reached the chat:
+ * no bytes the app can draw (an empty or unreadable `result`, over the image
+ * cap, a format the app does not draw, a save only item), or an upload that
+ * failed after its retries and was not queued. The runtime has already told
+ * the model the picture is "displayed to the user", so without a line the
+ * owner never learns one was made (review finding 3).
+ *
+ * Which line is the re-review's item 2, and each claim has to be earned:
+ *
+ *  - A saved copy: Codex MADE it, and the line says where it is saved. That
+ *    copy sits under the Codex home, outside the media root, so the owner has
+ *    no other way to find it, and the model has been told not to resend it.
+ *    The path is shortened by `shortenPath`, the one every activity row uses
+ *    (under the home directory it reads `~\...`, anywhere else the file and
+ *    its folder), because a full path carries the account name.
+ *  - Bytes but no saved copy (the upload failed, the tool's own save did
+ *    not): Codex made it, and there is no file to name.
+ *  - Neither: Codex only TRIED. A generation that failed without a failure
+ *    object (a failed status, an empty result) made nothing, and the chat must
+ *    not say a picture was made. Nothing here reads `status`, because its
+ *    strings were never seen live; the absence of both is the evidence.
+ *
+ * `home` is for tests; the daemon passes nothing and gets this machine's.
  */
-export const IMAGE_NOT_SHOWN_LINE =
-  "A picture was made, but it could not be shown here.";
+export const IMAGE_MADE_NOT_SHOWN_LINE =
+  "Codex made a picture, but it could not be shown here.";
+export const IMAGE_TRIED_NOT_SHOWN_LINE =
+  "Codex tried to make a picture, but it could not be shown here.";
+
+export function imageNotShownLine(
+  image: Pick<GeneratedImage, "bytes" | "savedPath">,
+  ctx: { home?: string } = {},
+): string {
+  const where = image.savedPath
+    ? shortenPath(image.savedPath, ctx.home ? { home: ctx.home } : {})
+    : "";
+  if (where) return `${IMAGE_MADE_NOT_SHOWN_LINE} It is saved at ${where}.`;
+  if (image.bytes && image.bytes.length > 0) return IMAGE_MADE_NOT_SHOWN_LINE;
+  return IMAGE_TRIED_NOT_SHOWN_LINE;
+}
 
 /** The one plain line a refused picture posts in its place. */
 export function imageFailureLine(failure: GeneratedImageFailure): string {
