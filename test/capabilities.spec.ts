@@ -1,9 +1,10 @@
 /**
  * Capability bootstrap: the pure validate-and-choose logic + the BgosApi GET.
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { BgosApi } from "../src/bgos-api.js";
+import { BgosApi, capabilitiesQueryParam } from "../src/bgos-api.js";
+import { DECLARED_CAPABILITIES } from "../src/declared-capabilities.js";
 import {
   BUNDLED_CAPABILITIES,
   MAX_CANON_BYTES,
@@ -130,9 +131,95 @@ describe("BgosApi.getCapabilities", () => {
     expect(server.requests.at(-1)!.url).toContain("channel=codex");
   });
 
+  it("carries the declared list as one comma separated capabilities query", async () => {
+    // The canon tells the request reason clause only to a daemon that
+    // declares request_reason, and trusts the pairing's stored list only when
+    // the SAME version wrote it. This fetch runs at connect, before the first
+    // heartbeat of a new release, so without the query a freshly upgraded
+    // daemon is told none of its declared sentences for its whole process.
+    server.stage("GET", "/api/v1/integrations/capabilities", 200, {
+      channel: "codex",
+      version: "v",
+      text: "# BGOS Channel Agent Capabilities",
+      core: "",
+      channelSyntax: "",
+    });
+    await makeApi(baseUrl).getCapabilities("codex", "0.13.0", DECLARED_CAPABILITIES);
+    const url = new URL(server.requests.at(-1)!.url, "http://x");
+    expect(url.searchParams.get("channel")).toBe("codex");
+    expect(url.searchParams.get("daemonVersion")).toBe("0.13.0");
+    expect(url.searchParams.get("capabilities")).toBe(DECLARED_CAPABILITIES.join(","));
+    expect(url.searchParams.get("capabilities")!.split(",")).toContain("request_reason");
+    // One key, not the capabilities[]= array axios would send by default,
+    // which the backend does not read.
+    expect(url.searchParams.getAll("capabilities")).toHaveLength(1);
+    expect(url.search).not.toContain("capabilities%5B%5D");
+  });
+
+  it("leaves the capabilities key off when nothing is declared", async () => {
+    server.stage("GET", "/api/v1/integrations/capabilities", 200, {
+      channel: "codex",
+      version: "v",
+      text: "# BGOS Channel Agent Capabilities",
+      core: "",
+      channelSyntax: "",
+    });
+    await makeApi(baseUrl).getCapabilities("codex", "0.13.0");
+    expect(server.requests.at(-1)!.url).not.toContain("capabilities=");
+  });
+
   it("rejects when the endpoint 404s (old backend) so the caller keeps the fallback", async () => {
     // No stage -> mock returns 404; getCapabilities must reject (caught upstream).
     await expect(makeApi(baseUrl).getCapabilities("codex")).rejects.toBeTruthy();
+  });
+});
+
+describe("capabilitiesQueryParam", () => {
+  it("keeps only tokens in the backend's grammar, at most 32, comma joined", () => {
+    expect(capabilitiesQueryParam([])).toEqual({});
+    expect(capabilitiesQueryParam(["request_reason"])).toEqual({
+      capabilities: "request_reason",
+    });
+    expect(
+      capabilitiesQueryParam(["mission_events", "Bad", "a,b", "", "request_reason"]),
+    ).toEqual({ capabilities: "mission_events,request_reason" });
+    const many = Array.from({ length: 40 }, (_, i) => `t${i}`);
+    expect(capabilitiesQueryParam(many).capabilities!.split(",")).toHaveLength(32);
+  });
+});
+
+/**
+ * The fetch at connect is WIRED to the declared list, not merely able to
+ * carry one: the real loadServedCapabilities against a daemon made of stubs.
+ *
+ * MUTATION PROOF (recorded 2026-09-24, restored byte for byte): deleting the
+ * DECLARED_CAPABILITIES argument from the getCapabilities call in adapter.ts
+ * loadServedCapabilities turns this case red, 1 of 41 in this file.
+ */
+describe("the daemon's canon fetch at connect", () => {
+  it("sends DECLARED_CAPABILITIES, request_reason included", async () => {
+    const { CodexAdapter } = await import("../src/adapter.js");
+    const { getPackageVersion } = await import("../src/version.js");
+    const adapter = Object.create(CodexAdapter.prototype) as any;
+    const getCapabilities = vi.fn(async () =>
+      served("# BGOS Channel Agent Capabilities\n(channel: codex)\nbody"),
+    );
+    const applyAgentHints = vi.fn();
+    Object.assign(adapter, {
+      capabilitiesLoaded: false,
+      api: { getCapabilities },
+      host: { applyAgentHints },
+    });
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    await adapter.loadServedCapabilities();
+    expect(getCapabilities).toHaveBeenCalledWith(
+      "codex",
+      getPackageVersion(),
+      DECLARED_CAPABILITIES,
+    );
+    expect(DECLARED_CAPABILITIES).toContain("request_reason");
+    expect(applyAgentHints).toHaveBeenCalledTimes(1);
+    vi.restoreAllMocks();
   });
 });
 

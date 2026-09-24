@@ -185,6 +185,28 @@ function messagesRouteBody(
   return body as Omit<OutboundMessagePayload, "assistantId">;
 }
 
+/** The capability token grammar BGOS accepts (pair-exchange.dto.ts). */
+const CAPABILITY_TOKEN = /^[a-z][a-z0-9_]{0,63}$/;
+/** BGOS reads at most this many tokens from one capabilities fetch. */
+const MAX_DECLARED_ON_FETCH = 32;
+
+/**
+ * The capabilities fetch's `capabilities` query: the declared tokens that
+ * match the backend's grammar, at most 32, joined with commas (the backend
+ * splits on commas; axios would otherwise send an array as `capabilities[]`,
+ * which the backend does not read). Empty when nothing is declared, so the
+ * key is left off rather than sent blank. The same shape the Claude Code
+ * plugin's `capabilitiesFetchPath` sends.
+ */
+export function capabilitiesQueryParam(
+  declared: readonly string[],
+): { capabilities?: string } {
+  const tokens = declared
+    .filter((t) => CAPABILITY_TOKEN.test(t))
+    .slice(0, MAX_DECLARED_ON_FETCH);
+  return tokens.length ? { capabilities: tokens.join(",") } : {};
+}
+
 /**
  * Thin typed wrapper around the BGOS integration endpoints. All methods
  * attach the X-BGOS-Pairing header from cfg.pairingToken.
@@ -291,10 +313,22 @@ export class BgosApi {
    * `text` is header + shared core + the codex channel delta, ready to inject.
    * Any non-2xx (including a 404 from an older backend that predates the
    * endpoint) throws, and the caller keeps the bundled fallback.
+   *
+   * `declared` is this daemon's own capability tokens, sent as the fetch's
+   * `capabilities` query (a comma list, see `capabilitiesQueryParam`). The
+   * canon tells some sentences only to a daemon that declares their token
+   * (`request_reason` for the request reason clause), reading the union of
+   * the pairing's stored list and this query, and it trusts the stored list
+   * only when it was written by the SAME daemon version. This fetch runs at
+   * connect, before the first heartbeat of a new release stores its list, and
+   * the answer is kept for the whole process: without the query a freshly
+   * upgraded daemon would be told none of its declared sentences until it
+   * restarted.
    */
   async getCapabilities(
     channel = "codex",
     daemonVersion?: string,
+    declared: readonly string[] = [],
   ): Promise<{
     channel: string;
     version: string;
@@ -308,7 +342,11 @@ export class BgosApi {
     // (disk/memory DoS). axios rejects past maxContentLength and the caller
     // keeps the bundled fallback.
     const r = await this.http.get("integrations/capabilities", {
-      params: { channel, ...(daemonVersion ? { daemonVersion } : {}) },
+      params: {
+        channel,
+        ...(daemonVersion ? { daemonVersion } : {}),
+        ...capabilitiesQueryParam(declared),
+      },
       maxContentLength: 1024 * 1024,
       maxBodyLength: 1024 * 1024,
     });

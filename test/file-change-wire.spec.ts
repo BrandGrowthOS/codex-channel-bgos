@@ -803,3 +803,19 @@ describe("every card this builder writes is one the server will accept", () => {
     );
   });
 });
+
+/**
+ * The two caps BGOS REFUSES past, by literal. BGOS pins 280 and 500 UTF-16
+ * units on `approvalMeta.reason` and `approvalMeta.rule_text`
+ * (backend/src/dto/approval-meta.request-reason.guardrail.spec.ts: 280 and
+ * 500 kept, 281 and 501 refused with a 400 that costs the owner the whole
+ * card). Every other test in this repo reads the two constants, so a constant
+ * moved here would move its own tests with it; these two lines are the only
+ * place the numbers themselves are held on this side.
+ */
+describe("the reason and rule caps BGOS refuses past", () => {
+  it("clips reason to 280 and rule_text to 500 UTF-16 units", () => {
+    expect(REQUEST_REASON_MAX_UNITS).toBe(280);
+    expect(REQUEST_RULE_TEXT_MAX_UNITS).toBe(500);
+  });
+});
