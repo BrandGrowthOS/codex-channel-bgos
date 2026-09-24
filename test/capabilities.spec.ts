@@ -1,8 +1,11 @@
 /**
  * Capability bootstrap: the pure validate-and-choose logic + the BgosApi GET.
  */
+import { createHash } from "node:crypto";
+
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { BGOS_AGENT_HINTS } from "../src/agent-hints.js";
 import { BgosApi } from "../src/bgos-api.js";
 import {
   BUNDLED_CAPABILITIES,
@@ -284,8 +287,9 @@ describe("BUNDLED_CAPABILITIES helper rows paragraph", () => {
  * see gap 04). A model that ALSO sends it with MEDIA: or the reply tool would
  * post it twice, and a model that never heard of the post would describe a
  * picture the owner has not seen yet as missing. The served canon's Codex
- * sentence (stage 4's BGOS PR) is copied from THIS text, so the two cannot
- * drift apart without one of the two pins going red.
+ * sentence (stage 4's BGOS PR) is copied from THIS text. This describe only
+ * compares the plugin with itself; the cross repo pin below is what holds the
+ * two repos together.
  *
  * MUTATION PROOF: change one word of the sentence in src/agent-hints.ts and
  * this goes red; put an em dash back in and the dash case goes red.
@@ -337,5 +341,79 @@ describe("BUNDLED_CAPABILITIES generated picture sentence", () => {
   it("carries no em dash and no en dash", () => {
     expect(SERVED_TRUTH).not.toMatch(/[\u2013\u2014]/);
     expect(BUNDLED_CAPABILITIES).not.toMatch(/[\u2013\u2014]/);
+  });
+});
+
+/**
+ * Cross repo pin: the generated picture sentence, by sha256, from BOTH sides.
+ *
+ * The BGOS served canon carries this sentence as CODEX_GENERATED_IMAGES_SENTENCE
+ * (backend/src/integrations/capability-canon.ts) and its markdown mirror
+ * carries it again. Every agent reads the served canon first and this bundled
+ * text after it, so the two must say the same thing. The word for word case
+ * above compares this repo only with itself: change the hint and SERVED_TRUTH
+ * together and it stays green while the canon says something else. So the
+ * sentence is also pinned by ONE sha256, the same hex string in both repos.
+ *
+ * THE TWIN TEST. BrandGrowthOS/BGOS,
+ * backend/src/integrations/capability-canon.codex-images.spec.ts, describe
+ * "the generated picture sentence, pinned across repos", pins the same
+ * GENERATED_PICTURE_SENTENCE_SHA256 against CODEX_GENERATED_IMAGES_SENTENCE
+ * (after its "- ") and the mirror's line. Either repo drifting turns its own
+ * test red.
+ *
+ * THE RULE. Change this sentence on this side only together with the BGOS PR
+ * that changes the canon constant and the mirror to the same words, and
+ * update the pinned hash in BOTH tests, in those two PRs. A red here is that
+ * reminder: never make it green by moving one side's hash alone.
+ *
+ * WHAT IS HASHED. The paragraph exactly as src/agent-hints.ts exports it in
+ * BGOS_AGENT_HINTS: from the line that opens "In a chat turn, a picture" up to
+ * the line that opens "ask_user_input asks", with each line break turned into
+ * one space, because the hint file wraps the paragraph over seven lines and
+ * the canon holds it on one. That is the only normalisation. Spaces are not
+ * collapsed, so a doubled space is a change too. UTF-8, 530 bytes.
+ */
+describe("the generated picture sentence, pinned across repos", () => {
+  /** The same hex string as the BGOS twin test. Update both or neither. */
+  const GENERATED_PICTURE_SENTENCE_SHA256 =
+    "fe528db206e5ac09a296e624695e368f87bfb9fe904111305b0a889da436db98";
+
+  function sha256(text: string): string {
+    return createHash("sha256").update(text, "utf8").digest("hex");
+  }
+
+  /** The paragraph as the hint file holds it, with its line wrapping undone. */
+  function heldSentence(hints: string): string {
+    const opens = hints.indexOf("\nIn a chat turn, a picture ");
+    expect(
+      opens,
+      'src/agent-hints.ts has no line opening "In a chat turn, a picture "',
+    ).toBeGreaterThanOrEqual(0);
+    const next = hints.indexOf("\nask_user_input asks ", opens + 1);
+    expect(
+      next,
+      'src/agent-hints.ts has no "ask_user_input asks" line after the picture paragraph',
+    ).toBeGreaterThan(opens);
+    return hints.slice(opens + 1, next).replace(/\n/g, " ");
+  }
+
+  it("hashes to the sha256 the BGOS canon pins too", () => {
+    const held = heldSentence(BGOS_AGENT_HINTS);
+    expect(
+      sha256(held),
+      "The generated picture sentence in src/agent-hints.ts no longer matches the sha256 " +
+        "BrandGrowthOS/BGOS pins for CODEX_GENERATED_IMAGES_SENTENCE. Change it only together " +
+        "with the BGOS PR that moves the canon and its mirror to the same words, and update " +
+        "GENERATED_PICTURE_SENTENCE_SHA256 in both repos. The hashed text was: " +
+        held,
+    ).toBe(GENERATED_PICTURE_SENTENCE_SHA256);
+  });
+
+  it("is not vacuous: one changed character changes the hash", () => {
+    const held = heldSentence(BGOS_AGENT_HINTS);
+    const drifted = held.replace("chat turn,", "chat turn;");
+    expect(drifted).not.toBe(held);
+    expect(sha256(drifted)).not.toBe(GENERATED_PICTURE_SENTENCE_SHA256);
   });
 });

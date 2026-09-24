@@ -534,3 +534,69 @@ never posts past the cap, and its saved copy is not named in the line: the rebui
 reading `savedPath` off the line's end (it is the item's last field) was left out of this round, so the owner reads
 the made line without "It is saved at". `src/agent-hints.ts` is not in this round's diff, so the served hint sentence
 is untouched.
+
+## Cross repo pin (2026-09-24)
+
+Ares's rule (15:10): a claim in one repo that depends on a file in another is pinned byte identically FROM BOTH
+SIDES, with the mutation proven in each direction, so either repo drifting turns a test red. Until this round the
+generated picture sentence was held by two word for word pins that each compared one repo with ITSELF, and by a
+sha256 written in prose in both red proofs. Changing the hint and `SERVED_TRUTH` together in this repo kept every
+test green while the BGOS canon said something else (M2 below proves exactly that case now goes red).
+
+**The pin.** `test/capabilities.spec.ts`, describe "the generated picture sentence, pinned across repos", hashes the
+paragraph exactly as `src/agent-hints.ts` exports it in `BGOS_AGENT_HINTS` (from the line that opens "In a chat
+turn, a picture" up to the line that opens "ask_user_input asks", each line break turned into one space and nothing
+else) and asserts it equals `GENERATED_PICTURE_SENTENCE_SHA256`:
+`fe528db206e5ac09a296e624695e368f87bfb9fe904111305b0a889da436db98` (UTF-8, 530 bytes). A second case proves the pin
+is not vacuous (one changed character changes the hash).
+
+**The twin.** BrandGrowthOS/BGOS `backend/src/integrations/capability-canon.codex-images.spec.ts`, describe of the
+same name, pins the same hex string against `CODEX_GENERATED_IMAGES_SENTENCE` (after its `- `) and the mirror line
+(BGOS red proofs, "Cross repo pin"). The rule is in both headers: change the sentence on one side only together
+with the other side's PR, and update the pinned hash in both.
+
+**Mutations** (`_tools-p5/s4-pin-mutate.py`: exactly one occurrence replaced, restored from a pristine copy with
+its sha256 checked). Both used the same one character change, `as the caption; do not send` to `as the caption, do
+not send`.
+
+M1, the hint alone (`_tools-p5/logs/s4-pin-plugin-red-M1.clean.log`):
+
+```
+MUTATED src/agent-hints.ts:36  'as the caption; do not send' -> 'as the caption, do not send'
+ × BUNDLED_CAPABILITIES generated picture sentence > says, word for word, the sentences the served canon copies
+ × the generated picture sentence, pinned across repos > hashes to the sha256 the BGOS canon pins too
+   → The generated picture sentence in src/agent-hints.ts no longer matches the sha256 BrandGrowthOS/BGOS pins
+      for CODEX_GENERATED_IMAGES_SENTENCE. Change it only together with the BGOS PR that moves the canon and its
+      mirror to the same words, and update GENERATED_PICTURE_SENTENCE_SHA256 in both repos. ...
+Expected: "fe528db206e5ac09a296e624695e368f87bfb9fe904111305b0a889da436db98"
+Received: "490cfdb6667e60f1c2177dbe7c6e546a62092307d7253a14a11310601cbebfff"
+ Test Files  1 failed (1)
+      Tests  2 failed | 39 passed (41)
+RESTORED src/agent-hints.ts  sha256 be201fd085353e7b9ddd4b9e69e57cc2f73e945546431ded94cb8dc6b0f8159f  IDENTICAL to pristine
+```
+
+M2, the hint AND `SERVED_TRUTH` together, the one sided edit the word for word pin cannot see
+(`_tools-p5/logs/s4-pin-plugin-red-M2.clean.log`):
+
+```
+MUTATED src/agent-hints.ts:36  'as the caption; do not send' -> 'as the caption, do not send'
+MUTATED test/capabilities.spec.ts:317  'as the caption; do not send' -> 'as the caption, do not send'
+ × the generated picture sentence, pinned across repos > hashes to the sha256 the BGOS canon pins too
+Expected: "fe528db206e5ac09a296e624695e368f87bfb9fe904111305b0a889da436db98"
+Received: "490cfdb6667e60f1c2177dbe7c6e546a62092307d7253a14a11310601cbebfff"
+ Test Files  1 failed (1)
+      Tests  1 failed | 40 passed (41)
+RESTORED src/agent-hints.ts  sha256 be201fd085353e7b9ddd4b9e69e57cc2f73e945546431ded94cb8dc6b0f8159f  IDENTICAL to pristine
+RESTORED test/capabilities.spec.ts  sha256 4be947718e42c9573342d7dc94c47d8d00f09278a75c3a479dacd8b9955c72ff  IDENTICAL to pristine
+```
+
+`be201fd0...` is `src/agent-hints.ts` at `6d34e0f`, byte for byte (`git show HEAD:src/agent-hints.ts | sha256sum`),
+so this round changes no source file. The drifted hash `490cfdb6...` is the one the BGOS mutation produces too, for
+the same one character.
+
+**Green** (`_tools-p5/logs/s4-pin-plugin-green-2.log`): `test/capabilities.spec.ts`, Test Files 1 passed (1), Tests
+41 passed (41); the 39 cases before this round plus the two new ones.
+
+**Not pinned by a test, and said so.** The version floor `GENERATED_IMAGES_MIN_DAEMON.codex = '0.14.0'` in the BGOS
+canon assumes this repo's 0.14.0 is the first release that posts pictures. This contract is held by convention and
+merge order: nothing fails if a different version number ships the picture code.
