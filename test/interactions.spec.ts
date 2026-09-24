@@ -21,6 +21,7 @@ import {
   COMMAND_TOOL_MAX_UNITS,
   REQUEST_REASON_MAX_UNITS,
 } from "../src/file-change-wire.js";
+import { clipWithEllipsis } from "../src/clip-text.js";
 import type {
   PendingApprovalEntry,
   PendingApprovalStore,
@@ -1336,6 +1337,13 @@ describe("a file change approval names the files it is asking about", () => {
  *    typed ApprovalMeta -> "says what Always would save" goes red, which is
  *    the whole reason the interface is typed: the backend would drop it with a
  *    201 and no error.
+ *  - run the clip BEFORE the mask in `titleCommandText` (fold, clip, then
+ *    `redactOutput`) -> "draws the title on one line, with every secret in it
+ *    masked" goes red: the title comes back as `... Bearer
+ *    Zm9vYmFyYmF6cXV4cXV...` with 19 raw characters of the token, because the
+ *    cut left one fewer than the bearer rule needs. Until the stage 5 review,
+ *    that case put its secret PAST the cut, where both orders drop it, so the
+ *    assertion could not fail.
  */
 describe("a command approval says what it runs, why, and what Always would save", () => {
   /** The wrapper the runtime would really run, wrapped command and all. */
@@ -1383,7 +1391,7 @@ describe("a command approval says what it runs, why, and what Always would save"
     const body = await post(COMMAND_PARAMS);
     // The title is the ACTION's command, which is the string a person reads.
     expect(body.text).toBe("Run echo exec-probe > probe.txt");
-    // The reason is the model's own sentence, verbatim, and it is not the
+    // The reason is the model's own sentence, untouched inside its cap, and not the
     // title, so the card says what AND why instead of one of them twice.
     expect(body.approvalMeta.reason).toBe("Write probe.txt in the scratch directory");
     // The mono panel keeps the literal argv the runtime would run: the title
@@ -1620,12 +1628,22 @@ describe("a command approval says what it runs, why, and what Always would save"
     // behind the card, and never rides a notification.
     expect(bearer.approvalMeta.tool).toContain(token);
     // Masked BEFORE the clip, so a cut can never leave half a secret the mask
-    // no longer recognises: the pure helper, on a secret past the cap.
-    const late = titleCommandText(
-      `${"a".repeat(100)} Bearer ${token} ${"b".repeat(100)}`,
-    );
-    expect(late.length).toBeLessThanOrEqual(120);
-    expect(late).not.toContain("abcdefghijklmnop");
+    // no longer recognises. The secret sits INSIDE what the title keeps: the
+    // raw command is 142 units, and a clip at 120 would keep `Bearer ` and the
+    // first 19 characters of the token, one short of the 20 the bearer rule
+    // needs, so a mask run after the clip would pass those 19 through. Masked
+    // first, the token shrinks to four characters and the whole line fits.
+    const bare = "Zm9vYmFyYmF6cXV4cXV1eDEyMzQ1Njc4OTBhYmNk";
+    const lead = `echo ${"a".repeat(87)} Bearer `;
+    const raw = `${lead}${bare} x`;
+    const cut = bare.slice(0, 19);
+    // The precondition, so this case cannot pass for the wrong reason: the
+    // raw line is over the cap, and the clip alone keeps the fragment.
+    expect(raw.length).toBeGreaterThan(120);
+    expect(clipWithEllipsis(raw, 120)).toBe(`${lead}${cut}\u2026`);
+    const inside = titleCommandText(raw);
+    expect(inside).toBe(`${lead}Zm9v... x`);
+    expect(inside).not.toContain(cut);
   });
 
   it("keeps the old title on a request to type into a running process", async () => {

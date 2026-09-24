@@ -294,15 +294,26 @@ describe("BUNDLED_CAPABILITIES helper rows paragraph", () => {
  * reads as denying it.
  *
  * MUTATION PROOF: move the justification sentence out of that paragraph, or
- * reword one clause of it, and this case goes red.
+ * reword one clause of it, and this case goes red. Put "word for word" back
+ * in front of "as the card's reason line" in agent-hints.ts and "never
+ * promises the justification reaches the owner word for word" goes red too.
  */
 describe("BUNDLED_CAPABILITIES justification sentence", () => {
   const flat = BUNDLED_CAPABILITIES.replace(/\s+/g, " ");
 
   it("tells the model to write the justification, beside the line that says it fills no card field", () => {
     expect(flat).toContain(
-      "You fill none of these fields. One thing on an approval card IS yours to write, and it is a tool argument rather than a card field: when you ask to run a command with escalated permissions, exec_command's justification is passed to your owner word for word as the card's reason line, so write it as one plain sentence of at most 280 characters saying why this command is needed, for a reader who cannot see your reasoning; a longer one is cut short.",
+      "You fill none of these fields. One thing on an approval card IS yours to write, and it is a tool argument rather than a card field: when you ask to run a command with escalated permissions, exec_command's justification is shown to your owner as the card's reason line, so write it as one plain sentence of at most 280 characters saying why this command is needed, for a reader who cannot see your reasoning; a longer one is cut short.",
     );
+  });
+
+  it("never promises the justification reaches the owner word for word", () => {
+    // It does not: the daemon clips it at 280 units with an ellipsis, and
+    // holds it back entirely when it is the same sentence as the card's
+    // title (`differingReason`). This sentence read "passed to your owner word
+    // for word" until the stage 5 codex review, a promise the code breaks on
+    // the first long justification.
+    expect(flat).not.toMatch(/word for word|verbatim/i);
   });
 
   it("says it in the sentence's own words: a tool argument, not a card field", () => {
