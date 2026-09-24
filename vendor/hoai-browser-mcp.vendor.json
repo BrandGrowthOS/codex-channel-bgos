@@ -1,8 +1,8 @@
 {
   "file": "vendor/hoai-browser-mcp.mjs",
   "source": "BGOS: frontend/electron-app/agent-browser/shim/hoai-browser-mcp.mjs",
-  "sha256": "e749abf800fb53cc1afce7ee20ead271610c3d0eaec69e071791ade027000d97",
-  "vendoredAt": "2026-09-12",
+  "sha256": "aaaff4b6b51914f12ea5b19fe0cc347663b6d11221334af8e07bc1d9de30e1a9",
+  "vendoredAt": "2026-09-25",
   "why": "vendor/hoai-browser-mcp.mjs is a byte-identical COPY of the BGOS shim, not a fork. The shim is framework neutral by design (it never reads a plugin's files and takes its relay credentials from env), so every channel plugin ships the same bytes and only the launcher differs. This file is the copy's expected sha256, checked by test/browser-shim-vendor.spec.ts on every run, so the identity claim lives in the tree instead of in a commit message or a PR body.",
   "howToUpdate": "docs/vendoring-the-hoai-browser-shim.md",
   "crossTreeCheck": "HOAI_BROWSER_SHIM_SOURCE=<path to the BGOS shim> npx vitest run test/browser-shim-vendor.spec.ts",
