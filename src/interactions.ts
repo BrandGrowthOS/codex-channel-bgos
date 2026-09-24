@@ -94,9 +94,14 @@ interface Pending {
  * `ApprovalMetaDto` strips a field it does not declare with a 201 and no
  * error: against a backend without the stage 4 DTO this daemon would mask and
  * cap a patch for nothing, the card would still read "Apply file changes",
- * and nothing anywhere would say why. Retire the THREE lines one at a time,
- * in this order: stage 1 backend live, then 0.10.1; stage 3 backend live,
- * then 0.11.0; stage 4 backend live, then 0.12.0.
+ * and nothing anywhere would say why.
+ *
+ * 0.13.0 adds NO hold of its own: a picture Codex makes posts itself as an
+ * ordinary image message, which every backend already accepts. It is held
+ * only because it carries all three holds above. Retire the FOUR lines one at
+ * a time, in this order: stage 1 backend live, then 0.10.1; stage 3 backend
+ * live, then 0.11.0; stage 4 backend live, then 0.12.0; then 0.13.0, with
+ * 0.12.0 or after it and never before.
  *
  * The lines below are the machine readable half of that hold, and the publish
  * workflow's HELD_FROM_LATEST list must agree with them exactly
@@ -106,6 +111,7 @@ interface Pending {
  * HELD-FROM-LATEST: 0.10.1
  * HELD-FROM-LATEST: 0.11.0
  * HELD-FROM-LATEST: 0.12.0
+ * HELD-FROM-LATEST: 0.13.0
  */
 export const APPROVAL_HOLD_SECONDS = 1800;
 

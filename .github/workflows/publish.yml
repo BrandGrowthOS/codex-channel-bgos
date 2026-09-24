@@ -60,7 +60,11 @@ jobs:
           # without the stage 4 DTO this daemon masks and caps a patch for
           # nothing and the card still reads "Apply file changes". It also
           # inherits both holds above. Held for all three.
-          HELD_FROM_LATEST="0.10.1 0.11.0 0.12.0"
+          # 0.13.0: adds no hold of its own. A picture Codex makes posts
+          # itself as an ordinary image message, which every backend already
+          # accepts. It is held only because it carries all three holds
+          # above, so it is promoted with 0.12.0 or after it, never before.
+          HELD_FROM_LATEST="0.10.1 0.11.0 0.12.0 0.13.0"
           DIST_TAG=latest
           for held in $HELD_FROM_LATEST; do
             if [ "$CURRENT" = "$held" ]; then
