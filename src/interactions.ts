@@ -103,11 +103,12 @@ interface Pending {
  * `npm dist-tag add` points latest at whichever version ran last, so
  * promoting an older version after 0.14.0 moves latest back to that older
  * version. Beside that it waits for one thing no backend gives: it is promoted only after one logged in live
- * image turn confirms the real item (result bytes and their form,
- * revisedPrompt, savedPath, the failure shape; probe.md, decision 7). The
- * offline probe never saw a real item, and a shape this code does not read
- * turns every picture into a "could not be shown" line while the served canon
- * tells the model not to resend it. 0.13.0 is P2 stage 5's
+ * image turn confirms the real item (result bytes and their form, the result
+ * size (under 12 MiB, the line cap), revisedPrompt, savedPath, the failure
+ * shape; probe.md, decision 7). The offline probe never saw a real item, and
+ * a shape this code does not read turns every picture into a "could not be
+ * shown" line while the served canon tells the model not to resend it; a
+ * picture over the line cap never posts either, only that line does. 0.13.0 is P2 stage 5's
  * release (the request card), which merges ahead of this one and brings its
  * own HELD-FROM-LATEST line and its own reason; the merge order is #12, #14,
  * #15, P2 stage 5 (0.13.0), then 0.14.0. Retire the lines one at a time, in

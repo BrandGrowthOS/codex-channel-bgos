@@ -19,8 +19,13 @@ import {
   imageItem,
   itemCompleted,
   itemStarted,
+  oversizedImageCompleted,
   probe401Turn,
 } from "./fixtures/image-generation.js";
+import {
+  IMAGE_MADE_NOT_SHOWN_LINE,
+  imageNotShownLine,
+} from "../src/generated-images.js";
 
 class Server extends EventEmitter {
   onRequest: any;
@@ -1814,6 +1819,48 @@ describe("pictures a turn made", () => {
     const result = await owner;
     expect(result.images?.map((i) => i.itemId)).toEqual(["ig_after_card"]);
     expect(delivered).toHaveLength(0);
+  });
+
+  /**
+   * Round 8. A picture whose `item/completed` line was over the transport's
+   * cap reaches the host as the transport rebuilds it (src/app-server.ts,
+   * pinned by test/app-server.spec.ts on the same fixture): the item id, no
+   * result, `tooLarge`. The host has to keep it as a picture Codex MADE, so
+   * the owner reads "Codex made a picture, but it could not be shown here."
+   * and never the tried line, and its row has to close.
+   */
+  it("keeps a picture too large to read as made, so the made line posts, and closes its row", async () => {
+    const cards: Array<{ itemId: string; status: string }> = [];
+    const task = host.runTurn(1, "draw a huge poster", {
+      onTool: (card, itemId) => {
+        cards.push({ itemId, status: card.status });
+      },
+    });
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.emit(
+      "notification",
+      "item/started",
+      itemStarted(
+        imageItem({ id: "ig_big_1", status: "inProgress", result: "", savedPath: null }),
+        "thread-1",
+      ),
+    );
+    server.emit(
+      "notification",
+      "item/completed",
+      oversizedImageCompleted("ig_big_1", "thread-1"),
+    );
+    server.finish("thread-1", "Here is the poster.");
+    const result = await task;
+    expect(result.images).toHaveLength(1);
+    const [image] = result.images!;
+    expect(image).toMatchObject({ itemId: "ig_big_1", returnedOutput: true });
+    expect(image!.bytes).toBeUndefined();
+    expect(imageNotShownLine(image!)).toBe(IMAGE_MADE_NOT_SHOWN_LINE);
+    expect(cards).toEqual([
+      { itemId: "ig_big_1", status: "running" },
+      { itemId: "ig_big_1", status: "done" },
+    ]);
   });
 });
 

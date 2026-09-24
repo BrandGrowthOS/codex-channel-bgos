@@ -35,7 +35,49 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     send({ id: "huge-1", method: "item/tool/call", params: { blob: huge() } });
   }
   if (m.id === "huge-1") send({ id: bigReverse, result: m });
+  // Round 8: a picture's item/completed line over the cap, then a line after
+  // it, then the reply. `shape` picks where the ids sit: "tail" is the real
+  // runtime's order (the probe's raw.jsonl: item first, then threadId,
+  // turnId and completedAtMs, and emittedAtMs outside params), so the ids are
+  // only in the line's last characters; "head" puts them first; "none" leaves
+  // them out; "notImage" is the real order around a huge command output.
+  if (m.method === "bigImage") {
+    send(bigItemLine(m.params.shape));
+    send({ method: "tick", params: { n: 1 } });
+    send({ id: m.id, result: { ok: true } });
+  }
 });
+const THREAD = "01a0d1b7-8827-74c2-8882-b5d8555d38e5";
+const TURN = "01a0d1b7-88b9-7411-a15b-26c69d8782f0";
+function bigItemLine(shape) {
+  const item =
+    shape === "notImage"
+      ? {
+          type: "commandExecution",
+          id: "call_big_1",
+          command: "type big.log",
+          aggregatedOutput: huge(),
+          exitCode: 0,
+        }
+      : {
+          type: "imageGeneration",
+          id: "ig_big_1",
+          status: "completed",
+          revisedPrompt: "A plain gold circle centred on a dark charcoal background",
+          result: huge(),
+          transparentBackground: false,
+          failure: null,
+          savedPath:
+            "C:\\Users\\owner\\.codex\\generated_images\\" + THREAD + "\\ig_big_1.png",
+        };
+  const params =
+    shape === "head"
+      ? { threadId: THREAD, turnId: TURN, item, completedAtMs: 1790224861752 }
+      : shape === "none"
+        ? { item, completedAtMs: 1790224861752 }
+        : { item, threadId: THREAD, turnId: TURN, completedAtMs: 1790224861752 };
+  return { method: "item/completed", params, emittedAtMs: 1790224861757 };
+}
 let parked;
 let bigReverse;
 /** Seventeen MiB of text: one line over the client's 16 MiB cap. */

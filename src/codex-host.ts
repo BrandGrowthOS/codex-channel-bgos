@@ -188,9 +188,10 @@ export interface GeneratedImage {
    *  compared against `MEDIA:` lines and shown on the row; never read. */
   savedPath?: string;
   /** The runtime handed back a non empty `result`, whether or not it decoded
-   *  (not a picture, over the cap). Codex MADE something then, so a picture
-   *  that cannot be shown says "made" and never "tried". The string itself is
-   *  never kept. */
+   *  (not a picture, over the cap), or one on a line too large to read at all
+   *  (`tooLarge`, src/app-server.ts, Round 8). Codex MADE something then, so a
+   *  picture that cannot be shown says "made" and never "tried". The string
+   *  itself is never kept. */
   returnedOutput?: true;
   failure?: GeneratedImageFailure;
 }

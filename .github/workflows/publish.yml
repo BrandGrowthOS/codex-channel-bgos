@@ -69,11 +69,14 @@ jobs:
           # version after 0.14.0 moves latest back to that older version.
           # Beside that it waits for one thing no backend
           # gives: it is promoted only after one logged in live image turn
-          # confirms the real item (result bytes and their form,
-          # revisedPrompt, savedPath, the failure shape; probe.md, decision
-          # 7). The offline probe never saw a real item, and a shape the code
-          # does not read turns every picture into a "could not be shown"
-          # line while the served canon tells the model not to resend it.
+          # confirms the real item (result bytes and their form, the result
+          # size (under 12 MiB, the line cap), revisedPrompt, savedPath, the
+          # failure shape; probe.md, decision 7). The offline probe never saw
+          # a real item, and a shape the code does not read turns every
+          # picture into a "could not be shown" line while the served canon
+          # tells the model not to resend it. A picture over the line cap
+          # never posts either: its line is too large to read, and only that
+          # "could not be shown" line reaches the chat.
           # 0.13.0 is P2 stage 5's release, which merges first and brings its
           # own line here; merge order #12, #14, #15, P2 stage 5 (0.13.0),
           # then 0.14.0.
@@ -115,7 +118,7 @@ jobs:
           TAG="${{ steps.ver.outputs.dist_tag }}"
           echo "::warning::$VERSION was published under the npm dist tag $TAG, not latest, so nothing installs it by default. Promote it only when the reason it is held is met: that reason is written beside $VERSION in the HELD_FROM_LATEST comment in this workflow and in the promote block of the README."
           if [ "$VERSION" = "0.14.0" ]; then
-            echo "::warning::0.14.0 needs no backend of its own. It is promoted only after 0.13.0 is on latest, never before or in the same step, and only after one logged in live image turn confirms the real item (result bytes and their form, revisedPrompt, savedPath, the failure shape; probe.md, decision 7)."
+            echo "::warning::0.14.0 needs no backend of its own. It is promoted only after 0.13.0 is on latest, never before or in the same step, and only after one logged in live image turn confirms the real item (result bytes and their form, the result size (under 12 MiB, the line cap), revisedPrompt, savedPath, the failure shape; probe.md, decision 7)."
             echo "::warning::npm points latest at whichever version was promoted last: promoting an older version after 0.14.0 moves latest back to that older version."
           fi
           echo "Only once that reason is met, remove $VERSION from HELD_FROM_LATEST"

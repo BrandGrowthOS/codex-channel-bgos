@@ -150,7 +150,10 @@ function readFailure(raw: unknown): GeneratedImageFailure | undefined {
  * `returnedOutput` records that the runtime handed back a non empty `result`
  * at all, BEFORE decoding, so the fact survives a result that is not a
  * picture or is over the cap (Round 5): Codex made something then, and the
- * line that says it could not be shown must say "made", never "tried".
+ * line that says it could not be shown must say "made", never "tried". A
+ * picture whose whole line was over the transport's cap arrives with no
+ * `result` and `tooLarge: true` instead (src/app-server.ts, Round 8): the
+ * runtime handed back more than this daemon can read, so that is "made" too.
  */
 export function collectGeneratedImage(item: RpcObject): GeneratedImage | null {
   const itemId = typeof item.id === "string" ? item.id : "";
@@ -165,7 +168,10 @@ export function collectGeneratedImage(item: RpcObject): GeneratedImage | null {
     image.failure = failure;
     return image;
   }
-  if (typeof item.result === "string" && item.result.trim())
+  if (
+    (typeof item.result === "string" && item.result.trim()) ||
+    item.tooLarge === true
+  )
     image.returnedOutput = true;
   const decoded = decodeImageResult(item.result);
   if (decoded) {
@@ -265,6 +271,8 @@ function resetsIn(resetsAt: number | null | undefined, now: number): string | nu
  *  - A non empty `result` that did not decode (not a picture, over the cap)
  *    and no saved copy: the runtime still handed something over, so Codex
  *    made it (`returnedOutput`, Round 5). Saying "tried" there would be false.
+ *    The same for a picture whose line was too large to read at all (Round
+ *    8): its `result` was over 16 MiB of text.
  *  - None of those: Codex only TRIED. A generation that failed without a
  *    failure object (a failed status, an empty or absent result) made
  *    nothing, and the chat must not say a picture was made. Nothing here

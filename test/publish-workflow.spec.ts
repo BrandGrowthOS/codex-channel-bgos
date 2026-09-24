@@ -90,6 +90,16 @@ describe("the publish workflow never advertises a held version as latest", () =>
   /** Round 7: the one promote order for 0.14.0 that cannot leave latest on 0.13.0. */
   const ORDER = "only after 0.13.0 is on latest, never before or in the same step";
   const MOVES_BACK = /promoting an older version after 0\.14\.0 moves latest back/i;
+  /**
+   * Round 8, the last check's second gap. The live image turn also records
+   * how big the picture's `result` is: a line over the transport's 16 MiB cap
+   * (a picture over about 12 MiB) never posts, only its "could not be shown"
+   * line does. So the checklist names the size and the cap, in every text a
+   * release reads and in the printed warning.
+   */
+  const SIZE = "the result size (under 12 MiB, the line cap)";
+  const LIVE_TURN =
+    "only after one logged in live image turn confirms the real item (result bytes and their form, the result size (under 12 MiB, the line cap), revisedPrompt, savedPath, the failure shape; probe.md, decision 7)";
 
   it("holds 0.14.0 for the live image turn in all three texts a release reads", () => {
     // Re-review item 1. 0.14.0 needs no backend, so nothing machine readable
@@ -134,10 +144,12 @@ describe("the publish workflow never advertises a held version as latest", () =>
       ).toMatch(MOVES_BACK);
       expect(
         text,
+        `${name} does not ask the live image turn for ${SIZE}`,
+      ).toContain(SIZE);
+      expect(
+        text,
         `${name} does not hold 0.14.0 for the live image turn`,
-      ).toContain(
-        "only after one logged in live image turn confirms the real item (result bytes and their form, revisedPrompt, savedPath, the failure shape; probe.md, decision 7)",
-      );
+      ).toContain(LIVE_TURN);
     }
   });
 
@@ -216,13 +228,11 @@ describe("the publish workflow never advertises a held version as latest", () =>
         line.only === "0.14.0" &&
         line.text.startsWith("::warning::") &&
         line.text.includes(ORDER) &&
-        line.text.includes(
-          "only after one logged in live image turn confirms the real item (result bytes and their form, revisedPrompt, savedPath, the failure shape; probe.md, decision 7)",
-        ),
+        line.text.includes(LIVE_TURN),
     );
     expect(
       own,
-      `the warning does not name 0.14.0's condition: ${ORDER}, and only after one logged in live image turn`,
+      `the warning does not name 0.14.0's condition: ${ORDER}, and ${LIVE_TURN}`,
     ).toBeGreaterThanOrEqual(0);
     // Round 7: what a later promote of an older version does, said in the
     // run summary too, where the person holding the promote command reads.

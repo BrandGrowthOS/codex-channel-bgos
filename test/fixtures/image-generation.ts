@@ -125,3 +125,23 @@ export function probe401Turn(threadId = PROBE_THREAD): Record<string, unknown> {
     },
   };
 }
+
+/**
+ * Round 8: what the transport hands the host in place of a picture's
+ * `item/completed` line too large to read (src/app-server.ts): the item's
+ * type and id, NO result, and `tooLarge`, inside the real envelope's ids.
+ * test/app-server.spec.ts pins that the transport emits exactly this, and
+ * test/codex-host.spec.ts feeds exactly this to the host, so the two halves
+ * cannot drift apart.
+ */
+export function oversizedImageCompleted(
+  itemId: string,
+  threadId = PROBE_THREAD,
+  turnId = PROBE_TURN,
+): Record<string, unknown> {
+  return {
+    item: { type: "imageGeneration", id: itemId, tooLarge: true },
+    threadId,
+    turnId,
+  };
+}

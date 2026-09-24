@@ -3,13 +3,18 @@ import { describe, expect, it } from "vitest";
 import {
   IMAGE_BYTES_MAX,
   IMAGE_CAPTION_PROMPT_MAX,
+  IMAGE_MADE_NOT_SHOWN_LINE,
   collectGeneratedImage,
   decodeImageResult,
   imageCaption,
   imageFailureLine,
   imageNotShownLine,
 } from "../src/generated-images.js";
-import { GOLD_PNG, imageItem } from "./fixtures/image-generation.js";
+import {
+  GOLD_PNG,
+  imageItem,
+  oversizedImageCompleted,
+} from "./fixtures/image-generation.js";
 
 /**
  * Stage 4 (C-21): the pure half of a picture Codex made. Decoding happens at
@@ -165,6 +170,21 @@ describe("collectGeneratedImage", () => {
 
   it("records it for a picture that decoded too", () => {
     expect(collectGeneratedImage(imageItem())!.returnedOutput).toBe(true);
+  });
+
+  it("records it for a picture whose line was too large to read (Round 8)", () => {
+    // What src/app-server.ts hands on for a line over its cap: no result,
+    // and `tooLarge`. Codex made something far too big, so "made", not "tried".
+    const image = collectGeneratedImage(
+      oversizedImageCompleted("ig_big_1").item as Record<string, unknown>,
+    )!;
+    expect(image).toEqual({ itemId: "ig_big_1", returnedOutput: true });
+    expect(imageNotShownLine(image)).toBe(IMAGE_MADE_NOT_SHOWN_LINE);
+    // Only the transport's own marker counts, never a look alike value.
+    expect(
+      collectGeneratedImage({ type: "imageGeneration", id: "ig_2", tooLarge: "yes" })!
+        .returnedOutput,
+    ).toBeUndefined();
   });
 
   it.each([
