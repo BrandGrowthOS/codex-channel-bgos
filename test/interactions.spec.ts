@@ -1,16 +1,27 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   APPROVAL_HOLD_SECONDS,
+  EXECPOLICY_RULE_LEAD,
   Interactions,
   POLL_FAST_MS,
   POLL_FAST_WINDOW_MS,
   POLL_MAX_SPAN,
   POLL_SLOW_MS,
   coalesceReads,
+  differingReason,
+  execpolicyRuleText,
+  soleActionCommand,
+  titleCommandText,
   pollIntervalMs,
   retireOrphanedApprovals,
   storedWaitSeconds,
 } from "../src/interactions.js";
+import {
+  APPROVAL_META_BYTES_MAX,
+  COMMAND_TOOL_MAX_UNITS,
+  REQUEST_REASON_MAX_UNITS,
+} from "../src/file-change-wire.js";
+import { clipWithEllipsis } from "../src/clip-text.js";
 import type {
   PendingApprovalEntry,
   PendingApprovalStore,
@@ -1269,5 +1280,708 @@ describe("a file change approval names the files it is asking about", () => {
     c.abort();
     await vi.runAllTimersAsync();
     await answer;
+  });
+});
+
+/**
+ * Stage 5: a command approval says WHAT it would run, WHY the model is asking,
+ * and WHAT pressing Always would save.
+ *
+ * All three come from params a `commandExecution` approval carries and this
+ * daemon read none of before this stage. The shapes below are the ones a live
+ * probe against app server 0.154.0 actually captured, twice, with a control
+ * run beside them: `commandActions[0].command` is the command WITHOUT the
+ * shell wrapper, `params.reason` is `exec_command`'s `justification` passed
+ * through unaltered, and `proposedExecpolicyAmendment` is the WHOLE argv as a
+ * string array, which stayed the whole argv even when the model supplied the
+ * `prefix_rule` the tool schema advertises for narrowing it.
+ *
+ * The probe also proved the thing the rule sentence exists to say: answering
+ * with the amendment APPENDED a permanent line to the owner's global
+ * `~/.codex/rules/default.rules`, and the next identical command in the same
+ * turn raised no approval at all, while the control's plain `accept` wrote
+ * nothing and was asked again.
+ *
+ * MUTATION PROOFS, run by hand against this tree:
+ *  - drop the `askTitle` branch and let `text` fall back to the old
+ *    `params.reason ?? generic` -> "reads the command back as the title" and
+ *    "falls back to the wrapped command" go red.
+ *  - drop the `trimmed === title.trim()` guard in `differingReason` -> "sends
+ *    no reason when the sentence is already the title" goes red and the card
+ *    reads one sentence twice.
+ *  - stop quoting a token that holds whitespace in `execpolicyRuleText` ->
+ *    "quotes only the tokens that hold whitespace" goes red and a three
+ *    argument command reads as five.
+ *  - use `clipText` in place of `clipWithEllipsis` -> "clips all three inside
+ *    their caps" goes red on the ellipsis, and a cut command reads as a
+ *    complete, shorter command.
+ *  - send `rule_text` whenever the amendment is present, rather than only when
+ *    the Always tier was offered -> "sends no rule beside a button that is not
+ *    offered" goes red.
+ *  - drop the `commandExecution &&` in front of the TITLE -> "sends neither
+ *    string on a file change approval" goes red, because a file change that
+ *    also carried a command would be retitled `Run git apply patch.diff`.
+ *    That gate is the only one the METHOD owns: the reason is held off those
+ *    cards by `differingReason` (on every other method the title IS that
+ *    sentence) and the rule by the Always tier, not by a branch on the method,
+ *    so a ternary in front of either would never change an answer. This list
+ *    said otherwise until the stage 5 review ran it.
+ *  - drop the `typeof first !== \"object\" || first === null` guard in
+ *    `soleActionCommand` -> "survives every shape the runtime could put in
+ *    commandActions" goes red on `[null]`, throwing inside an RPC the model is
+ *    parked on.
+ *  - drop the `SHELL_CONNECTOR_RE` test in `soleActionCommand` -> "never
+ *    titles a pipeline by the one part Codex kept" goes red: `ls | xargs rm
+ *    -rf`, summarised by Codex as the single action `ls`, is titled `Run ls`.
+ *  - drop the verbatim `wrapped.includes` check -> the same case goes red on
+ *    an action whose text is not in the command at all.
+ *  - fold BEFORE the mask in `titleCommandText` (`redactOutput` over the
+ *    folded line) -> "removes a private key block before it folds" goes red:
+ *    the BEGIN header is masked and the key's base64 body reaches the title.
+ *  - drop `redactCommandLine` from `titleCommandText` -> "draws the title on
+ *    one line, with the secrets a command carries masked" goes red on `curl
+ *    -u admin:hunter2`.
+ *  - raise or remove `COMMAND_TOOL_MAX_UNITS` on the non wire `tool` -> "cuts
+ *    a runaway command inside the column the server will refuse" goes red, and
+ *    a body past 98,304 bytes costs the owner the whole card.
+ *  - assign either field under a camelCase name (`ruleText`) instead of on the
+ *    typed ApprovalMeta -> "says what Always would save" goes red, which is
+ *    the whole reason the interface is typed: the backend would drop it with a
+ *    201 and no error.
+ *  - run the clip BEFORE the mask in `titleCommandText` (fold, clip, then
+ *    `redactOutput`) -> "draws the title on one line, with every secret in it
+ *    masked" goes red: the title comes back as `... Bearer
+ *    Zm9vYmFyYmF6cXV4cXV...` with 19 raw characters of the token, because the
+ *    cut left one fewer than the bearer rule needs. Until the stage 5 review,
+ *    that case put its secret PAST the cut, where both orders drop it, so the
+ *    assertion could not fail.
+ */
+describe("a command approval says what it runs, why, and what Always would save", () => {
+  /** The wrapper the runtime would really run, wrapped command and all. */
+  const WRAPPED =
+    '"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command ' +
+    "'echo exec-probe > probe.txt'";
+  const AMENDMENT = [
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "-Command",
+    "echo exec-probe > probe.txt",
+  ];
+  /** The twelve fields the probe saw, in the order it saw them. */
+  const COMMAND_PARAMS = {
+    kind: "command",
+    threadId: "t1",
+    turnId: "turn-1",
+    itemId: "call_1",
+    startedAtMs: 1790152546803,
+    environmentId: "local",
+    reason: "Write probe.txt in the scratch directory",
+    command: WRAPPED,
+    cwd: "E:\\scratch",
+    commandActions: [{ type: "unknown", command: "echo exec-probe > probe.txt" }],
+    proposedExecpolicyAmendment: AMENDMENT,
+    availableDecisions: [
+      "accept",
+      { acceptWithExecpolicyAmendment: { execpolicy_amendment: AMENDMENT } },
+      "cancel",
+    ],
+  };
+
+  async function post(params: Record<string, unknown>, method = "item/commandExecution/requestApproval") {
+    const { bridge, ctx, api, c } = fixture();
+    const answer = bridge.approve(ctx, method, params);
+    await tick();
+    const body = (api.agentRequest.mock.calls[0] as any)[3];
+    c.abort();
+    await vi.runAllTimersAsync();
+    await answer;
+    return body;
+  }
+
+  it("reads the command back as the title and the model's justification as the reason", async () => {
+    vi.useFakeTimers();
+    const body = await post(COMMAND_PARAMS);
+    // The title is the ACTION's command, which is the string a person reads.
+    expect(body.text).toBe("Run echo exec-probe > probe.txt");
+    // The reason is the model's own sentence, untouched inside its cap, and not the
+    // title, so the card says what AND why instead of one of them twice.
+    expect(body.approvalMeta.reason).toBe("Write probe.txt in the scratch directory");
+    // The mono panel keeps the literal argv the runtime would run: the title
+    // moved, the evidence did not.
+    expect(body.approvalMeta.tool).toBe(WRAPPED);
+    // Stage 1's fields, untouched.
+    expect(body.approvalMeta).toMatchObject({
+      agent_route: "codex-9",
+      risk: "high",
+      wait_seconds: APPROVAL_HOLD_SECONDS,
+    });
+    // No session chip: `availableDecisions` on a real command approval does
+    // not carry `acceptForSession`, and the amendment entry is what puts the
+    // Always chip there.
+    expect(body.options.map((o: any) => o.text)).toEqual([
+      "Allow once",
+      "Always allow this rule",
+      "Deny",
+    ]);
+  });
+
+  it("never EDITS the card it wrote, so the two sentences cannot fall off it", async () => {
+    // WHAT THE SERVED CANON WARNS EVERY CHANNEL ABOUT, pinned here for this
+    // one. A PATCH of a message REPLACES the whole approval metadata block,
+    // so an edit that sets one field and leaves the two sentences out takes
+    // both lines off a card that had them. This daemon is safe by SHAPE
+    // rather than by care: its only later edit of an approval card is the
+    // retire, and that body is `{ options: [] }` and nothing else, so the
+    // column is never sent and never replaced.
+    //
+    // ALL THREE ENDINGS, because the one that matters most is the one a
+    // Stop test cannot see: an ANSWERED card is the card the owner keeps
+    // reading, and any edit of it would be the edit that takes both lines
+    // off. So the answered ending asserts NO PATCH at all, and the two
+    // endings that do retire (Stop and the backstop) assert every PATCH body
+    // whole, so adding `approvalMeta` to it is a red test.
+    vi.useFakeTimers();
+    const patchesTo = (api: any) =>
+      api.agentRequest.mock.calls.filter(
+        (call: any) => call[0] === "PATCH" && call[1] === "messages/41",
+      );
+
+    // 1. Answered: the owner taps Allow once. The card is settled by the
+    //    server, and this daemon never touches it again.
+    {
+      const { bridge, ctx, api, c } = fixture();
+      const answer = bridge.approve(
+        ctx,
+        "item/commandExecution/requestApproval",
+        COMMAND_PARAMS,
+      );
+      await tick();
+      const created = (api.agentRequest.mock.calls[0] as any)[3];
+      expect(created.approvalMeta.reason).toBe(
+        "Write probe.txt in the scratch directory",
+      );
+      const once = created.options.find((o: any) =>
+        o.callbackData.startsWith("ea:once:"),
+      );
+      bridge.handleClick({
+        assistantId: 9,
+        chatId: 17,
+        userId: "owner",
+        messageId: 41,
+        optionId: 1,
+        callbackData: once.callbackData,
+      });
+      expect(await answer).toEqual({ decision: "accept" });
+      await vi.advanceTimersByTimeAsync(POLL_FAST_WINDOW_MS);
+      expect(patchesTo(api)).toEqual([]);
+      c.abort();
+      await vi.runAllTimersAsync();
+      expect(patchesTo(api)).toEqual([]);
+    }
+
+    // 2. Stop: the turn is aborted while the card waits.
+    {
+      const { bridge, ctx, api, c } = fixture();
+      const answer = bridge.approve(
+        ctx,
+        "item/commandExecution/requestApproval",
+        COMMAND_PARAMS,
+      );
+      await tick();
+      c.abort();
+      await vi.runAllTimersAsync();
+      await answer;
+      const patches = patchesTo(api);
+      expect(patches.length).toBeGreaterThan(0);
+      for (const call of patches) expect((call as any)[3]).toEqual({ options: [] });
+    }
+
+    // 3. The backstop: the server never judges the row.
+    {
+      const { bridge, ctx, api } = fixture({
+        id: 41,
+        approvalMeta: { wait_seconds: 60 },
+      });
+      const answer = bridge.approve(
+        ctx,
+        "item/commandExecution/requestApproval",
+        COMMAND_PARAMS,
+      );
+      await tick();
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+      expect(await answer).toEqual({ decision: "decline" });
+      await vi.runAllTimersAsync();
+      const patches = patchesTo(api);
+      expect(patches.length).toBeGreaterThan(0);
+      for (const call of patches) expect((call as any)[3]).toEqual({ options: [] });
+    }
+  });
+
+  it("says what Always would save: this command and anything added after it, everywhere, until it is removed", async () => {
+    vi.useFakeTimers();
+    const body = await post(COMMAND_PARAMS);
+    expect(body.approvalMeta.rule_text).toBe(
+      "this command, and the same command with anything added after it, runs " +
+        "without asking again, in every project on this computer, until you " +
+        "remove the rule from your Codex rules file: " +
+        "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -Command " +
+        '"echo exec-probe > probe.txt"',
+    );
+    // The equality above is the whole assertion: the lead in is a frozen
+    // constant, so a `not.toContain("exact")` beside it could not fail and
+    // would only read as though something checked. What the offline check
+    // proved (the saved line is a PREFIX rule, so `codex execpolicy check`
+    // allows the same argv with anything added after it) is pinned by the
+    // exact sentence, and recorded on EXECPOLICY_RULE_LEAD's own docblock.
+  });
+
+  it("quotes only the tokens that hold whitespace, so three arguments do not read as five", () => {
+    expect(
+      execpolicyRuleText(["C:\\Program Files\\PowerShell\\pwsh.exe", "-c", "ls a b"]),
+    ).toBe(
+      `${EXECPOLICY_RULE_LEAD}"C:\\Program Files\\PowerShell\\pwsh.exe" -c "ls a b"`,
+    );
+    // ANY whitespace, not only U+0020: a tab inside a token is as invisible
+    // at a join as a space, and a bare join would read two arguments as three.
+    expect(execpolicyRuleText(["printf", "a\tb"])).toBe(
+      `${EXECPOLICY_RULE_LEAD}printf "a\tb"`,
+    );
+    // And an EMPTY token is drawn as `""`, not dropped: bare, `git commit -m
+    // ""` would read `git commit -m ` with a trailing space nobody can see,
+    // which is a different command from the one Always would save.
+    expect(execpolicyRuleText(["git", "commit", "-m", ""])).toBe(
+      `${EXECPOLICY_RULE_LEAD}git commit -m ""`,
+    );
+    // A shape this cannot render honestly gets no sentence at all, rather than
+    // half a command. The Always button is offered on a truthy amendment, so
+    // this is the case where the button ships with no claim beside it, which
+    // is exactly where this stage started.
+    expect(execpolicyRuleText(["git", 7])).toBeNull();
+    expect(execpolicyRuleText([])).toBeNull();
+    expect(execpolicyRuleText("git pull")).toBeNull();
+    expect(execpolicyRuleText(undefined)).toBeNull();
+  });
+
+  it("survives every shape the runtime could put in commandActions", () => {
+    // `commandActions` is one of the twelve fields a command approval carries
+    // and this daemon read none of them before stage 5. The probed shape is
+    // one entry with a string `command`; everything else here is a shape
+    // nobody has seen, and the point is that an unseen shape falls back to the
+    // wrapped command rather than THROWING inside an RPC the model is parked
+    // on, which would hang the turn instead of costing a nicer title.
+    const W = "bash -lc 'ls -la'";
+    expect(soleActionCommand([{ type: "unknown", command: " ls -la " }], W)).toBe(
+      "ls -la",
+    );
+    expect(soleActionCommand([null], W)).toBeNull();
+    expect(soleActionCommand([undefined], W)).toBeNull();
+    expect(soleActionCommand(["ls"], W)).toBeNull();
+    expect(soleActionCommand([{}], W)).toBeNull();
+    expect(soleActionCommand([{ command: 42 }], W)).toBeNull();
+    expect(soleActionCommand([{ command: "   " }], W)).toBeNull();
+    expect(soleActionCommand([], W)).toBeNull();
+    expect(soleActionCommand({ command: "ls" }, W)).toBeNull();
+    expect(soleActionCommand(undefined, W)).toBeNull();
+    // MORE THAN ONE action is not a title: the schema lists one action per
+    // piped or chained command, so the first of them is only part of what
+    // runs, and the caller falls back to the whole wrapped command.
+    expect(
+      soleActionCommand([{ command: "ls" }, { command: "rm -rf /" }], W),
+    ).toBeNull();
+    // Without the wrapped command nothing can say what the parser left out.
+    expect(soleActionCommand([{ command: "ls -la" }], undefined)).toBeNull();
+  });
+
+  it("never titles a pipeline by the one part Codex kept", async () => {
+    vi.useFakeTimers();
+    // ONE action is not one command. Codex's `parse_command` leaves the small
+    // helpers of a pipeline (xargs, tee, sed, awk, head ...) out of
+    // `commandActions` and skips a leading `cd`, so each of these can come
+    // back as a SINGLE action naming only the harmless part. The title is the
+    // push body, and `Run ls` on a lock screen for a delete is the failure.
+    const cases: Array<[string, string]> = [
+      ["bash -lc 'ls | xargs rm -rf'", "ls"],
+      ["bash -lc \"find . -name '*.log' | xargs rm -f\"", "find . -name '*.log'"],
+      ["bash -lc 'curl https://x.example | tee ~/.bashrc'", "curl https://x.example"],
+      ["bash -lc 'cd / && rm -rf *'", "rm -rf *"],
+      ["bash -lc 'make; rm -rf out'", "make"],
+      ["bash -lc 'echo $(rm -rf ~)'", "echo"],
+      ["bash -lc 'sleep 9 & rm -rf x'", "sleep 9"],
+      ["bash -lc 'ls\nrm -rf x'", "ls"],
+    ];
+    for (const [wrapped, kept] of cases) {
+      for (const type of ["unknown", "listFiles", "search", "read"]) {
+        expect(soleActionCommand([{ type, command: kept }], wrapped)).toBeNull();
+      }
+      const body = await post({
+        command: wrapped,
+        commandActions: [{ type: "listFiles", command: kept }],
+        availableDecisions: ["accept", "decline"],
+      });
+      expect(body.text).toBe(`Run ${titleCommandText(wrapped)}`);
+      expect(body.text).not.toBe(`Run ${kept}`);
+    }
+    // An action whose text is NOT in the command is not trusted either,
+    // whatever it says: the title never names text that is not in what runs.
+    expect(
+      soleActionCommand([{ command: "ls" }], "bash -lc 'rm -rf build'"),
+    ).toBeNull();
+    // A plain single command still reads without its wrapper, which is the
+    // whole point of reading the action.
+    expect(
+      soleActionCommand([{ command: "rm -rf build" }], "bash -lc 'rm -rf build'"),
+    ).toBe("rm -rf build");
+  });
+
+  it("titles a chained command by the WHOLE command, never by its first part", async () => {
+    vi.useFakeTimers();
+    // The title is the push body too, the only text a lock screen gets. Codex
+    // parses `a && b` into one action per command, so titling from the first
+    // action would put `Run git add -A` on the phone for a force push.
+    const body = await post({
+      command: "bash -lc 'git add -A && git push --force'",
+      commandActions: [
+        { type: "unknown", command: "git add -A" },
+        { type: "unknown", command: "git push --force" },
+      ],
+      reason: "Publish the branch",
+      availableDecisions: ["accept", "decline"],
+    });
+    expect(body.text).toBe("Run bash -lc 'git add -A && git push --force'");
+    expect(body.approvalMeta.reason).toBe("Publish the branch");
+  });
+
+  it("draws the title on one line, with the secrets a command carries masked", async () => {
+    vi.useFakeTimers();
+    // The title reaches APNs, FCM, the lock screen and the chat list preview,
+    // where `tool` never goes. A heredoc keeps its newlines in the action's
+    // command, and an inline bearer token is still a bearer token.
+    // A newline is also a place a second command can hide, so a heredoc is
+    // titled from the WHOLE wrapped command, folded onto one line.
+    const script = "python - <<'PY'\nimport shutil\nshutil.rmtree('build')\nPY";
+    const heredoc = await post({
+      command: `bash -lc "${script}"`,
+      commandActions: [{ command: script }],
+      availableDecisions: ["accept", "decline"],
+    });
+    expect(heredoc.text).toBe(
+      "Run bash -lc \"python - <<'PY' import shutil shutil.rmtree('build') PY\"",
+    );
+    expect(heredoc.text).not.toMatch(/[\r\n\t]/);
+    const token = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
+    const bearer = await post({
+      command: `curl -H 'Authorization: Bearer ${token}' https://api.example.com`,
+      commandActions: [
+        {
+          command: `curl -H 'Authorization: Bearer ${token}' https://api.example.com`,
+        },
+      ],
+      availableDecisions: ["accept", "decline"],
+    });
+    expect(bearer.text.startsWith("Run curl -H 'Authorization: Bearer ")).toBe(true);
+    expect(bearer.text).not.toContain(token);
+    expect(bearer.text).not.toContain("abcdefghijklmnop");
+    // The mono panel keeps the literal argv: it is drawn only inside the app,
+    // behind the card, and never rides a notification.
+    expect(bearer.approvalMeta.tool).toContain(token);
+    // Masked BEFORE the clip, so a cut can never leave half a secret the mask
+    // no longer recognises. The secret sits INSIDE what the title keeps: the
+    // raw command is 142 units, and a clip at 120 would keep `Bearer ` and the
+    // first 19 characters of the token, one short of the 20 the bearer rule
+    // needs, so a mask run after the clip would pass those 19 through. Masked
+    // first, the token shrinks to four characters and the whole line fits.
+    const bare = "Zm9vYmFyYmF6cXV4cXV1eDEyMzQ1Njc4OTBhYmNk";
+    const lead = `echo ${"a".repeat(87)} Bearer `;
+    const raw = `${lead}${bare} x`;
+    const cut = bare.slice(0, 19);
+    // The precondition, so this case cannot pass for the wrong reason: the
+    // raw line is over the cap, and the clip alone keeps the fragment.
+    expect(raw.length).toBeGreaterThan(120);
+    expect(clipWithEllipsis(raw, 120)).toBe(`${lead}${cut}\u2026`);
+    const inside = titleCommandText(raw);
+    expect(inside).toBe(`${lead}Zm9v... x`);
+    expect(inside).not.toContain(cut);
+    // THE SHAPES A COMMAND LINE CARRIES and output does not, which the output
+    // mask alone passed through verbatim: a curl user, a URL's userinfo on a
+    // scheme that is not a database, a short credential in an environment
+    // assignment, a password flag, and MySQL's glued `-p`.
+    const leaks: Array<[string, string]> = [
+      ["curl -u admin:hunter2 https://api.example.com", "hunter2"],
+      ["git clone https://kc:S3cretPass@github.com/o/r.git", "S3cretPass"],
+      ["PGPASSWORD=hunter2 psql -h db", "hunter2"],
+      ["API_KEY=abc123 ./run", "abc123"],
+      ["mysql -u root -pSecret1 app", "Secret1"],
+      ["mysqldump --password Secret1 app", "Secret1"],
+      ["deploy --token=ghx_short1 prod", "ghx_short1"],
+    ];
+    for (const [command, secret] of leaks) {
+      const body = await post({
+        command,
+        commandActions: [{ command }],
+        availableDecisions: ["accept", "decline"],
+      });
+      expect(body.text.startsWith("Run ")).toBe(true);
+      expect(body.text).not.toContain(secret);
+    }
+  });
+
+  it("removes a private key block before it folds", () => {
+    // The mask matches a key block ACROSS its lines: the BEGIN line opens it
+    // and everything to the END marker becomes one placeholder. Folded first,
+    // the block is one line, the header alone is masked, and the base64 body
+    // (the key itself) rides the title onto a lock screen.
+    const body = "MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun";
+    const heredoc =
+      "cat > key.pem <<'K'\n-----BEGIN RSA PRIVATE KEY-----\n" +
+      `${body}\n-----END RSA PRIVATE KEY-----\nK`;
+    const title = titleCommandText(heredoc);
+    expect(title).toContain("[private key removed]");
+    expect(title).not.toContain(body.slice(0, 12));
+    expect(title).not.toMatch(/[\r\n]/);
+  });
+
+  it("keeps the old title on a request to type into a running process", async () => {
+    vi.useFakeTimers();
+    // `kind: writeStdin` asks to send INPUT to a terminal that is already
+    // open, and carries no field holding the input. `Run python` over it would
+    // tell the owner they are starting a program that is already running, so
+    // the card reads exactly as it did before stage 5: the runtime's sentence
+    // as the title, and no reason line repeating it.
+    const body = await post({
+      kind: "writeStdin",
+      command: "python",
+      commandActions: [{ command: "python" }],
+      reason: "Answer the prompt in the running script",
+      availableDecisions: ["accept", "decline"],
+    });
+    expect(body.text).toBe("Answer the prompt in the running script");
+    expect(body.approvalMeta).not.toHaveProperty("reason");
+    // And with no sentence at all, the generic line, never `Run python`.
+    const bare = await post({
+      kind: "writeStdin",
+      command: "python",
+      commandActions: [{ command: "python" }],
+      availableDecisions: ["accept", "decline"],
+    });
+    expect(bare.text).toBe("Codex needs your approval to continue.");
+    // The probed shape carries `kind: "command"` and still reads as one.
+    const command = await post({ ...COMMAND_PARAMS, kind: "command" });
+    expect(command.text).toBe("Run echo exec-probe > probe.txt");
+  });
+
+  it("holds the reason back whenever it would read as the title twice", () => {
+    expect(differingReason("Write probe.txt", "Run echo hi")).toBe(
+      "Write probe.txt",
+    );
+    // Trimmed on both sides before the comparison, so the same sentence with
+    // different whitespace is still the same sentence.
+    expect(differingReason("  Reconfigure the network.  ", "Reconfigure the network.")).toBeNull();
+    expect(differingReason("Run ls", "  Run ls  ")).toBeNull();
+    // A file change request sends an EXPLICIT null here, which is the case
+    // this null check exists for; the rest are shapes nobody has seen.
+    expect(differingReason(null, "Change calc.py")).toBeNull();
+    expect(differingReason(undefined, "Change calc.py")).toBeNull();
+    expect(differingReason(7, "Change calc.py")).toBeNull();
+    expect(differingReason("   ", "Change calc.py")).toBeNull();
+    // Clipped with the ellipsis inside the cap, because the backend refuses a
+    // 281st unit rather than clipping it.
+    const long = differingReason("b".repeat(400), "Run ls");
+    expect(long).toHaveLength(REQUEST_REASON_MAX_UNITS);
+    expect(long?.endsWith("\u2026")).toBe(true);
+  });
+
+  it("falls back to the wrapped command when the runtime sent no action", async () => {
+    vi.useFakeTimers();
+    const body = await post({
+      command: "rm -rf build",
+      reason: "Clear the stale build directory",
+      availableDecisions: ["accept", "decline"],
+    });
+    // AND THIS EQUALITY IS THE PUSH BODY, not only the title. The backend
+    // never puts `approvalMeta` on a notification (spec 4.2), so the phone
+    // shows `text` and nothing else: from this release the owner's phone
+    // reads the WRAPPED command back, where it used to read the model's
+    // sentence, and the WHY cannot ride along. Deliberate (spec 4.3) and
+    // written down in the comment above `actionCommand`, so the next edit of
+    // `cardText` is an edit of the notification and this line goes red.
+    expect(body.text).toBe("Run rm -rf build");
+    expect(body.approvalMeta.reason).toBe("Clear the stale build directory");
+    expect(body.approvalMeta).not.toHaveProperty("rule_text");
+  });
+
+  it("cuts a runaway command inside the column the server will refuse", async () => {
+    vi.useFakeTimers();
+    // `tool` is the literal argv, and on a command card nothing else in the
+    // column is large: no summary, no diff. A body past 98,304 bytes is
+    // refused with a 400, which costs the owner the card rather than a tail.
+    // So the input is one that WOULD be refused unclipped: 110,000 units,
+    // asserted over the cap below, so the byte check can actually fail.
+    const runaway = "powershell -Command " + "x".repeat(110_000);
+    const body = await post({
+      command: runaway,
+      reason: "Run the generated script",
+      availableDecisions: ["accept", "decline"],
+    });
+    expect(
+      Buffer.byteLength(
+        JSON.stringify({ ...body.approvalMeta, tool: runaway }),
+        "utf8",
+      ),
+    ).toBeGreaterThan(APPROVAL_META_BYTES_MAX);
+    expect(body.approvalMeta.tool).toHaveLength(COMMAND_TOOL_MAX_UNITS);
+    expect(body.approvalMeta.tool.endsWith("\u2026")).toBe(true);
+    expect(
+      Buffer.byteLength(JSON.stringify(body.approvalMeta), "utf8"),
+    ).toBeLessThan(APPROVAL_META_BYTES_MAX);
+    // The title is the command too, under its own tighter cap, so the card
+    // reads as a card and not as a file.
+    expect(body.text.length).toBeLessThanOrEqual(125);
+  });
+
+  it("sends no reason when the sentence is already the title", async () => {
+    vi.useFakeTimers();
+    // Neither an action nor a command: the title falls back to the runtime's
+    // sentence exactly as it did before this stage, so a reason line would
+    // draw that same sentence a second time.
+    const body = await post({
+      reason: "Codex needs to reconfigure the network.",
+      availableDecisions: ["accept", "decline"],
+    });
+    expect(body.text).toBe("Codex needs to reconfigure the network.");
+    expect(body.approvalMeta).not.toHaveProperty("reason");
+    // A blank sentence is not a sentence either.
+    const blank = await post({ command: "ls", reason: "   " });
+    expect(blank.text).toBe("Run ls");
+    expect(blank.approvalMeta).not.toHaveProperty("reason");
+  });
+
+  it("clips all three inside their caps, ellipsis and all", async () => {
+    vi.useFakeTimers();
+    const body = await post({
+      reason: "b".repeat(400),
+      command: `bash -lc '${"a".repeat(300)}'`,
+      commandActions: [{ command: "a".repeat(300) }],
+      proposedExecpolicyAmendment: ["c".repeat(700)],
+      availableDecisions: [
+        { acceptWithExecpolicyAmendment: { execpolicy_amendment: ["c"] } },
+      ],
+    });
+    // The backend REFUSES a string past its length rather than clipping it, so
+    // one unit over costs the owner the whole card. Every cut is marked,
+    // because a silent prefix renders as a complete, shorter command.
+    expect(body.text).toBe(`Run ${"a".repeat(119)}\u2026`);
+    expect(body.approvalMeta.reason).toHaveLength(280);
+    expect(body.approvalMeta.reason.endsWith("\u2026")).toBe(true);
+    expect(body.approvalMeta.reason.startsWith("bbb")).toBe(true);
+    expect(body.approvalMeta.rule_text).toHaveLength(500);
+    expect(body.approvalMeta.rule_text.endsWith("\u2026")).toBe(true);
+    expect(body.approvalMeta.rule_text.startsWith(EXECPOLICY_RULE_LEAD)).toBe(true);
+  });
+
+  it("sends no rule beside a button that is not offered", async () => {
+    vi.useFakeTimers();
+    // The amendment is there and the runtime's own decision list does not
+    // carry it, so stage 4's tier withholds the chip. A sentence about an
+    // answer the owner cannot give would be worse than silence.
+    const withheld = await post({
+      command: "curl example.com",
+      commandActions: [{ command: "curl example.com" }],
+      proposedExecpolicyAmendment: AMENDMENT,
+      availableDecisions: ["accept", "cancel"],
+    });
+    expect(withheld.options.map((o: any) => o.text)).toEqual(["Allow once", "Deny"]);
+    expect(withheld.approvalMeta).not.toHaveProperty("rule_text");
+    // And no amendment at all is the ordinary case on most commands.
+    const plain = await post({
+      command: "ls",
+      commandActions: [{ command: "ls" }],
+      availableDecisions: ["accept", "decline"],
+    });
+    expect(plain.options.map((o: any) => o.text)).toEqual([
+      "Allow once",
+      "Deny",
+    ]);
+    expect(plain.approvalMeta).not.toHaveProperty("rule_text");
+  });
+
+  it("sends neither string on a file change approval, which stage 4 owns", async () => {
+    vi.useFakeTimers();
+    const changes = [
+      {
+        path: "/work/project/calc.py",
+        kind: { type: "update" },
+        diff: "@@ -1 +1 @@\n-a\n+b\n",
+      },
+    ];
+    const plain = await post(
+      { itemId: "call_3", reason: null, changes, cwd: "/work/project" },
+      "item/fileChange/requestApproval",
+    );
+    expect(plain.text).toBe("Change calc.py");
+    expect(plain.approvalMeta).not.toHaveProperty("reason");
+    expect(plain.approvalMeta).not.toHaveProperty("rule_text");
+    // And when the runtime DOES fill a sentence on a file change, it stays the
+    // title, exactly as stage 4 left it, rather than moving to a reason line.
+    const withReason = await post(
+      {
+        itemId: "call_4",
+        reason: "This patch writes outside your workspace.",
+        changes,
+        cwd: "/work/project",
+      },
+      "item/fileChange/requestApproval",
+    );
+    expect(withReason.text).toBe("This patch writes outside your workspace.");
+    expect(withReason.approvalMeta).not.toHaveProperty("reason");
+    // THE METHOD DECIDES, not the presence of a field. The host joins the
+    // runtime's own item onto these params, so a file change request that also
+    // carried a command would still be a file change, and its title is stage
+    // 4's ask sentence rather than a command read back.
+    const mixed = await post(
+      {
+        itemId: "call_5",
+        reason: "This patch writes outside your workspace.",
+        changes,
+        cwd: "/work/project",
+        command: "git apply patch.diff",
+        commandActions: [{ command: "git apply patch.diff" }],
+      },
+      "item/fileChange/requestApproval",
+    );
+    expect(mixed.text).toBe("This patch writes outside your workspace.");
+    expect(mixed.approvalMeta.tool).toBe("calc.py (update)");
+    expect(mixed.approvalMeta).not.toHaveProperty("reason");
+  });
+
+  it("leaves a permissions approval exactly as it was", async () => {
+    vi.useFakeTimers();
+    const bare = await post(
+      { permissions: { network: true } },
+      "item/permissions/requestApproval",
+    );
+    expect(bare.text).toBe("Codex needs your approval to continue.");
+    expect(bare.approvalMeta.tool).toBe('{"network":true}');
+    // The real PermissionsRequestApprovalParams carries `reason`, so the case
+    // that can fail is the one carrying everything a command request would:
+    // a sentence, a command, one action and an amendment. The METHOD decides,
+    // so the title is still the runtime's sentence (never `Run curl ...`),
+    // no reason line repeats it, and no Always tier or rule is offered.
+    const full = await post(
+      {
+        permissions: { network: true },
+        reason: "Reach the package registry",
+        command: "curl https://registry.example.com",
+        commandActions: [{ command: "curl https://registry.example.com" }],
+        proposedExecpolicyAmendment: ["curl", "https://registry.example.com"],
+      },
+      "item/permissions/requestApproval",
+    );
+    expect(full.text).toBe("Reach the package registry");
+    expect(full.approvalMeta).not.toHaveProperty("reason");
+    expect(full.approvalMeta).not.toHaveProperty("rule_text");
+    expect(full.options.map((o: any) => o.callbackData.split(":")[1])).toEqual([
+      "once",
+      "session",
+      "deny",
+    ]);
   });
 });

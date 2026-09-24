@@ -718,9 +718,14 @@ export class CodexAdapter {
     if (this.capabilitiesLoaded) return;
     this.capabilitiesLoaded = true;
     try {
+      // The declared list rides the fetch itself: this runs before the first
+      // heartbeat of a new release stores it, and the canon tells some
+      // sentences (the request reason clause) only to a daemon that declares
+      // their token. See BgosApi.getCapabilities.
       const served = await this.api.getCapabilities(
         "codex",
         getPackageVersion(),
+        DECLARED_CAPABILITIES,
       );
       const picked = pickCapabilitiesText(served);
       if (picked.source === "backend") {

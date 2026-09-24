@@ -16,6 +16,7 @@ import {
   MISSION_GOAL_CHECKS,
   MISSION_GOAL_LOOP,
   MISSION_PAUSE,
+  REQUEST_REASON,
 } from "../src/declared-capabilities.js";
 
 // backend/src/dto/integrations/pair-exchange.dto.ts CAPABILITY_TOKEN_REGEX
@@ -55,6 +56,16 @@ describe("DECLARED_CAPABILITIES", () => {
     // the token would put a Checked tag on the owner's card for a check that
     // never ran, which is the exact thing this whole stage exists to stop.
     expect(DECLARED_CAPABILITIES).not.toContain(MISSION_GOAL_CHECKS);
+  });
+
+  it("declares request_reason, because this release fills reason and rule_text", () => {
+    // The BGOS canon tells the agent "the host fills reason from your
+    // exec_command justification" only to a daemon that declares this token,
+    // never by version (PR #16 is numbered 0.14.0 without this code). The
+    // spelling is pinned byte for byte with BGOS in
+    // test/codex-capability-tokens.pin.spec.ts.
+    expect(REQUEST_REASON).toBe("request_reason");
+    expect(DECLARED_CAPABILITIES).toContain(REQUEST_REASON);
   });
 
   it("is frozen, so one constant is the single source", () => {

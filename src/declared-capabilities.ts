@@ -12,6 +12,25 @@
  * daemon liveness down with it.
  */
 
+import { REQUEST_REASON } from "./codex-capability-tokens.js";
+
+/**
+ * This daemon fills `approvalMeta.reason` from the model's `exec_command`
+ * justification and `approvalMeta.rule_text` from the exec policy amendment
+ * (P2 stage 5). Declared from the release that carries that code.
+ *
+ * The BGOS canon tells this daemon's agent "the host fills reason ... so
+ * write the justification for the owner" ONLY when the daemon declares this
+ * token, never by version: PR #16 of this repo is numbered 0.14.0 on the same
+ * base without stage 5, and no PR can reserve a number, so a 0.13.0 floor
+ * would have told a 0.14.0 daemon built from #16 something false. The
+ * spelling lives in `codex-capability-tokens.ts`, a file copied byte for byte
+ * from BGOS `backend/src/integrations/`, and both repos pin its sha256
+ * (here: test/codex-capability-tokens.pin.spec.ts). Re-exported so the
+ * declared list and its tests read one name.
+ */
+export { REQUEST_REASON };
+
 /** This daemon hears the eight mission events and tells its model in band. */
 export const MISSION_EVENTS = "mission_events";
 
@@ -57,4 +76,5 @@ export const DECLARED_CAPABILITIES: readonly string[] = Object.freeze([
   MISSION_EVENTS,
   MISSION_GOAL_LOOP,
   MISSION_PAUSE,
+  REQUEST_REASON,
 ]);
