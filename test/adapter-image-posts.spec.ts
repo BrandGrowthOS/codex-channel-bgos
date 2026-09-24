@@ -525,6 +525,8 @@ describe("an adopted goal turn posts its pictures through the same path", () => 
       ownerId: "owner-1",
       identityReady: false,
       planCardFailures: new Set<number>(),
+      // The chat's stop generation, which an adopted turn reads (Round 7).
+      generations: new Map<number, number>(),
       chatToAssistant: new Map<number, number>([[20, 10]]),
       assistantToRoute: new Map<number, string>(),
       goalLane: {
@@ -586,6 +588,8 @@ describe("an adopted goal turn posts its pictures through the same path", () => 
       identityReady: false,
       planCardFailures: new Set<number>(),
       planDoorHint: new Map(),
+      // The chat's stop generation, which an adopted turn reads (Round 7).
+      generations: new Map<number, number>(),
       chatToAssistant: new Map<number, number>([[20, 10]]),
       assistantToRoute: new Map<number, string>(),
       goalLane: {
@@ -920,5 +924,197 @@ describe("a MEDIA: line that is the posted picture again is dropped", () => {
     );
     await adapter.executeAndReply(10, 20, "Draw two", reply);
     expect(reply.sendFile.mock.calls).toEqual([[other]]);
+  });
+});
+
+/**
+ * Round 7, the final review's low item on adoptGoalTurn. A continuation turn
+ * a goal runs has no entry in `turnControllers`, so /stop interrupts it
+ * through the host and its result came back through `deliver` into
+ * publishTurnResult's error branch: the picture, and any "could not be shown"
+ * or limit line, could reach the chat before "Stopped.", and those lines
+ * posted though the owner asked for quiet. And a continuation turn after a
+ * Stop did not wait for the stopped turn's pictures.
+ *
+ * Now a goal turn follows the same Stop rules an ordinary turn does. A turn
+ * the owner stopped (the chat's stop generation moved while it ran) closes
+ * its card, and its finished pictures post in the background after the stop
+ * line and any earlier stopped pictures, pictures only, with no partial text
+ * and no red error: "Stopped." already answered. Any other goal turn's rows,
+ * requests, plan card and reply wait for a stopped turn's pictures.
+ *
+ * MUTATION PROOFS (Round 7 in red-proofs.md): send an owner's stop through
+ * publishTurnResult again and the first case goes red; drop the wait for the
+ * stop line and the first goes red; drop the goal turn's wait for the
+ * stopped pictures and the second and third go red.
+ */
+describe("a goal turn follows the Stop picture rules", () => {
+  function goalFixture() {
+    const { adapter, reply, order } = fixture(async () => done());
+    Object.assign(adapter, {
+      identityReady: false,
+      assistantToRoute: new Map<number, string>(),
+      goalLane: {
+        owns: () => true,
+        noteTurnStarted: vi.fn(),
+        noteTurnFinished: vi.fn(async () => {}),
+      },
+    });
+    adapter.chatToAssistant.set(20, 10);
+    adapter.toolProgress.sendToolStart = vi.fn(async (row: any) => {
+      order.push(`row:${row.toolName}`);
+    });
+    adapter.toolProgress.finalizeTurn = vi.fn(async () => {
+      order.push("goal finalize");
+    });
+    adapter.outbound.sendText = vi.fn(async (body: any) => {
+      order.push(`text:${body.text}`);
+      return { id: 7 };
+    });
+    adapter.outbound.sendImageBytes = vi.fn(async (body: any) => {
+      order.push(`image:${body.caption ?? ""}`);
+      return { id: 8 };
+    });
+    adapter.host.stopTurn = vi.fn(async () => {});
+    adapter.host.resetChat = vi.fn();
+    adapter.nativeCommands = {
+      handle: vi.fn(async () => false),
+      cancel: vi.fn(() => false),
+    };
+    return { adapter, reply, order };
+  }
+  const stop = (adapter: any, reply: any) =>
+    adapter.codexDispatch({
+      chatId: 20,
+      assistantId: 10,
+      messageId: 7,
+      userId: "owner-1",
+      senderType: "user",
+      text: "/stop",
+      command: { name: "stop", args: "" },
+      replyHandle: reply,
+    });
+
+  it("posts a stopped goal turn's picture after the Stopped line, and no plain line, no text, no error", async () => {
+    const { adapter, reply, order } = goalFixture();
+    const adopted = adapter.adoptGoalTurn(20)!;
+    let answered!: () => void;
+    adapter.host.stopTurn = vi.fn(
+      () => new Promise<void>((resolve) => (answered = resolve)),
+    );
+    const stopping = stop(adapter, reply);
+    await vi.waitFor(() => expect(adapter.host.stopTurn).toHaveBeenCalled());
+    // The runtime ends the goal turn before the interrupt's own answer is
+    // back: the race in which an upload could beat "Stopped." to the chat.
+    await adopted.deliver(
+      done({
+        error: "Stopped by you.",
+        replyText: "Late partial response",
+        finalAgentMessageText: "Late partial response",
+        turnCompleted: false,
+        images: [picture(), refused(), { itemId: "ig_nothing" }],
+      }),
+    );
+    expect(order).not.toContain(`image:Prompt: ${PROMPT}`);
+    answered();
+    await stopping;
+    await vi.waitFor(() => expect(adapter.pictureTails?.get(20)).toBeUndefined());
+    expect(order).toEqual([
+      "goal finalize",
+      "text:Stopped.",
+      `image:Prompt: ${PROMPT}`,
+    ]);
+    expect(adapter.outbound.sendAgentError).not.toHaveBeenCalled();
+    expect(adapter.goalLane.noteTurnFinished).toHaveBeenCalledWith(20, {
+      text: "Late partial response",
+      error: "Stopped by you.",
+    });
+  });
+
+  it("keeps a goal turn's reply after an ordinary turn's stopped picture", async () => {
+    const { adapter, reply, order } = goalFixture();
+    adapter.host.runTurn = vi.fn(async () => {
+      for (const controller of adapter.turnControllers.get(20))
+        controller.abort();
+      return done({
+        error: "Stopped by you.",
+        turnCompleted: false,
+        images: [picture()],
+      });
+    });
+    let land!: () => void;
+    reply.sendImageBytes.mockImplementation(
+      async (_image: unknown, caption?: string) => {
+        await new Promise<void>((resolve) => (land = resolve));
+        order.push(`image:${caption ?? ""}`);
+        return { id: 6 };
+      },
+    );
+    await adapter.runAndReply(10, 20, "Draw", reply);
+    await vi.waitFor(() => expect(reply.sendImageBytes).toHaveBeenCalled());
+    // The runtime starts the goal's next turn while the picture uploads.
+    const adopted = adapter.adoptGoalTurn(20)!;
+    const delivered = adopted.deliver(
+      done({
+        replyText: "Goal step done.",
+        finalAgentMessageText: "Goal step done.",
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(order).not.toContain("text:Goal step done.");
+    land();
+    await delivered;
+    expect(order).toEqual([
+      "finalize",
+      `image:Prompt: ${PROMPT}`,
+      "text:Goal step done.",
+      "goal finalize",
+    ]);
+  });
+
+  it("holds a goal turn's first row and its request until the stopped picture has posted", async () => {
+    const { adapter, reply, order } = goalFixture();
+    adapter.host.runTurn = vi.fn(async () => {
+      for (const controller of adapter.turnControllers.get(20))
+        controller.abort();
+      return done({
+        error: "Stopped by you.",
+        turnCompleted: false,
+        images: [picture()],
+      });
+    });
+    adapter.tools.handleRequest = vi.fn(async () => {
+      order.push("approval card");
+      return { decision: "accept" };
+    });
+    let land!: () => void;
+    reply.sendImageBytes.mockImplementation(
+      async (_image: unknown, caption?: string) => {
+        await new Promise<void>((resolve) => (land = resolve));
+        order.push(`image:${caption ?? ""}`);
+        return { id: 6 };
+      },
+    );
+    await adapter.runAndReply(10, 20, "Draw", reply);
+    await vi.waitFor(() => expect(reply.sendImageBytes).toHaveBeenCalled());
+    const adopted = adapter.adoptGoalTurn(20)!;
+    const row = adopted.callbacks.onTool(
+      { name: "shell", icon: "terminal", args: {}, status: "running" },
+      "cmd-1",
+    );
+    const request = adopted.callbacks.onRequest(
+      "item/commandExecution/requestApproval",
+      { threadId: "thread-20", turnId: "turn-2", itemId: "cmd-1" },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(order).not.toContain("row:shell");
+    expect(order).not.toContain("approval card");
+    land();
+    await Promise.all([row, request]);
+    const image = order.indexOf(`image:Prompt: ${PROMPT}`);
+    expect(order[0]).toBe("finalize");
+    expect(image).toBeGreaterThan(0);
+    expect(order.indexOf("row:shell")).toBeGreaterThan(image);
+    expect(order.indexOf("approval card")).toBeGreaterThan(image);
   });
 });

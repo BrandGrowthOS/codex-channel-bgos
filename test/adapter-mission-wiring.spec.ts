@@ -239,6 +239,8 @@ describe("adopting a turn the app server started by itself", () => {
       ownerId: "owner-1",
       identityReady: false,
       planCardFailures: new Set<number>(),
+      // The chat's stop generation, which an adopted turn reads (Round 7).
+      generations: new Map<number, number>(),
       chatToAssistant: new Map<number, number>([[20, 10]]),
       assistantToRoute: new Map<number, string>(),
       goalLane,

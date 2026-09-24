@@ -99,8 +99,10 @@ interface Pending {
  * 0.14.0 adds NO hold of its own: a picture Codex makes posts itself as an
  * ordinary image message, which every backend already accepts. It is held
  * only because it carries the holds of the releases before it, so it is
- * promoted with 0.13.0 or after it and never before. Beside that it waits for
- * one thing no backend gives: it is promoted only after one logged in live
+ * promoted only after 0.13.0 is on latest, never before or in the same step:
+ * `npm dist-tag add` points latest at whichever version ran last, so
+ * promoting an older version after 0.14.0 moves latest back to that older
+ * version. Beside that it waits for one thing no backend gives: it is promoted only after one logged in live
  * image turn confirms the real item (result bytes and their form,
  * revisedPrompt, savedPath, the failure shape; probe.md, decision 7). The
  * offline probe never saw a real item, and a shape this code does not read
@@ -111,8 +113,8 @@ interface Pending {
  * #15, P2 stage 5 (0.13.0), then 0.14.0. Retire the lines one at a time, in
  * this order: stage 1 backend live, then 0.10.1; stage 3 backend live, then
  * 0.11.0; stage 4 backend live, then 0.12.0; then 0.13.0 as its own reason
- * says; then 0.14.0, with 0.13.0 or after it and never before, and only
- * after that live image turn.
+ * says; then 0.14.0, only after 0.13.0 is on latest, never before or in the
+ * same step, and only after that live image turn.
  *
  * The lines below are the machine readable half of that hold, and the publish
  * workflow's HELD_FROM_LATEST list must agree with them exactly

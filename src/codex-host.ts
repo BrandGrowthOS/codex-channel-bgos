@@ -492,10 +492,12 @@ const CHILD_READ_TIMEOUT_MS = 5_000;
  * rollout, and `thread/resume`, `thread/fork` and `thread/read
  * {includeTurns:true}` all hydrate `thread.turns` unless told not to. A chat
  * with about six pictures then answers ONE resume with a single line over the
- * 16 MiB cap in src/app-server.ts, which closes the connection and fails every
- * live turn on this daemon, for every chat, and again on every later resume of
- * that chat. Measured on the vendored 0.154.0 binary: 14.23 MiB for five
- * pictures without the flag, 3.9 KB with it.
+ * 16 MiB cap in src/app-server.ts. That used to close the connection and fail
+ * every live turn on this daemon, for every chat; since Round 7 the reader
+ * drops only that line and fails only that resume, which is still the chat's
+ * turn, again on every later resume of that chat. Measured on the vendored
+ * 0.154.0 binary: 14.23 MiB for five pictures without the flag, 3.9 KB with
+ * it.
  *
  * The 0.154.0 schema (`codex app-server generate-ts --experimental`) offers
  * the cure in so many words. ThreadResumeParams.excludeTurns and
@@ -507,7 +509,9 @@ const CHILD_READ_TIMEOUT_MS = 5_000;
  * the fork pass `excludeTurns: true` (none of them reads a turn), every
  * metadata read passes `includeTurns: false`, and the one reader that needs
  * old text, the legacy tool upgrade below, pages `thread/turns/list` a few
- * turns at a time instead.
+ * turns at a time instead: cold first, and only a thread the runtime's history
+ * index has not seen is resumed (metadata only) to be paged, then let go
+ * (Round 7, recentThreadMessages).
  */
 /** How much recent conversation a legacy tool upgrade carries over. */
 const LEGACY_CONTEXT_CHARS = 60_000;
@@ -625,6 +629,13 @@ export class CodexHost {
   private readonly toolVersions: ThreadMap;
   private readonly toolVersionsFile: string;
   private readonly loaded = new Set<string>();
+  /**
+   * Legacy threads resumed ONLY to read their history (Round 7, see
+   * recentThreadMessages). Nothing such a thread says reaches a chat: the chat
+   * still maps to it while the read runs, so a goal notification or a turn
+   * would otherwise be routed to the chat that is leaving it.
+   */
+  private readonly historyReads = new Set<string>();
   private readonly active = new Map<string, ActiveTurn>();
   private readonly queues = new Map<number, Promise<unknown>>();
   private hints = BGOS_AGENT_HINTS;
@@ -1313,14 +1324,76 @@ export class CodexHost {
   /**
    * A thread's recent user and agent text, oldest first, read a few summary
    * turns at a time from the newest, until `budget` characters are in hand or
-   * the history ends. Best effort: a page that cannot be read (a thread the
-   * runtime has not indexed, an older runtime) ends the walk with what was
-   * read, and the upgrade goes ahead without it rather than failing the turn.
+   * the history ends. Best effort: a page that cannot be read ends the walk
+   * with what was read, and the upgrade goes ahead without it rather than
+   * failing the turn.
+   *
+   * COLD FIRST (Round 7; the probes are in the stage 4 red-proofs.md). The
+   * runtime pages a thread's turns out of its thread history index, and that
+   * index knows every thread the app server made, loaded or not: on the
+   * vendored 0.154.0 binary a second app server on the same home paged two
+   * such threads cold, with no resume and nothing loaded. A thread the index
+   * has never seen (a rollout older than the index, or one copied in) pages
+   * nothing until something loads it: `turns=0 nextCursor=null` cold, the turn
+   * once resumed. So only a first page that comes back empty with no cursor,
+   * or fails, resumes the thread, metadata only (see PAST_TURNS_NOTE), pages
+   * it again, and lets it go.
+   *
+   * NEVER A THREAD WHOSE GOAL IS ACTIVE. A cold resume of a stored thread with
+   * an active goal started the goal's continuation turn by itself within
+   * seconds, on the same binary. Here that would be model spend on a thread
+   * being retired, with its old tools, in a turn this host would adopt into
+   * the chat. So an active goal, or a goal read that fails, skips the resume,
+   * and the upgrade carries no old text, as it did before.
    */
   private async recentThreadMessages(
     threadId: string,
     budget: number,
   ): Promise<Array<{ role: string; text: string }>> {
+    const cold = await this.pageThreadMessages(threadId, budget);
+    if (!cold.unread) return cold.messages;
+    try {
+      const { goal } = await this.server.request("thread/goal/get", {
+        threadId,
+      });
+      if (goal?.status === "active") return [];
+    } catch {
+      return [];
+    }
+    this.historyReads.add(threadId);
+    try {
+      try {
+        await this.server.request("thread/resume", {
+          threadId,
+          cwd: this.workdir,
+          excludeTurns: true,
+        });
+      } catch {
+        return [];
+      }
+      try {
+        return (await this.pageThreadMessages(threadId, budget)).messages;
+      } finally {
+        await this.server
+          .request("thread/unsubscribe", { threadId })
+          .catch(() => {});
+      }
+    } finally {
+      this.historyReads.delete(threadId);
+    }
+  }
+  /**
+   * The paging walk itself. `unread` is true when the FIRST page failed or
+   * came back with no turns and no cursor: the answer a thread the history
+   * index has not seen gives, and the one reason to resume it and look again.
+   */
+  private async pageThreadMessages(
+    threadId: string,
+    budget: number,
+  ): Promise<{
+    messages: Array<{ role: string; text: string }>;
+    unread: boolean;
+  }> {
     const newestFirst: Array<{ role: string; text: string }> = [];
     let collected = 0;
     let cursor: string | null = null;
@@ -1335,7 +1408,7 @@ export class CodexHost {
           ...(cursor ? { cursor } : {}),
         });
       } catch {
-        break;
+        return { messages: newestFirst.reverse(), unread: page === 0 };
       }
       const turns: RpcObject[] = Array.isArray(result?.data) ? result.data : [];
       for (const turn of turns)
@@ -1347,9 +1420,11 @@ export class CodexHost {
         typeof result?.nextCursor === "string" && result.nextCursor
           ? result.nextCursor
           : null;
+      if (page === 0 && turns.length === 0 && !cursor)
+        return { messages: [], unread: true };
       if (!cursor || collected >= budget) break;
     }
-    return newestFirst.reverse();
+    return { messages: newestFirst.reverse(), unread: false };
   }
   private async ensureThread(chatId: number): Promise<string> {
     await this.server.start();
@@ -1594,6 +1669,7 @@ export class CodexHost {
     };
   }
   private notification(method: string, params: RpcObject): void {
+    if (this.historyReads.has(String(params.threadId ?? ""))) return;
     if (method === "thread/tokenUsage/updated")
       this.usage.set(params.threadId, params.tokenUsage);
     // Markers sit ABOVE the active-turn guard on purpose: the owner's own

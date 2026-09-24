@@ -8,6 +8,26 @@ import { existsSync } from "node:fs";
 export type RpcObject = Record<string, any>;
 const require = createRequire(import.meta.url);
 
+/**
+ * The longest line this client holds: one JSON-RPC message from the runtime.
+ *
+ * ONE LINE OVER IT COSTS ONLY THAT LINE (stage 4, Round 7). The runtime sends
+ * a generated picture's whole base64 `result` on one `item/completed` line,
+ * so a picture over about 12 MiB is one line over this cap. The reader used to
+ * fail every pending request and close the connection, which ended every live
+ * turn in every chat on this daemon. Now it throws that line away up to its
+ * newline and carries on: a reply fails only the request it answers, a
+ * request from the runtime is answered with an error so nothing waits on it,
+ * and a notification is dropped.
+ */
+const LINE_CAP = 16 * 1024 * 1024;
+/**
+ * How much of an oversized line is kept to learn whose it was. The runtime
+ * writes `id` first on a reply (`{"id":7,"result":...}`) and on a request
+ * (`{"id":3,"method":...}`), and `method` first on a notification.
+ */
+const LINE_HEAD_KEPT = 256;
+
 export function codexExecutable(
   platform = process.platform,
   arch = process.arch,
@@ -72,6 +92,8 @@ export class AppServer extends EventEmitter {
   >();
   private boot: Promise<void> | null = null;
   private buffer = "";
+  /** The head of a line past LINE_CAP, while the rest of it is thrown away. */
+  private oversized: string | null = null;
   private stderr = "";
   onRequest?: (method: string, params: RpcObject) => Promise<unknown>;
 
@@ -97,6 +119,7 @@ export class AppServer extends EventEmitter {
 
   private async startInternal(): Promise<void> {
     this.buffer = "";
+    this.oversized = null;
     this.stderr = "";
     const child = spawn(
       this.options.command ?? codexExecutable(),
@@ -170,39 +193,96 @@ export class AppServer extends EventEmitter {
     this.child.stdin.write(JSON.stringify(payload) + "\n");
   }
   private read(chunk: string): void {
-    this.buffer += chunk;
-    if (this.buffer.length > 16 * 1024 * 1024) {
-      this.fail(new Error("Codex sent an oversized event."));
-      this.close();
-      return;
-    }
-    let end: number;
-    while ((end = this.buffer.indexOf("\n")) >= 0) {
-      const line = this.buffer.slice(0, end);
-      this.buffer = this.buffer.slice(end + 1);
-      if (!line.trim()) continue;
-      let value: RpcObject;
-      try {
-        value = JSON.parse(line);
-      } catch {
+    let rest = chunk;
+    while (rest.length > 0) {
+      const end = rest.indexOf("\n");
+      if (end < 0) {
+        // Still inside a line: keep it, unless it is one being thrown away.
+        if (this.oversized !== null) return;
+        this.buffer += rest;
+        if (this.buffer.length > LINE_CAP) {
+          this.oversized = this.buffer.slice(0, LINE_HEAD_KEPT);
+          this.buffer = "";
+        }
+        return;
+      }
+      const tail = rest.slice(0, end);
+      rest = rest.slice(end + 1);
+      if (this.oversized !== null) {
+        const head = this.oversized;
+        this.oversized = null;
+        this.dropOversized(head);
         continue;
       }
-      if (!value || typeof value !== "object") continue;
-      if (typeof value.method === "string") {
-        if (value.id != null) void this.respond(value);
-        else this.emit("notification", value.method, value.params ?? {});
-      } else if (typeof value.id === "number") {
-        const pending = this.pending.get(value.id);
-        if (!pending) continue;
-        this.pending.delete(value.id);
-        clearTimeout(pending.timer);
-        if (value.error)
-          pending.reject(
-            new Error(String(value.error.message ?? "Codex request failed")),
-          );
-        else pending.resolve(value.result);
+      const line = this.buffer + tail;
+      this.buffer = "";
+      if (line.length > LINE_CAP) {
+        this.dropOversized(line.slice(0, LINE_HEAD_KEPT));
+        continue;
       }
+      this.handleLine(line);
     }
+  }
+  private handleLine(line: string): void {
+    if (!line.trim()) return;
+    let value: RpcObject;
+    try {
+      value = JSON.parse(line);
+    } catch {
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    if (typeof value.method === "string") {
+      if (value.id != null) void this.respond(value);
+      else this.emit("notification", value.method, value.params ?? {});
+    } else if (typeof value.id === "number") {
+      const pending = this.pending.get(value.id);
+      if (!pending) return;
+      this.pending.delete(value.id);
+      clearTimeout(pending.timer);
+      if (value.error)
+        pending.reject(
+          new Error(String(value.error.message ?? "Codex request failed")),
+        );
+      else pending.resolve(value.result);
+    }
+  }
+  /**
+   * A line past LINE_CAP, read only by its head. A reply fails the one request
+   * it answers; a request from the runtime gets an error back, so the runtime
+   * is not left waiting on an answer this client never read; a notification
+   * (a picture's `item/completed`, say) is dropped. Nothing else is touched.
+   */
+  private dropOversized(head: string): void {
+    const opening =
+      /^\s*\{\s*"id"\s*:\s*(-?\d+|"(?:[^"\\]|\\.)*")\s*,\s*"(method|result|error)"/.exec(
+        head,
+      );
+    if (!opening) return;
+    let id: number | string;
+    try {
+      id = JSON.parse(opening[1]!);
+    } catch {
+      return;
+    }
+    if (opening[2] === "method") {
+      const child = this.child;
+      if (child && !child.stdin.destroyed)
+        this.send({
+          id,
+          error: {
+            code: -32600,
+            message: "This request is too large for HOAI to read.",
+          },
+        });
+      return;
+    }
+    if (typeof id !== "number") return;
+    const pending = this.pending.get(id);
+    if (!pending) return;
+    this.pending.delete(id);
+    clearTimeout(pending.timer);
+    pending.reject(new Error("Codex sent a reply too large to read."));
   }
   private async respond(message: RpcObject): Promise<void> {
     const child = this.child;

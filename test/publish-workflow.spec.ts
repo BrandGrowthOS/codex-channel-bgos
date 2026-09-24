@@ -87,6 +87,10 @@ describe("the publish workflow never advertises a held version as latest", () =>
     }
   });
 
+  /** Round 7: the one promote order for 0.14.0 that cannot leave latest on 0.13.0. */
+  const ORDER = "only after 0.13.0 is on latest, never before or in the same step";
+  const MOVES_BACK = /promoting an older version after 0\.14\.0 moves latest back/i;
+
   it("holds 0.14.0 for the live image turn in all three texts a release reads", () => {
     // Re-review item 1. 0.14.0 needs no backend, so nothing machine readable
     // can hold it past 0.13.0; what it waits for is one logged in live image
@@ -111,6 +115,23 @@ describe("the publish workflow never advertises a held version as latest", () =>
       expect(text, `${name} lost "adds no hold of its own"`).toMatch(
         /0\.14\.0[^.]*adds no hold of its own/i,
       );
+      // Round 7, the final review's low item. `npm dist-tag add` points latest
+      // at whichever version ran LAST, so "with 0.13.0 or after it" let one
+      // sitting run the 0.14.0 command and then the 0.13.0 one, leaving latest
+      // on 0.13.0 while the BGOS merge gate reads "0.14.0 on latest". Both
+      // places in each file say the order that cannot end that way, and one
+      // line says what promoting an older version afterwards does.
+      expect(
+        text.split(ORDER).length - 1,
+        `${name} does not say "${ORDER}" in both places`,
+      ).toBeGreaterThanOrEqual(2);
+      expect(text, `${name} still says "0.13.0 or after it"`).not.toMatch(
+        /0\.13\.0 or after it/i,
+      );
+      expect(
+        text,
+        `${name} does not say that promoting an older version after 0.14.0 moves latest back`,
+      ).toMatch(MOVES_BACK);
       expect(
         text,
         `${name} does not hold 0.14.0 for the live image turn`,
@@ -194,20 +215,37 @@ describe("the publish workflow never advertises a held version as latest", () =>
       (line) =>
         line.only === "0.14.0" &&
         line.text.startsWith("::warning::") &&
-        /\b0\.13\.0 or after it, never before\b/.test(line.text) &&
+        line.text.includes(ORDER) &&
         line.text.includes(
           "only after one logged in live image turn confirms the real item (result bytes and their form, revisedPrompt, savedPath, the failure shape; probe.md, decision 7)",
         ),
     );
     expect(
       own,
-      "the warning does not name 0.14.0's condition: with 0.13.0 or after it, and only after one logged in live image turn",
+      `the warning does not name 0.14.0's condition: ${ORDER}, and only after one logged in live image turn`,
     ).toBeGreaterThanOrEqual(0);
-    if (command >= 0)
+    // Round 7: what a later promote of an older version does, said in the
+    // run summary too, where the person holding the promote command reads.
+    const back = printed.findIndex(
+      (line) =>
+        line.only === "0.14.0" &&
+        line.text.startsWith("::warning::") &&
+        MOVES_BACK.test(line.text),
+    );
+    expect(
+      back,
+      "the 0.14.0 warning does not say that promoting an older version after it moves latest back",
+    ).toBeGreaterThanOrEqual(0);
+    if (command >= 0) {
       expect(
         own,
         "the promote command is printed before 0.14.0's condition",
       ).toBeLessThan(command);
+      expect(
+        back,
+        "the promote command is printed before the line about moving latest back",
+      ).toBeLessThan(command);
+    }
   });
 
   it("keeps package-lock.json on the same version package.json is on", () => {

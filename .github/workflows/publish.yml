@@ -63,8 +63,11 @@ jobs:
           # 0.14.0: adds no hold of its own. A picture Codex makes posts
           # itself as an ordinary image message, which every backend already
           # accepts. It is held only because it carries the holds of the
-          # releases before it, so it is promoted with 0.13.0 or after it,
-          # never before. Beside that it waits for one thing no backend
+          # releases before it, so it is promoted only after 0.13.0 is on
+          # latest, never before or in the same step: npm dist-tag add points
+          # latest at whichever version ran last, so promoting an older
+          # version after 0.14.0 moves latest back to that older version.
+          # Beside that it waits for one thing no backend
           # gives: it is promoted only after one logged in live image turn
           # confirms the real item (result bytes and their form,
           # revisedPrompt, savedPath, the failure shape; probe.md, decision
@@ -112,7 +115,8 @@ jobs:
           TAG="${{ steps.ver.outputs.dist_tag }}"
           echo "::warning::$VERSION was published under the npm dist tag $TAG, not latest, so nothing installs it by default. Promote it only when the reason it is held is met: that reason is written beside $VERSION in the HELD_FROM_LATEST comment in this workflow and in the promote block of the README."
           if [ "$VERSION" = "0.14.0" ]; then
-            echo "::warning::0.14.0 needs no backend of its own. It is promoted only with 0.13.0 or after it, never before, and only after one logged in live image turn confirms the real item (result bytes and their form, revisedPrompt, savedPath, the failure shape; probe.md, decision 7)."
+            echo "::warning::0.14.0 needs no backend of its own. It is promoted only after 0.13.0 is on latest, never before or in the same step, and only after one logged in live image turn confirms the real item (result bytes and their form, revisedPrompt, savedPath, the failure shape; probe.md, decision 7)."
+            echo "::warning::npm points latest at whichever version was promoted last: promoting an older version after 0.14.0 moves latest back to that older version."
           fi
           echo "Only once that reason is met, remove $VERSION from HELD_FROM_LATEST"
           echo "in this workflow and its HELD-FROM-LATEST line in src/interactions.ts,"

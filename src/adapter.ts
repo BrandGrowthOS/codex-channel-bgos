@@ -1542,11 +1542,21 @@ export class CodexAdapter {
     let progressWork = Promise.resolve();
     // The same picture record an ordinary turn keeps (stage 4, C-21).
     const pictures = newTurnPictures();
+    // THE STOP PICTURE RULES, the same as an ordinary turn's (Round 7). A
+    // stopped turn's pictures still uploading: this turn's rows, requests,
+    // plan card and reply wait for them (see `pictureTails`). And the stop
+    // generation it started under: a /stop, a /new or the voice stop moves
+    // it, and that is how `deliver` knows the owner asked this turn to stop,
+    // because a goal turn has no controller of its own to abort.
+    const earlier = this.pictureTails?.get(chatId);
+    const generation = this.generations.get(chatId) ?? 0;
     this.goalLane.noteTurnStarted(chatId);
     return {
       callbacks: {
-        onRequest: (method, params) =>
-          this.tools.handleRequest(method, params, context),
+        onRequest: async (method, params) => {
+          await earlier;
+          return this.tools.handleRequest(method, params, context);
+        },
         // The row fields below are the SAME list as the ordinary turn's call
         // site, 230 lines up. A field spread there and not here is a field
         // missing for the whole of an autonomous goal run, which is exactly
@@ -1554,6 +1564,7 @@ export class CodexAdapter {
         onTool: (card, itemId) => {
           seenTools.add(itemId);
           progressWork = progressWork
+            .then(() => earlier)
             .then(() =>
               this.toolProgress.sendToolStart({
                 assistantId,
@@ -1624,6 +1635,7 @@ export class CodexAdapter {
         // and a question nobody is shown is a run that stalls in silence. Its
         // finished pictures go first, exactly as in an ordinary turn.
         onPlanProposal: async (signal) => {
+          await earlier;
           await this.postGeneratedImages(
             replyHandle,
             signal.images,
@@ -1643,6 +1655,22 @@ export class CodexAdapter {
         // turn's work, re sent by the lane's keepalive until the backend
         // sweeps it.
         await this.stepsLane?.finalizeTurn(chatId);
+        if (generation !== (this.generations.get(chatId) ?? 0)) {
+          // The owner stopped this turn: the ordinary turn's Stop branch,
+          // word for word. "Stopped." already answered, so no partial text
+          // and no red error; the card closes now; a picture that finished
+          // posts in the background after the stop line and any earlier
+          // stopped pictures, pictures only, and the next turn waits for it.
+          await replyHandle.finalizeTurn().catch(() => {});
+          this.postStoppedPictures(chatId, replyHandle, result.images, pictures);
+          await this.goalLane.noteTurnFinished(chatId, {
+            text: result.finalAgentMessageText,
+            error: result.error,
+          });
+          return;
+        }
+        // A stopped turn's pictures land before this turn's reply.
+        await earlier;
         await this.publishTurnResult({
           assistantId,
           chatId,

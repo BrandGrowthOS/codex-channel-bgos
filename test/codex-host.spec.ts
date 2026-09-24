@@ -555,10 +555,15 @@ describe("native Codex host contracts", () => {
     });
     const result = host.runTurn(17, "continue");
     await vi.waitFor(() => expect(server.next).toBe(1));
+    // Never resumed to RUN: no turn starts on the legacy thread, and a resume
+    // it gets (only to read its history, Round 7) returns no turns.
     expect(server.request).not.toHaveBeenCalledWith(
-      "thread/resume",
-      expect.anything(),
+      "turn/start",
+      expect.objectContaining({ threadId: "legacy" }),
     );
+    for (const [method, params] of server.request.mock.calls)
+      if (method === "thread/resume" && params.threadId === "legacy")
+        expect(params.excludeTurns).toBe(true);
     expect(server.request).toHaveBeenCalledWith(
       "thread/start",
       expect.objectContaining({
@@ -1388,11 +1393,18 @@ describe("a child agent's name and its last look at the turn's end", () => {
     const block = source.slice(at, source.indexOf("\n  }", at));
     expect(block).toContain('"thread/read"');
     expect(block).not.toContain("thread/resume");
-    // The two resumes this daemon has are the owner's own /resume and the
-    // tool version upgrade, each on a thread from this process's chat map.
-    // A third is a new call site, and a child's thread is the one thread
-    // this daemon must never subscribe to.
-    expect(source.match(/"thread\/resume"/g) ?? []).toHaveLength(2);
+    // The three resumes this daemon has are the owner's own /resume, the
+    // chat's own thread in ensureThread, and (Round 7) the tool version
+    // upgrade's metadata only resume of a legacy thread the history index has
+    // not seen, only to page it, in recentThreadMessages. Each is on a thread
+    // from this process's chat map. A fourth is a new call site, and a
+    // child's thread is the one thread this daemon must never subscribe to.
+    expect(source.match(/"thread\/resume"/g) ?? []).toHaveLength(3);
+    const history = source.slice(
+      source.indexOf("private async recentThreadMessages"),
+      source.indexOf("private async pageThreadMessages"),
+    );
+    expect(history).toContain('"thread/resume"');
   });
 
   it("settles a helper the turn ended on when its own thread says it stopped", async () => {
@@ -1812,8 +1824,9 @@ describe("pictures a turn made", () => {
  * `thread/resume`, `thread/fork` and `thread/read {includeTurns:true}` all
  * hydrate `thread.turns` unless told not to. A chat with about six pictures
  * then answers one resume with a single line over the app server client's
- * 16 MiB cap (src/app-server.ts), which closes the connection and fails every
- * live turn on the daemon, for every chat, again on every later resume. The
+ * 16 MiB cap (src/app-server.ts), which closed the connection and failed every
+ * live turn on the daemon, for every chat (since Round 7 it fails only that
+ * resume, still the chat's turn), again on every later resume. The
  * wire was measured on the vendored 0.154.0 binary by the review: 14.23 MiB
  * for five pictures without the flag, 3.9 KB with it.
  *
@@ -2006,6 +2019,204 @@ describe("no past turn rides a resume, a fork or a read", () => {
       expect(String(callsOf("thread/start")[0].developerInstructions)).toContain(
         "legacy remains saved",
       );
+      server.finish("thread-1", "Continued");
+      await task;
+    });
+
+    /**
+     * Round 7, the final review's medium item. The runtime pages a thread's
+     * turns out of its thread history index. A thread the index has not seen
+     * (a rollout older than the index, or one copied in) pages NOTHING until
+     * something loads it: the review's probe (copied rollouts, cold) and
+     * `_tools-p5/probes/s4-turns/probe-turns-cold.js` both show
+     * `turns=0 nextCursor=null` cold and the turn once the thread is resumed.
+     * A thread the app server made itself IS indexed and pages cold with no
+     * resume at all (`probe-turns-indexed.js`: a second app server on the same
+     * home, nothing loaded). So the read pages cold first, and only a first
+     * page that comes back empty with no cursor resumes the thread, metadata
+     * only, pages again, and lets it go.
+     *
+     * This fake is the runtime's shape: `thread/turns/list` answers `data: []`
+     * for a thread until it has been resumed, and an unsubscribe unloads it.
+     *
+     * MUTATION PROOFS (Round 7 in red-proofs.md): drop the resume and the first
+     * and fifth cases go red; resume every legacy thread, indexed or not, and
+     * the second goes red; drop the goal check and the third goes red; drop
+     * the history read guard in `notification` and the fourth goes red; drop
+     * the unsubscribe and the first and fifth go red.
+     */
+    function unindexed(pages: (p: any) => any): Set<string> {
+      const loadedHere = new Set<string>();
+      const base = server.request.getMockImplementation()!;
+      server.request.mockImplementation(async (method: string, p: any) => {
+        if (method === "thread/turns/list")
+          return loadedHere.has(p.threadId)
+            ? pages(p)
+            : { data: [], nextCursor: null, backwardsCursor: null };
+        if (method === "thread/resume") loadedHere.add(p.threadId);
+        if (method === "thread/unsubscribe") {
+          loadedHere.delete(p.threadId);
+          return { status: "unsubscribed" };
+        }
+        return base(method, p);
+      });
+      return loadedHere;
+    }
+    const methodsFor = (threadId: string) =>
+      server.request.mock.calls
+        .filter((c) => c[1]?.threadId === threadId || c[0] === "thread/start")
+        .map((c) => c[0]);
+
+    it("resumes a thread the history index has not seen, metadata only, pages it, then lets it go", async () => {
+      legacyHost(43);
+      const loadedHere = unindexed((p) =>
+        p.cursor === "older"
+          ? { data: [turn("first ask", "first answer")], nextCursor: null }
+          : { data: [turn("second ask", "second answer")], nextCursor: "older" },
+      );
+      const task = host.runTurn(43, "continue");
+      await vi.waitFor(() => expect(callsOf("thread/start")).toHaveLength(1));
+      const instructions = String(
+        callsOf("thread/start")[0].developerInstructions,
+      );
+      for (const text of ["first ask", "first answer", "second ask", "second answer"])
+        expect(instructions, `the carried context lost "${text}"`).toContain(text);
+      expect(
+        callsOf("thread/resume").filter((p) => p.threadId === "legacy"),
+      ).toEqual([{ threadId: "legacy", cwd: home, excludeTurns: true }]);
+      // Cold page, the resume, the pages, the unsubscribe, THEN the new thread.
+      expect(methodsFor("legacy")).toEqual([
+        "thread/turns/list",
+        "thread/goal/get",
+        "thread/resume",
+        "thread/turns/list",
+        "thread/turns/list",
+        "thread/unsubscribe",
+        "thread/start",
+      ]);
+      expect(loadedHere.has("legacy")).toBe(false);
+      expect(server.request).not.toHaveBeenCalledWith(
+        "turn/start",
+        expect.objectContaining({ threadId: "legacy" }),
+      );
+      server.finish("thread-1", "Continued");
+      await task;
+    });
+
+    it("pages an indexed thread cold and never resumes it", async () => {
+      legacyHost(44);
+      const base = server.request.getMockImplementation()!;
+      server.request.mockImplementation(async (method: string, p: any) => {
+        if (method === "thread/turns/list")
+          return { data: [turn("ask", "answer")], nextCursor: null };
+        return base(method, p);
+      });
+      const task = host.runTurn(44, "continue");
+      await vi.waitFor(() => expect(callsOf("thread/start")).toHaveLength(1));
+      expect(String(callsOf("thread/start")[0].developerInstructions)).toContain(
+        "answer",
+      );
+      expect(methodsFor("legacy")).toEqual(["thread/turns/list", "thread/start"]);
+      server.finish("thread-1", "Continued");
+      await task;
+    });
+
+    it("never resumes a legacy thread whose goal is active: the resume would start its continuation turn", async () => {
+      // probe-turns-cold.js part 2: a COLD resume of a stored thread whose
+      // goal is active started a turn within seconds, by itself. Here that
+      // would be model spend on a thread being retired, with the old tools,
+      // in a turn this host would adopt into the chat.
+      legacyHost(45);
+      unindexed(() => ({ data: [turn("ask", "answer")], nextCursor: null }));
+      server.goal = {
+        threadId: "legacy",
+        objective: "Ship the page",
+        status: "active",
+      };
+      const task = host.runTurn(45, "continue");
+      await vi.waitFor(() => expect(callsOf("thread/start")).toHaveLength(1));
+      expect(
+        callsOf("thread/resume").filter((p) => p.threadId === "legacy"),
+      ).toEqual([]);
+      expect(String(callsOf("thread/start")[0].developerInstructions)).toContain(
+        "legacy remains saved",
+      );
+      server.finish("thread-1", "Continued");
+      await task;
+    });
+
+    it("lets nothing the legacy thread says during the read reach the chat", async () => {
+      // A resume answers with the thread's goal state (the cold probe saw
+      // thread/goal/cleared on each read), and a turn could still start. The
+      // chat maps to the legacy thread until the new one exists, so either
+      // would be routed to it.
+      host.close();
+      writeFileSync(
+        join(home, "threads.json"),
+        JSON.stringify({ 46: "legacy" }),
+      );
+      const onGoalUpdate = vi.fn();
+      const onAdoptedTurn = vi.fn(() => null);
+      host = new CodexHost({
+        auth: { ok: true, mode: "chatgpt", label: "test" },
+        workdir: home,
+        server: server as any,
+        tools,
+        onGoalUpdate,
+        onAdoptedTurn,
+      });
+      unindexed(() => ({ data: [turn("ask", "answer")], nextCursor: null }));
+      const paging = server.request.getMockImplementation()!;
+      server.request.mockImplementation(async (method: string, p: any) => {
+        const answer = await paging(method, p);
+        if (method === "thread/resume" && p.threadId === "legacy") {
+          server.emit("notification", "thread/goal/cleared", {
+            threadId: "legacy",
+          });
+          server.emit("notification", "turn/started", {
+            threadId: "legacy",
+            turn: { id: "turn-legacy", status: "inProgress" },
+          });
+        }
+        return answer;
+      });
+      const task = host.runTurn(46, "continue");
+      await vi.waitFor(() => expect(callsOf("thread/start")).toHaveLength(1));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(onGoalUpdate).not.toHaveBeenCalled();
+      expect(onAdoptedTurn).not.toHaveBeenCalled();
+      server.finish("thread-1", "Continued");
+      await task;
+    });
+
+    it("lets the thread go even when the page after the resume fails", async () => {
+      legacyHost(47);
+      const loadedHere = unindexed(() => {
+        throw new Error("page failed");
+      });
+      const task = host.runTurn(47, "continue");
+      await vi.waitFor(() => expect(callsOf("thread/start")).toHaveLength(1));
+      expect(callsOf("thread/unsubscribe")).toEqual([{ threadId: "legacy" }]);
+      expect(loadedHere.has("legacy")).toBe(false);
+      server.finish("thread-1", "Continued");
+      await task;
+    });
+
+    it("still upgrades the thread when the history resume fails", async () => {
+      legacyHost(48);
+      unindexed(() => ({ data: [turn("ask", "answer")], nextCursor: null }));
+      const paging = server.request.getMockImplementation()!;
+      server.request.mockImplementation(async (method: string, p: any) => {
+        if (method === "thread/resume" && p.threadId === "legacy")
+          throw new Error("no rollout found");
+        return paging(method, p);
+      });
+      const task = host.runTurn(48, "continue");
+      await vi.waitFor(() => expect(callsOf("thread/start")).toHaveLength(1));
+      expect(String(callsOf("thread/start")[0].developerInstructions)).toContain(
+        "legacy remains saved",
+      );
+      expect(callsOf("thread/unsubscribe")).toEqual([]);
       server.finish("thread-1", "Continued");
       await task;
     });
