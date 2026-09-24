@@ -275,3 +275,36 @@ describe("BUNDLED_CAPABILITIES helper rows paragraph", () => {
     expect(BUNDLED_CAPABILITIES).not.toMatch(/[\u2013\u2014]/);
   });
 });
+
+/**
+ * Stage 4 (C-21): the generated picture sentence, word for word.
+ *
+ * The host now posts a picture the runtime's image generation tool made, with
+ * its revised prompt as the caption, when the turn finishes (never mid turn,
+ * see gap 04). A model that ALSO sends it with MEDIA: or the reply tool would
+ * post it twice, and a model that never heard of the post would describe a
+ * picture the owner has not seen yet as missing. The served canon's Codex
+ * sentence (stage 4's BGOS PR) is copied from THIS text, so the two cannot
+ * drift apart without one of the two pins going red.
+ *
+ * MUTATION PROOF: change one word of the sentence in src/agent-hints.ts and
+ * this goes red; put an em dash back in and the dash case goes red.
+ */
+describe("BUNDLED_CAPABILITIES generated picture sentence", () => {
+  const SERVED_TRUTH =
+    "A picture you make with image generation posts itself to the chat when the turn finishes, with its prompt as the caption; do not send it again with MEDIA: or the reply tool.";
+  const flat = BUNDLED_CAPABILITIES.replace(/\s+/g, " ");
+
+  it("says, word for word, the sentence the served canon copies", () => {
+    expect(flat).toContain(SERVED_TRUTH);
+  });
+
+  it("says when the turn finishes, never the instant the picture is made", () => {
+    expect(flat).not.toMatch(/the instant (the|a|your) (tool call|picture|image)/i);
+  });
+
+  it("carries no em dash and no en dash", () => {
+    expect(SERVED_TRUTH).not.toMatch(/[\u2013\u2014]/);
+    expect(BUNDLED_CAPABILITIES).not.toMatch(/[\u2013\u2014]/);
+  });
+});
