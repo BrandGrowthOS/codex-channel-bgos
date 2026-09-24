@@ -17,11 +17,17 @@
  *     destination already exists", seen in the 0.154.0 binary), so a picture
  *     can arrive with a `result` and no usable path.
  *  2. The caption is `Prompt: <revisedPrompt>`, on one line, clipped on a word
- *     boundary, and any em or en dash in the model's prompt becomes a comma,
- *     so nothing the owner reads carries one. No revised prompt, no caption:
- *     never a bare "Prompt:".
- *  3. A `usageLimitExceeded` failure posts one plain line naming the reset
- *     time, in UTC, the way `/usage` already names one (native-commands.ts).
+ *     boundary, and no em or en dash in the model's prompt survives, so
+ *     nothing the owner reads carries one: an en dash between two digits is a
+ *     range and reads "to", every other one becomes a comma. No revised
+ *     prompt, no caption: never a bare "Prompt:".
+ *  3. A `usageLimitExceeded` failure posts one plain line saying the limit is
+ *     used up for now and, when the runtime gave a reset time still ahead,
+ *     roughly how long until it resets ("in about 2 hours"), relative to the
+ *     moment the line posts (Round 6). Never a clock time: the plugin cannot
+ *     know the viewer's zone and this host's zone need not be the owner's,
+ *     while the bubble's own timestamp anchors a relative phrase. `/usage`
+ *     keeps its UTC readout (native-commands.ts): the owner typed for that.
  *
  * What the live probe could NOT settle (docs/reports/2026-09-24-p5-s4-image-
  * posts/probe.md, this machine's Codex is not logged in): the real status
@@ -44,9 +50,10 @@ export const IMAGE_BYTES_MAX = 10 * 1024 * 1024;
 /**
  * The longest revised prompt a caption carries, in UTF-16 units, the cut mark
  * included. Long enough for the one or two sentences an image model writes
- * back, short enough that the caption never outweighs the picture.
+ * back, short enough that the caption never outweighs the picture: two or
+ * three lines on a phone, where 280 took about nine (Round 6).
  */
-export const IMAGE_CAPTION_PROMPT_MAX = 280;
+export const IMAGE_CAPTION_PROMPT_MAX = 200;
 
 const DATA_URI = /^data:([^;,]*)((?:;[^;,]*)*),/i;
 
@@ -108,9 +115,16 @@ const EXTENSION: Record<string, string> = {
   "image/webp": "webp",
 };
 
-/** A file name the gallery can show, built from the item id alone. */
+/**
+ * A file name the gallery can show, built from the item id alone: its last 8
+ * safe characters, so `codex-image-7c0d9f13.png` fits whole in the viewer
+ * strip, the photos card, the Artifacts card and the saved file's name
+ * (Round 6; the last 24 made it 40 characters, cut in the middle on a phone).
+ * Nothing keys on it: the app keys on the row id, the upload is keyed server
+ * side, and a `MEDIA:` duplicate is found by real path and sha256.
+ */
 function imageFileName(itemId: string, mimeType: string): string {
-  const safe = itemId.replace(/[^A-Za-z0-9_]/g, "").slice(-24) || "1";
+  const safe = itemId.replace(/[^A-Za-z0-9_]/g, "").slice(-8) || "1";
   return `codex-image-${safe}.${EXTENSION[mimeType] ?? "png"}`;
 }
 
@@ -162,9 +176,16 @@ export function collectGeneratedImage(item: RpcObject): GeneratedImage | null {
   return image;
 }
 
-/** Every em and en dash (and their two rarer cousins) becomes a comma. */
+/**
+ * No em or en dash (or their two rarer cousins) survives. An en dash closed
+ * up between two digits is a range, so it reads " to " (`2024 to 2026`,
+ * `3 to 4 people`); a comma there would change what the prompt says. That
+ * runs first, and every other dash becomes a comma. A spaced en dash is the
+ * parenthetical dash, even between numbers, so it stays a pause.
+ */
 function withoutDashes(text: string): string {
-  let out = text.replace(/\s*[\u2012\u2013\u2014\u2015]+\s*/g, ", ");
+  let out = text.replace(/(?<=\d)\u2013(?=\d)/g, " to ");
+  out = out.replace(/\s*[\u2012\u2013\u2014\u2015]+\s*/g, ", ");
   // A dash next to a comma the model already wrote would read ", ,".
   let previous = "";
   while (previous !== out) {
@@ -192,17 +213,35 @@ export function imageCaption(revisedPrompt: unknown): string | undefined {
   return `Prompt: ${clipOnWord(clean, IMAGE_CAPTION_PROMPT_MAX)}`;
 }
 
-/** `2026-09-24 08:53 UTC` from epoch seconds, or milliseconds, or null. */
-function resetTime(resetsAt: number | null | undefined): string | null {
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
+const DAY_MS = 24 * HOUR_MS;
+
+/**
+ * How long until the limit resets, said the way a person would: `in a
+ * moment` under a minute, `in about 12 minutes` under an hour, `in about 5
+ * hours` under two days, else `in about 3 days`. Each count is rounded and
+ * the bucket is chosen by the ROUNDED count, so it never reads "about 60
+ * minutes" or "about 48 hours". Null when there is no reset still ahead: none
+ * given, not a finite positive number, or already past.
+ */
+function resetsIn(resetsAt: number | null | undefined, now: number): string | null {
   if (typeof resetsAt !== "number" || !Number.isFinite(resetsAt) || resetsAt <= 0)
     return null;
   // Seconds on this protocol (the turn clock and /usage both are); a value
   // this large can only be milliseconds, and reading it as seconds would name
   // a year no owner will live to see.
   const ms = resetsAt > 1e12 ? resetsAt : resetsAt * 1000;
-  const date = new Date(ms);
-  if (Number.isNaN(date.getTime())) return null;
-  return `${date.toISOString().replace("T", " ").slice(0, 16)} UTC`;
+  const left = ms - now;
+  if (!Number.isFinite(left) || left <= 0) return null;
+  if (left < MINUTE_MS) return "in a moment";
+  const count = (n: number, unit: string): string =>
+    `in about ${n} ${unit}${n === 1 ? "" : "s"}`;
+  const minutes = Math.round(left / MINUTE_MS);
+  if (minutes < 60) return count(minutes, "minute");
+  const hours = Math.round(left / HOUR_MS);
+  if (hours < 48) return count(hours, "hour");
+  return count(Math.round(left / DAY_MS), "day");
 }
 
 /**
@@ -236,8 +275,13 @@ function resetTime(resetsAt: number | null | undefined): string | null {
  */
 export const IMAGE_MADE_NOT_SHOWN_LINE =
   "Codex made a picture, but it could not be shown here.";
+/**
+ * Round 6: the tried line says what happened. "Could not be shown" implied a
+ * picture the chat could not draw, and this is exactly the case where nothing
+ * came back.
+ */
 export const IMAGE_TRIED_NOT_SHOWN_LINE =
-  "Codex tried to make a picture, but it could not be shown here.";
+  "Codex tried to make a picture, but nothing came back.";
 
 export function imageNotShownLine(
   image: Pick<GeneratedImage, "bytes" | "savedPath" | "returnedOutput">,
@@ -252,12 +296,23 @@ export function imageNotShownLine(
   return IMAGE_TRIED_NOT_SHOWN_LINE;
 }
 
-/** The one plain line a refused picture posts in its place. */
-export function imageFailureLine(failure: GeneratedImageFailure): string {
+/**
+ * The one plain line a refused picture posts in its place. For the image
+ * limit: `Codex has used up its picture limit for now. It resets in about 2
+ * hours.`, the second sentence only while a reset is still ahead.
+ *
+ * `now` (epoch milliseconds) is what the reset is measured from. The adapter
+ * reads its clock once a turn and passes it, so two pictures refused by the
+ * same limit read as the same words and post as one line; alone, this reads
+ * this machine's clock.
+ */
+export function imageFailureLine(
+  failure: GeneratedImageFailure,
+  ctx: { now?: number } = {},
+): string {
   if (failure.type === "usageLimitExceeded") {
-    const when = resetTime(failure.resetsAt);
-    const line =
-      "Codex could not make a picture because the image generation limit is used up.";
+    const when = resetsIn(failure.resetsAt, ctx.now ?? Date.now());
+    const line = "Codex has used up its picture limit for now.";
     return when ? `${line} It resets ${when}.` : line;
   }
   return "Codex could not make a picture.";

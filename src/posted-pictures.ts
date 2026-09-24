@@ -41,6 +41,13 @@ export interface TurnPictures {
   realPaths: Set<string>;
   /** The sha256 of those pictures' bytes. */
   hashes: Set<string>;
+  /**
+   * The moment this turn's refusal lines measure a reset from, read once at
+   * the first one (Round 6). A relative reset moves with the clock and the
+   * lines are deduped by their words, so reading it per line could split one
+   * limit into "about 3 days" and "about 2 days".
+   */
+  clockMs?: number;
 }
 
 export function newTurnPictures(): TurnPictures {

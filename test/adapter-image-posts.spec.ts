@@ -46,27 +46,32 @@ function picture(patch: Partial<GeneratedImage> = {}): GeneratedImage {
     itemId: "ig_01a0d1ba2874",
     bytes: GOLD_PNG,
     mimeType: "image/png",
-    fileName: "codex-image-ig_01a0d1ba2874.png",
+    fileName: "codex-image-d1ba2874.png",
     revisedPrompt: PROMPT,
     savedPath: SAVED,
     ...patch,
   };
 }
 
+/**
+ * Round 6 (premium item 1): the reset is said relative to the moment the line
+ * posts, so the refusal is made two hours and a minute from NOW, read when the
+ * fixture runs, and the line says "in about 2 hours" whatever the date.
+ */
 function refused(patch: Partial<GeneratedImage> = {}): GeneratedImage {
   return {
     itemId: "ig_refused",
     failure: {
       type: "usageLimitExceeded",
       limitId: "image_generation",
-      resetsAt: 1790240000,
+      resetsAt: Math.floor(Date.now() / 1000) + 2 * 3600 + 60,
     },
     ...patch,
   };
 }
 
 const LIMIT_LINE =
-  "Codex could not make a picture because the image generation limit is used up. It resets 2026-09-24 08:53 UTC.";
+  "Codex has used up its picture limit for now. It resets in about 2 hours.";
 const FALLBACK = "(Codex finished the turn without a text reply.)";
 /**
  * Finding 3, and the re-review's item 2: a picture that never reached the
@@ -86,7 +91,7 @@ const SAVED_SHORT =
 const NOT_SHOWN_SAVED = `Codex made a picture, but it could not be shown here. It is saved at ${SAVED_SHORT}.`;
 const NOT_SHOWN_MADE = "Codex made a picture, but it could not be shown here.";
 const NOT_SHOWN_TRIED =
-  "Codex tried to make a picture, but it could not be shown here.";
+  "Codex tried to make a picture, but nothing came back.";
 
 function pinOwnerHome(): void {
   vi.stubEnv("HOME", OWNER_HOME);
@@ -221,7 +226,7 @@ describe("a picture Codex made posts itself at the end of the turn", () => {
     expect(reply.sendImageBytes).toHaveBeenCalledWith(
       {
         bytes: GOLD_PNG,
-        fileName: "codex-image-ig_01a0d1ba2874.png",
+        fileName: "codex-image-d1ba2874.png",
         mimeType: "image/png",
       },
       `Prompt: ${PROMPT}`,
@@ -389,6 +394,41 @@ describe("a picture Codex made posts itself at the end of the turn", () => {
     expect(reply.sendText.mock.calls).toEqual([[LIMIT_LINE]]);
   });
 
+  /**
+   * Round 6. A relative reset moves with the clock, and the plain lines are
+   * deduped by their text, so two pictures refused by the same limit could
+   * read "about 3 days" and then "about 2 days" if each line read the clock.
+   * The turn reads it once. The clock here jumps a whole day on every read,
+   * so any second read changes the words.
+   */
+  it("reads the clock once a turn, so one limit stays one line while the clock moves", async () => {
+    const base = Date.now();
+    const limit = {
+      type: "usageLimitExceeded",
+      limitId: "image_generation",
+      resetsAt: Math.floor(base / 1000) + 1000 * 86400,
+    };
+    const { adapter, reply } = fixture(async () =>
+      done({
+        images: [
+          refused({ failure: { ...limit } }),
+          refused({ itemId: "ig_refused_2", failure: { ...limit } }),
+        ],
+      }),
+    );
+    let t = base;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => (t += 86400_000));
+    try {
+      await adapter.executeAndReply(10, 20, "Draw", reply);
+    } finally {
+      clock.mockRestore();
+    }
+    expect(reply.sendText).toHaveBeenCalledTimes(1);
+    expect(reply.sendText.mock.calls[0]![0]).toMatch(
+      /^Codex has used up its picture limit for now\. It resets in about \d+ days\.$/,
+    );
+  });
+
   it("names the saved file when only the saved copy came back, first in the reply", async () => {
     // The savedPath only shape (ledger decision 3's open question, still not
     // seen live): the owner is told where the picture is.
@@ -530,7 +570,7 @@ describe("an adopted goal turn posts its pictures through the same path", () => 
         assistantId: 10,
         chatId: 20,
         bytes: GOLD_PNG,
-        fileName: "codex-image-ig_01a0d1ba2874.png",
+        fileName: "codex-image-d1ba2874.png",
         mimeType: "image/png",
         caption: `Prompt: ${PROMPT}`,
       }),

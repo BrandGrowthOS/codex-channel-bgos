@@ -77,6 +77,25 @@ describe("collectGeneratedImage", () => {
     expect(JSON.stringify(Object.keys(image))).not.toContain("result");
   });
 
+  /**
+   * Round 6 (premium item 2). The owner reads this name in four places: the
+   * viewer strip, the chat's "View all photos" card, the Artifacts card and
+   * the saved file on the download button. The last 24 of the id made it 40
+   * characters, cut in the middle on a phone. The last 8 keep it whole, and
+   * nothing keys on the name: the app keys on the row id, the upload is keyed
+   * server side, and the MEDIA: dedupe is by real path and sha256.
+   */
+  it.each([
+    ["an ig_ id", "ig_01a0d1ba2874", "codex-image-d1ba2874.png"],
+    ["a code mode exec- id", "exec-8c1f3a52-5b7e-4d19-9a60-2e4b7c0d9f13", "codex-image-7c0d9f13.png"],
+    ["an id shorter than 8", "ig_1", "codex-image-ig_1.png"],
+    ["an id with nothing a file name can carry", "---", "codex-image-1.png"],
+  ])("names the file codex-image and the last 8 of %s", (_label, id, name) => {
+    const image = collectGeneratedImage(imageItem({ id }))!;
+    expect(image.fileName).toBe(name);
+    expect(image.fileName!.length).toBeLessThanOrEqual(24);
+  });
+
   it("carries a refused picture with its failure and no bytes", () => {
     const image = collectGeneratedImage(
       imageItem({
@@ -173,7 +192,32 @@ describe("imageCaption", () => {
     expect(imageCaption("   ")).toBeUndefined();
   });
 
-  it("turns every em and en dash in the model's prompt into a comma", () => {
+  /**
+   * Round 6 (premium item 5). A range dash read as a comma changes what the
+   * prompt says: "2024, 2026" is two years, "3, 4 people" is a list. An en
+   * dash with a digit on both sides and no space is a range, so it reads
+   * "to", and that happens before every other dash becomes a comma.
+   */
+  it("reads an en dash between two digits as a range, to", () => {
+    expect(
+      imageCaption("Sales for 2024\u20132026, a table for 3\u20134 people, pages 1\u20132\u20133"),
+    ).toBe("Prompt: Sales for 2024 to 2026, a table for 3 to 4 people, pages 1 to 2 to 3");
+  });
+
+  it("still makes a comma of a range next to an em dash elsewhere in the prompt", () => {
+    const caption = imageCaption("A bar chart of 2024\u20132026 \u2014 bold colours")!;
+    expect(caption).toBe("Prompt: A bar chart of 2024 to 2026, bold colours");
+    expect(caption).not.toMatch(/[\u2013\u2014]/);
+  });
+
+  it("keeps a spaced en dash between numbers a pause, a comma, never a range", () => {
+    // A spaced en dash is the parenthetical dash; a range is written closed.
+    expect(imageCaption("A poster for 2026 \u2013 3 colours only")).toBe(
+      "Prompt: A poster for 2026, 3 colours only",
+    );
+  });
+
+  it("turns every other em and en dash in the model's prompt into a comma", () => {
     const caption = imageCaption(
       "A gold circle \u2014 centred \u2013 on dark slate\u2014softly lit",
     )!;
@@ -198,6 +242,22 @@ describe("imageCaption", () => {
     expect(words.split(" ").slice(0, kept.length)).toEqual(kept);
   });
 
+  /**
+   * Round 6 (premium item 6). 280 was about nine lines at body weight on a
+   * phone under every picture; 200 keeps the one or two sentences an image
+   * model writes back, in two or three lines, so the caption never outweighs
+   * the picture.
+   */
+  it("caps the prompt at 200, so a 240 character prompt is clipped", () => {
+    expect(IMAGE_CAPTION_PROMPT_MAX).toBe(200);
+    const words = Array.from({ length: 40 }, (_, i) => `w${String(i).padStart(4, "0")}`).join(" ");
+    expect(words.length).toBe(239);
+    const body = imageCaption(words)!.slice("Prompt: ".length);
+    expect(body.endsWith("…")).toBe(true);
+    expect(body.length).toBeLessThanOrEqual(200);
+    expect(body.length).toBeGreaterThan(180);
+  });
+
   it("folds the prompt onto one line", () => {
     expect(imageCaption("gold\n\ncircle\ton  slate")).toBe(
       "Prompt: gold circle on slate",
@@ -205,30 +265,87 @@ describe("imageCaption", () => {
   });
 });
 
+/**
+ * Round 6 (premium item 1). The reset is said RELATIVE to the moment the line
+ * posts, never as a clock time: the plugin cannot know the viewer's zone, and
+ * the daemon's clock zone is the host's, so "08:53 UTC" made a Dubai owner do
+ * arithmetic in a line they never asked for. The bubble's own timestamp
+ * anchors "in about 2 hours", as it does any "in 10 minutes" in a chat.
+ * `/usage` keeps its UTC readout: the owner typed a command for that one.
+ */
 describe("imageFailureLine", () => {
-  it("says the limit is used up and names the reset time, in UTC", () => {
-    const line = imageFailureLine({
-      type: "usageLimitExceeded",
-      limitId: "image_generation",
-      resetsAt: 1790240000,
-    });
-    expect(line).toBe(
-      "Codex could not make a picture because the image generation limit is used up. It resets 2026-09-24 08:53 UTC.",
+  const RESET = 1790240000; // 2026-09-24 08:53:20 UTC, in seconds
+  const MIN = 60;
+  const HOUR = 60 * MIN;
+  const DAY = 24 * HOUR;
+  const USED_UP = "Codex has used up its picture limit for now.";
+  /** The line with the clock `secondsLeft` before the reset. */
+  const lineAt = (secondsLeft: number, resetsAt: number = RESET): string =>
+    imageFailureLine(
+      { type: "usageLimitExceeded", limitId: "image_generation", resetsAt },
+      { now: (RESET - secondsLeft) * 1000 },
     );
+
+  it("says the limit is used up for now and when it resets, relative to now", () => {
+    expect(lineAt(2 * HOUR)).toBe(
+      "Codex has used up its picture limit for now. It resets in about 2 hours.",
+    );
+  });
+
+  it.each([
+    ["one second", "in a moment", 1],
+    ["59 seconds", "in a moment", 59],
+    ["one minute", "in about 1 minute", MIN],
+    ["twelve minutes", "in about 12 minutes", 12 * MIN],
+    ["59 minutes 40 seconds (never 60 minutes)", "in about 1 hour", 59 * MIN + 40],
+    ["an hour and a quarter", "in about 1 hour", 75 * MIN],
+    ["47 hours", "in about 47 hours", 47 * HOUR],
+    ["47 hours 40 minutes (never 48 hours)", "in about 2 days", 47 * HOUR + 40 * MIN],
+    ["three days", "in about 3 days", 3 * DAY],
+    ["ten days and five hours", "in about 10 days", 10 * DAY + 5 * HOUR],
+  ])("reads %s left as: %s", (_label, phrase, left) => {
+    expect(lineAt(left)).toBe(`${USED_UP} It resets ${phrase}.`);
   });
 
   it("reads a reset time given in milliseconds the same way", () => {
-    expect(
-      imageFailureLine({ type: "usageLimitExceeded", resetsAt: 1790240000000 }),
-    ).toContain("It resets 2026-09-24 08:53 UTC.");
+    expect(lineAt(2 * HOUR, RESET * 1000)).toBe(
+      "Codex has used up its picture limit for now. It resets in about 2 hours.",
+    );
   });
 
-  it("names no time when the runtime gave none", () => {
+  it.each([
+    ["already past", -5 * MIN],
+    ["exactly now", 0],
+  ])("ends after for now when the reset is %s", (_label, left) => {
+    expect(lineAt(left)).toBe(USED_UP);
+  });
+
+  it.each([
+    ["none", null],
+    ["absent", undefined],
+    ["not a number", Number.NaN],
+    ["infinite", Number.POSITIVE_INFINITY],
+    ["zero", 0],
+    ["negative", -1],
+  ])("ends after for now when the runtime's reset is %s", (_label, resetsAt) => {
     expect(
-      imageFailureLine({ type: "usageLimitExceeded", resetsAt: null }),
-    ).toBe(
-      "Codex could not make a picture because the image generation limit is used up.",
+      imageFailureLine(
+        { type: "usageLimitExceeded", resetsAt: resetsAt as unknown as number },
+        { now: RESET * 1000 },
+      ),
+    ).toBe(USED_UP);
+  });
+
+  it("measures from this machine's clock when it is given no time", () => {
+    const resetsAt = Math.floor(Date.now() / 1000) + 3 * HOUR + MIN;
+    expect(imageFailureLine({ type: "usageLimitExceeded", resetsAt })).toBe(
+      "Codex has used up its picture limit for now. It resets in about 3 hours.",
     );
+  });
+
+  it("names no clock time, no date and no zone", () => {
+    for (const left of [30, 12 * MIN, 2 * HOUR, 3 * DAY])
+      expect(lineAt(left)).not.toMatch(/UTC|GMT|\d{1,2}:\d{2}|\d{4}-\d{2}-\d{2}/);
   });
 
   it("says something plain about a failure kind this build does not know", () => {
@@ -239,7 +356,11 @@ describe("imageFailureLine", () => {
 
   it("carries no em dash and no en dash in any line", () => {
     for (const line of [
-      imageFailureLine({ type: "usageLimitExceeded", resetsAt: 1790240000 }),
+      lineAt(30),
+      lineAt(12 * MIN),
+      lineAt(2 * HOUR),
+      lineAt(3 * DAY),
+      lineAt(-MIN),
       imageFailureLine({ type: "usageLimitExceeded" }),
       imageFailureLine({ type: "x" }),
     ])
@@ -283,12 +404,16 @@ describe("imageNotShownLine", () => {
     );
   });
 
+  // Round 6 (premium item 3): "could not be shown" implies a picture exists
+  // that the chat cannot draw, and this is exactly the case where nothing
+  // came back. So the tried line says what happened.
   it("says only tried when neither the bytes nor a saved copy came back", () => {
     const line = imageNotShownLine({}, { home: HOME });
     expect(line).toBe(
-      "Codex tried to make a picture, but it could not be shown here.",
+      "Codex tried to make a picture, but nothing came back.",
     );
     expect(line).not.toMatch(/\bmade\b/);
+    expect(line).not.toContain("could not be shown");
   });
 
   it("says made when the runtime returned something it could not decode", () => {
@@ -318,7 +443,7 @@ describe("imageNotShownLine", () => {
     for (const result of ["", undefined]) {
       const image = collectGeneratedImage(imageItem({ result, savedPath: null }))!;
       expect(imageNotShownLine(image, { home: HOME })).toBe(
-        "Codex tried to make a picture, but it could not be shown here.",
+        "Codex tried to make a picture, but nothing came back.",
       );
     }
   });

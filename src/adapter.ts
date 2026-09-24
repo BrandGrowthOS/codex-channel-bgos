@@ -1197,8 +1197,9 @@ export class CodexAdapter {
   /**
    * Post the pictures a turn made, in the order they finished: each one as a
    * normal image with `Prompt: <revisedPrompt>` as its caption (no caption
-   * without one), and one plain line per distinct refusal, naming the reset
-   * time when the runtime gave one.
+   * without one), and one plain line per distinct refusal, saying roughly how
+   * long until the limit resets when that is still ahead, measured from one
+   * clock reading per turn (`ledger.clockMs`).
    *
    * A picture that did not reach the chat says so in one plain line (review
    * finding 3): one with no bytes the app can draw, or one whose upload
@@ -1246,7 +1247,9 @@ export class CodexAdapter {
       if (ledger.handled.has(image.itemId)) continue;
       ledger.handled.add(image.itemId);
       if (image.failure) {
-        await say(imageFailureLine(image.failure));
+        await say(
+          imageFailureLine(image.failure, { now: (ledger.clockMs ??= Date.now()) }),
+        );
         continue;
       }
       if (!image.bytes || !image.mimeType) {
