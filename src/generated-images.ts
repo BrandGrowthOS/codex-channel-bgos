@@ -197,6 +197,17 @@ function resetTime(resetsAt: number | null | undefined): string | null {
   return `${date.toISOString().replace("T", " ").slice(0, 16)} UTC`;
 }
 
+/**
+ * The one plain line a picture posts in its place when it was made but never
+ * reached the chat: no bytes the app can draw (an empty or unreadable
+ * `result`, over the image cap, a format the app does not draw, a save only
+ * item), or an upload that failed after its retries and was not queued. The
+ * runtime has already told the model the picture is "displayed to the user",
+ * so without this line the owner never learns one was made (review finding 3).
+ */
+export const IMAGE_NOT_SHOWN_LINE =
+  "A picture was made, but it could not be shown here.";
+
 /** The one plain line a refused picture posts in its place. */
 export function imageFailureLine(failure: GeneratedImageFailure): string {
   if (failure.type === "usageLimitExceeded") {

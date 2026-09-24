@@ -1587,6 +1587,32 @@ describe("pictures a turn made", () => {
     expect(image).not.toHaveProperty("result");
   });
 
+  it("hands a proposed plan the pictures finished before it, so they can post ahead of its card", async () => {
+    // Finding 2: a picture posted AFTER the plan card runs the backend's done
+    // over the card's blocked ("Waiting on your go ahead"). The card is
+    // posted from inside the turn, so the pictures it must follow have to
+    // reach the adapter there too.
+    const signals: any[] = [];
+    const task = host.runTurn(1, "plan a logo", {
+      onPlanProposal: (signal) => {
+        signals.push(signal);
+      },
+    });
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.emit("notification", "item/completed", itemCompleted(imageItem(), "thread-1"));
+    server.emit("notification", "item/completed", {
+      threadId: "thread-1",
+      turnId: "turn-thread-1",
+      item: { id: "plan-1", type: "plan", text: "## Logo\n\n1. Draw it" },
+    });
+    server.finish("thread-1", "");
+    await task;
+    expect(signals).toHaveLength(1);
+    expect(signals[0].images.map((i: any) => i.itemId)).toEqual([
+      "ig_01a0d1ba2874",
+    ]);
+  });
+
   it("adds nothing on item/started alone, even when the runtime fills the result early", async () => {
     const task = host.runTurn(1, "draw");
     await vi.waitFor(() => expect(server.next).toBe(1));

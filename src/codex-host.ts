@@ -147,6 +147,13 @@ export interface PlanProposalSignal {
   itemId: string;
   /** The plan, as markdown. Already finalized; never a partial. */
   text: string;
+  /**
+   * The pictures this turn finished BEFORE the plan, in order (stage 4,
+   * C-21, review finding 2). The card is posted from inside the turn and is
+   * read as blocked; a picture posted after it would be read as done and run
+   * over it, so the adapter posts these first. Absent when there are none.
+   */
+  images?: GeneratedImage[];
 }
 /**
  * Why the runtime refused a picture. The 0.154.0 schema has one variant,
@@ -1704,6 +1711,9 @@ export class CodexHost {
                   turnId: params.turnId ?? null,
                   itemId: itemKey,
                   text: String(item.text),
+                  ...(turn.images.size > 0
+                    ? { images: [...turn.images.values()] }
+                    : {}),
                 }),
               )
               .catch(() => {}),
