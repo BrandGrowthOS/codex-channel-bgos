@@ -244,3 +244,52 @@ line"), so it stays as it was and stays true.
 goal turn's requests do not wait for a stopped chat turn's pictures, because only an ordinary turn reads
 `pictureTails`. And the live image turn has still not run here: Codex is not logged in on this machine, which is
 exactly why item 1 holds 0.14.0 for it.
+
+## Round 5: the warning a held release prints, and made versus tried (2026-09-24)
+
+Two items, each written test first. Logs are `_tools-p5/logs/s4-fix3-*.log`. Commits: `0dce17b` (item 2), `23110ed`
+(item 1), and this report.
+
+| Item | What changed | Red before the code | Proof for a guard that could not be red |
+| --- | --- | --- | --- |
+| 1 warning | The `Held from latest` step in `publish.yml` printed one version's reason (the backend that clamps 0.10.1's approval hold) for every held version, then the promote command, so for 0.14.0, which needs no backend, it read as "promote now". Its `::warning::` now says to promote only when the reason the version is held is met, written beside it in the `HELD_FROM_LATEST` comment and in the README promote block. For 0.14.0 a second `::warning::` names its own condition: with 0.13.0 or after it, never before, and only after one logged in live image turn confirms the real item (result bytes and their form, revisedPrompt, savedPath, the failure shape; probe.md, decision 7). The command is printed last | 1: `publish-workflow.spec.ts` "never hands anyone a bare promote command when a held version lands on next", which reads what the step PRINTS (its `echo` lines and the version branch each sits in), not its comments | W1 to W3 below |
+| 2 made | `collectGeneratedImage` records `returnedOutput: true` when the item carried a non empty `result` string, BEFORE decoding, so the fact survives a result that is not a picture or is over the image cap; the string itself is never kept. `imageNotShownLine` says the "made" line when bytes decoded OR something came back, and "tried" only for an empty or absent result with no `savedPath`. A failure item is unchanged | 7: in `generated-images.spec.ts`, three collection cases (not a picture, over the cap, a picture that decoded) and three line cases (the pure made case, then not a picture and over the cap through the real collector, both with no `savedPath`: "made", never "tried"); in `adapter-image-posts.spec.ts`, both items in one turn post the one made line and no "tried" | G1 to G3 below; the "records nothing returned" cases (empty, blank, absent, not a string) and "still says only tried" pin the other side and were green before and after |
+
+Totals: **8 tests red before their code** (`s4-fix3-red-plugin.log`: `Tests 8 failed | 67 passed (75)`), each for
+its named reason: the general warning line missing (`expected -1 to be greater than or equal to 0`),
+`returnedOutput` undefined, and "Codex tried to make a picture" where "Codex made a picture" was expected, in the pure
+line and in the adapter's posted lines. Reproduced after the fact against the HEAD `09ca106` versions of the four
+changed source files with the new tests (`s4-fix3-red5-rerun.log`, same 8 failed, 67 passed, files restored and
+their sha256 checked identical).
+
+**Mutations**, each applied to the fixed tree, run against the three changed spec files, then restored with its
+sha256 checked identical (`s4-fix3-mut5-<name>.log`, the same results as the first run in `s4-fix3-mut-<name>.log`):
+
+| Mutation | What it does | Result |
+| --- | --- | --- |
+| W1 command first | prints `npm dist-tag add ...` before the warning | 1 red: "the promote command is printed before the condition that gates it" |
+| W2 no 0.14.0 warning | drops `::warning::` from 0.14.0's own line | 1 red: "the warning does not name 0.14.0's condition" |
+| W3 one reason for all | prints "once the BGOS backend that clamps the approval hold is deployed" for every version | 1 red: "a line printed for every held version names one version's backend" |
+| G1 line ignores it | `imageNotShownLine` reads only the bytes again | 4 red (three line cases, the adapter case) |
+| G2 no trim | a blank `result` counts as returned | 1 red: "records nothing returned for a result of only spaces" |
+| G3 only when decoded | `returnedOutput` set only when the result decodes | 5 red (two collection cases, two line cases, the adapter case) |
+
+```
+the three changed spec files (s4-fix3-green-plugin.log): Test Files  3 passed (3)   Tests  75 passed (75)
+whole plugin suite (s4-fix3-full-suite.log):             Test Files  77 passed (77)  Tests  1116 passed | 1 skipped (1117)
+tsc --noEmit -p tsconfig.json (s4-fix3-tsc.log):          exit 0, no output
+```
+
+The two lines the step now prints before the command, as a run summary shows them for 0.14.0:
+
+> 0.14.0 was published under the npm dist tag next, not latest, so nothing installs it by default. Promote it only
+> when the reason it is held is met: that reason is written beside 0.14.0 in the HELD_FROM_LATEST comment in this
+> workflow and in the promote block of the README.
+
+> 0.14.0 needs no backend of its own. It is promoted only with 0.13.0 or after it, never before, and only after one
+> logged in live image turn confirms the real item (result bytes and their form, revisedPrompt, savedPath, the failure
+> shape; probe.md, decision 7).
+
+**Known limit, named.** `returnedOutput` is evidence the runtime handed something over, not that it was a picture: a
+non empty result that is not an image still reads "made". That is the truthful reading of an item the runtime marked
+finished with output, and the live image turn that holds 0.14.0 is what confirms the real result's form.
