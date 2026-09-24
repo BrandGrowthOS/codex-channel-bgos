@@ -291,12 +291,29 @@ describe("BUNDLED_CAPABILITIES helper rows paragraph", () => {
  * this goes red; put an em dash back in and the dash case goes red.
  */
 describe("BUNDLED_CAPABILITIES generated picture sentence", () => {
+  /**
+   * Review findings 3 and 5. The picture posts itself from a CHAT turn only:
+   * a meeting takes text only (meeting_reply and the meeting reply tool
+   * refuse files), and a voice task runs detached and its result goes to
+   * the call, so neither posts one. The first sentence therefore names the
+   * chat turn, and the last says what to do in the other two, because an
+   * unscoped promise told a model in a meeting that the room could see a
+   * picture it could not, and told a model in a voice task not to use the one
+   * tool that would deliver it. The middle sentence keeps the model's view
+   * honest when a picture cannot be shown: the chat says so.
+   */
   const SERVED_TRUTH =
-    "A picture you make with image generation posts itself to the chat when the turn finishes, with its prompt as the caption; do not send it again with MEDIA: or the reply tool.";
+    "In a chat turn, a picture you make with image generation posts itself to the chat when the turn finishes, with its prompt as the caption; do not send it again with MEDIA: or the reply tool. If it cannot be shown, the chat says so in one plain line. In a meeting or a voice task nothing posts it: a meeting takes text only, so describe the picture there, and in a voice task copy it into the workspace and send it with the reply tool.";
   const flat = BUNDLED_CAPABILITIES.replace(/\s+/g, " ");
 
-  it("says, word for word, the sentence the served canon copies", () => {
+  it("says, word for word, the sentences the served canon copies", () => {
     expect(flat).toContain(SERVED_TRUTH);
+  });
+
+  it("never promises the post outside a chat turn", () => {
+    expect(flat).not.toMatch(
+      /(^|[.;:] )A picture you make with image generation posts itself/,
+    );
   });
 
   it("says when the turn finishes, never the instant the picture is made", () => {
