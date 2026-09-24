@@ -1,5 +1,5 @@
 import type { BgosApi } from "./bgos-api.js";
-import { publishMediaPath } from "./attachment-bridge.js";
+import { publishMediaBuffer, publishMediaPath } from "./attachment-bridge.js";
 import { sanitizeFromAgent } from "./agent-identity.js";
 import {
   classifyOutboundError,
@@ -417,6 +417,47 @@ export class BgosOutbound {
     replyVia?: "messages" | "send-message";
   }): Promise<{ id: number }> {
     const fileRef = await publishMediaPath(this.api, params.filePath, {
+      fileName: params.fileName,
+      mimeType: params.mimeType,
+    });
+    const payload: OutboundMessagePayload = {
+      assistantId: params.assistantId,
+      chatId: params.chatId,
+      sender: "assistant",
+      text: params.caption ?? "",
+      messageType: "standard",
+      files: [fileRef],
+      ...(params.replyToId !== undefined && { replyToId: params.replyToId }),
+    };
+    return this.deliver(payload, params.replyVia);
+  }
+
+  /**
+   * A picture this process holds as BYTES, with no file behind it: today a
+   * picture the Codex runtime generated (stage 4, C-21). The same message
+   * `sendFile` sends, one `standard` row with the caption as its text and the
+   * picture as its one file, through the same `deliver()`, so the retry and
+   * the spool apply exactly as they do to a file. The 10 MB image cap is
+   * enforced underneath, before anything is uploaded or posted.
+   */
+  async sendImageBytes(params: {
+    assistantId: number;
+    chatId: number;
+    bytes: Buffer;
+    fileName: string;
+    mimeType: string;
+    caption?: string;
+    /** See sendText.replyToId. */
+    replyToId?: number;
+    /** See sendText.replyVia. */
+    replyVia?: "messages" | "send-message";
+  }): Promise<{ id: number }> {
+    if (!params.mimeType.startsWith("image/")) {
+      throw new Error(
+        `sendImageBytes: mimeType ${params.mimeType} is not image/*`,
+      );
+    }
+    const fileRef = await publishMediaBuffer(this.api, params.bytes, {
       fileName: params.fileName,
       mimeType: params.mimeType,
     });
