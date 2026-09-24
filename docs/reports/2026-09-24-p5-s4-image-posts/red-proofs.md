@@ -195,3 +195,52 @@ look for this stage, made by the frames lane before the review. They are committ
 three things on the page predate the fixes above: it names 0.13.0 (now 0.14.0), it says a picture that could not
 be uploaded "falls back to today's behaviour" (it now posts the one plain line), and it quotes the earlier, unscoped
 hint sentence (now the one above). The raw probe files stay under `_tools-p5` and are not copied here.
+
+## Round 4: the re-review's items (2026-09-24)
+
+The re-review (`_tools-p5/s4-fix-result.json`, `result.rr.defects`) raised seven items and the orchestrator decided
+each one. Item 5 is the BGOS PR's (its own red proofs, Round 4) and item 7 (the ledger) is the orchestrator's. Every
+change below was written test first. Logs are `_tools-p5/logs/s4-fix2-*.log`. Commits: `5ec35c5` (items 2, 3 and 4),
+`e49c6c5` (item 6), `acefd7d` (item 1), and this report.
+
+| Item | What changed | Red before the code | Proof for a guard that could not be red |
+| --- | --- | --- | --- |
+| 1 hold | `publish.yml`, the `interactions.ts` marker paragraph and the README (paragraph and promote comment) keep "adds no hold of its own" and add: promoted only after one logged in live image turn confirms the real item (result bytes and their form, revisedPrompt, savedPath, the failure shape; probe.md, decision 7) | 1: `publish-workflow.spec.ts` "holds 0.14.0 for the live image turn in all three texts a release reads" | none needed |
+| 2 not shown | `imageNotShownLine` in `generated-images.ts` replaces the single line. A saved copy: "Codex made a picture, but it could not be shown here. It is saved at <path>." with the path shortened by the existing `shortenPath` (`activity-markers.ts`, the one every row uses: `~` under the home directory, else the file and its folder). Bytes but no saved copy (an upload lost, the tool's own save failed): "Codex made a picture, but it could not be shown here." Neither: "Codex tried to make a picture, but it could not be shown here." Dedupe by line text and the silence after a Stop are kept | 9: five pure cases in `generated-images.spec.ts`, four in `adapter-image-posts.spec.ts` (the saved line on a failed upload, the made line with no saved copy, the tried line with no `made`, the saved only item) | S1 below, for the Stop case, which now also carries a saved only item and an empty one |
+| 3 requests | `executeAndReply` passes `onRequest: async (...) => { await earlier; return this.tools.handleRequest(...) }`, so an approval card or an ask from the turn after a Stop lands after the stopped turn's pictures | 1: "holds the next turn's approval card until the stopped picture has posted" | none needed |
+| 4 handover | `ActiveTurn.handedOff` (required, set in both constructors): the ids handed to `onPlanProposal` are recorded when the plan item arrives (and only when a callback is there to take them), and `execute` skips them when it copies an adopted turn's pictures. The signal's pictures are now taken at the plan item itself rather than a microtask later | 1: `codex-host.spec.ts` "does not hand an owner turn a picture the adopted turn already handed to its plan card" (a picture after the card still carries across) | none needed |
+| 6 voice | Decision: keep the hint only scope. The dispatch path posts no standard message into the target chat: its result goes to `POST /integrations/voice-tasks/:taskId/result`, which settles the voice task row, the Work Stream, the delegated task card and, after a call only, a ring back or a result card; the consult returns its text to the call. The voice clause now names the consult, which has no HOAI tools and is told to send nothing: it says the picture is saved on this machine and describes it. "In the workspace" would be false there: the runtime saves to `$CODEX_HOME/generated_images` (probe.md). A voice task keeps the reply tool, which its tool context really has | 2 in `capabilities.spec.ts`: word for word, and the consult case | none needed |
+
+Totals: **14 tests red before their code** (`s4-fix2-red-plugin.log`: `Tests 14 failed | 166 passed (180)`), each
+for its named reason (a missing function, the old line, the approval before the picture, the handed off picture in
+the owner's result, the old sentence, the missing hold clause).
+
+**Mutation S1** (`s4-fix2-mut-S1-stop-lines.log`): dropping `opts.picturesOnly ||` from the line guard in
+`postGeneratedImages` turns "posts the pictures that finished before a Stop, and nothing else" red (1 failed, 26
+passed); `src/adapter.ts` was restored and its sha256 checked identical.
+
+```
+the five changed files (s4-fix2-green-plugin.log): Test Files  5 passed (5)   Tests  180 passed (180)
+whole plugin suite (s4-fix2-full-suite.log):      Test Files  77 passed (77)  Tests  1103 passed | 1 skipped (1104)
+tsc --noEmit -p tsconfig.json (s4-fix2-tsc.log):  exit 0, no output
+```
+
+The hint sentence as it now reads (src/agent-hints.ts, pinned word for word as `SERVED_TRUTH` in
+test/capabilities.spec.ts):
+
+> In a chat turn, a picture you make with image generation posts itself to the chat when the turn finishes, with its
+> prompt as the caption; do not send it again with MEDIA: or the reply tool. If it cannot be shown, the chat says so
+> in one plain line. In a meeting, a voice task or a consult nothing posts it: a meeting takes text only, so describe
+> the picture there; in a voice task copy it into the workspace and send it with the reply tool; and a consult sends
+> nothing, so say the picture is saved on this machine and describe it.
+
+**Byte identity with the BGOS canon.** sha256 of the sentence, UTF-8, 530 bytes:
+`fe528db206e5ac09a296e624695e368f87bfb9fe904111305b0a889da436db98`, the same for the flattened text in
+`src/agent-hints.ts`, `SERVED_TRUTH`, the BGOS `CODEX_GENERATED_IMAGES_SENTENCE` (after its `- `), the BGOS spec's
+`SENTENCE` and the BGOS mirror line. The second sentence did not quote the old line ("the chat says so in one plain
+line"), so it stays as it was and stays true.
+
+**Known limits, named.** A picture that finishes after a plan item still posts after that card (Round 3). An adopted
+goal turn's requests do not wait for a stopped chat turn's pictures, because only an ordinary turn reads
+`pictureTails`. And the live image turn has still not run here: Codex is not logged in on this machine, which is
+exactly why item 1 holds 0.14.0 for it.
