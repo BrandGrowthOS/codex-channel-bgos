@@ -46,6 +46,23 @@ import type {
 /** Backend rejects inline messages with >6 options. */
 const INLINE_OPTION_LIMIT = 6;
 
+/**
+ * A send that did not reach the backend yet, but that the outbox holds and
+ * will replay (contract C3): QUEUED, not lost. `deliver()` rejects with this
+ * after spooling, with the network error as its `cause` and its message, so a
+ * caller that swallows every rejection is unchanged and a caller that has to
+ * tell the two apart can. Stage 4 (C-21, review finding 8): a picture the
+ * outbox took still lands, so the turn must neither say it could not be shown
+ * nor post "(Codex finished the turn without a text reply.)" for it.
+ */
+export class OutboundSpooledError extends Error {
+  readonly spooled = true;
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = "OutboundSpooledError";
+  }
+}
+
 export class BgosOutbound {
   /** Public read-only handle on the underlying REST client; consumers
    *  occasionally need it (e.g. inbound-handler routes uploadFile through
@@ -131,15 +148,16 @@ export class BgosOutbound {
           continue;
         }
         const message = err instanceof Error ? err.message : String(err);
+        this.onLastError?.("outbound_failed", message);
         if (cls.retriable) {
-          // Exhausted the safe class: spool for later replay.
+          // Exhausted the safe class: spool for later replay, and say so.
           appendOutbox({
             ts: Date.now(),
             payload,
             ...(replyVia ? { replyVia } : {}),
           });
+          throw new OutboundSpooledError(err);
         }
-        this.onLastError?.("outbound_failed", message);
         throw err;
       }
     }
