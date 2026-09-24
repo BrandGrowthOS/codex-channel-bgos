@@ -64,9 +64,16 @@ jobs:
           # itself as an ordinary image message, which every backend already
           # accepts. It is held only because it carries the holds of the
           # releases before it, so it is promoted with 0.13.0 or after it,
-          # never before. 0.13.0 is P2 stage 5's release, which merges first
-          # and brings its own line here; merge order #12, #14, #15, P2
-          # stage 5 (0.13.0), then 0.14.0.
+          # never before. Beside that it waits for one thing no backend
+          # gives: it is promoted only after one logged in live image turn
+          # confirms the real item (result bytes and their form,
+          # revisedPrompt, savedPath, the failure shape; probe.md, decision
+          # 7). The offline probe never saw a real item, and a shape the code
+          # does not read turns every picture into a "could not be shown"
+          # line while the served canon tells the model not to resend it.
+          # 0.13.0 is P2 stage 5's release, which merges first and brings its
+          # own line here; merge order #12, #14, #15, P2 stage 5 (0.13.0),
+          # then 0.14.0.
           HELD_FROM_LATEST="0.10.1 0.11.0 0.12.0 0.14.0"
           DIST_TAG=latest
           for held in $HELD_FROM_LATEST; do

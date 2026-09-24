@@ -87,6 +87,39 @@ describe("the publish workflow never advertises a held version as latest", () =>
     }
   });
 
+  it("holds 0.14.0 for the live image turn in all three texts a release reads", () => {
+    // Re-review item 1. 0.14.0 needs no backend, so nothing machine readable
+    // can hold it past 0.13.0; what it waits for is one logged in live image
+    // turn confirming the real item, which the offline probe could not see.
+    // Promoted without it, a result shape the code does not read turns every
+    // picture into a "could not be shown" line, while the served canon has
+    // told the model not to resend it. So the condition is written wherever
+    // someone promoting reads, beside "adds no hold of its own".
+    if (!heldInSource().includes("0.14.0")) return;
+    const flat = (text: string) =>
+      text
+        .split("\n")
+        .map((line) => line.replace(/^\s*(?:#|\*)?\s?/, ""))
+        .join(" ")
+        .replace(/\s+/g, " ");
+    const texts: Record<string, string> = {
+      "publish.yml": flat(workflow),
+      "src/interactions.ts": flat(readFileSync("src/interactions.ts", "utf8")),
+      "README.md": flat(readFileSync("README.md", "utf8")),
+    };
+    for (const [name, text] of Object.entries(texts)) {
+      expect(text, `${name} lost "adds no hold of its own"`).toMatch(
+        /0\.14\.0[^.]*adds no hold of its own/i,
+      );
+      expect(
+        text,
+        `${name} does not hold 0.14.0 for the live image turn`,
+      ).toContain(
+        "only after one logged in live image turn confirms the real item (result bytes and their form, revisedPrompt, savedPath, the failure shape; probe.md, decision 7)",
+      );
+    }
+  });
+
   it("keeps package-lock.json on the same version package.json is on", () => {
     // The stage bumped package.json to 0.11.0 and left the lock at 0.10.1, in
     // BOTH of its version fields. Every previous release in this repo moved the
