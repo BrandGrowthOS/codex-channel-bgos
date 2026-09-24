@@ -19,7 +19,7 @@
     "height": 512,
     "bytes": 85938,
     "sha1": "90e1fb98b06b2bf14b6b8757cdab0b94ffbce0fb",
-    "fileName": "exec-8c1f3a52-5b7e-4d19-9a60-2e4b7c0d9f13.png",
+    "fileName": "codex-image-7c0d9f13.png",
     "delivery": "inline data: URI (the plugin's path under 500 KB)"
   },
   "history": [
@@ -38,8 +38,8 @@
       "text": "Used 1 tool · image_generation",
       "toolProgress": {
         "state": "done",
-        "startedAt": "2026-09-24T04:47:03.407Z",
-        "finishedAt": "2026-09-24T04:48:11.407Z",
+        "startedAt": "2026-09-24T09:41:28.280Z",
+        "finishedAt": "2026-09-24T09:42:36.280Z",
         "tools": [
           {
             "icon": "🖼️",
@@ -61,7 +61,7 @@
       "files": [
         {
           "id": 990951,
-          "fileName": "exec-8c1f3a52-5b7e-4d19-9a60-2e4b7c0d9f13.png",
+          "fileName": "codex-image-7c0d9f13.png",
           "fileMimeType": "image/png",
           "isImage": true,
           "width": 1024,
@@ -84,8 +84,109 @@
       "id": 990951,
       "messageId": 990903,
       "chatId": 990601,
-      "fileName": "exec-8c1f3a52-5b7e-4d19-9a60-2e4b7c0d9f13.png"
+      "fileName": "codex-image-7c0d9f13.png"
     }
   ],
-  "note": "The tool card row is IDENTICAL on both sides (what the plugin sends today: no args, no path). The only difference between BEFORE and AFTER is message 990903, the picture post, and the attachments index that follows from it."
+  "note": "The tool card row is IDENTICAL on both sides (what the plugin sends today: no args, no path). The only difference between BEFORE and AFTER is message 990903, the picture post, and the attachments index that follows from it.",
+  "realWords": {
+    "from": "s4-real-lines.json (s4-real-lines.ts runs the plugin's own builders)",
+    "pluginSources": {
+      "generated-images.ts": "3b2745c75a37f82cddbe3e062923a0399ea6e41e0e871bd835510fb3d43beb1b",
+      "activity-markers.ts": "41bead9cf4318f71bf70724adba7960dda49c2723fdccf5e374f2782c3069644",
+      "clip-text.ts": "5405a8fe72f77e52f3277cf500de26207420fc506e11f698bbd9af8d90d0937f",
+      "attachment-guard.ts": "1da0878f03754eb1025f7691738e40dca54636a1eafbb1608dda2c8cb2e81b64"
+    },
+    "inputs": {
+      "home": "C:\\Users\\owner",
+      "now": "2026-09-24T09:00:00.000Z",
+      "revisedPrompt": "A minimal launch banner, a gold wordmark on a charcoal background, soft light",
+      "captionMax": 200,
+      "items": {
+        "posted": {
+          "type": "imageGeneration",
+          "id": "exec-8c1f3a52-5b7e-4d19-9a60-2e4b7c0d9f13",
+          "status": "completed",
+          "revisedPrompt": "A minimal launch banner, a gold wordmark on a charcoal background, soft light",
+          "result": "<base64 of fixture-banner-1024x512.png, 114584 chars>",
+          "savedPath": "C:\\Users\\owner\\.codex\\generated_images\\019a2f4c-6b1d-7e83-a5c2-9d4e0f7b1a36\\exec-8c1f3a52-5b7e-4d19-9a60-2e4b7c0d9f13.png"
+        },
+        "made": {
+          "type": "imageGeneration",
+          "id": "exec-3e7d9b20-4c6a-4f18-b2e5-71a0c9d8f452",
+          "status": "completed",
+          "revisedPrompt": "A small round logo for the launch invite",
+          "result": "<base64 of fixture-banner-1024x512.png>",
+          "savedPath": "C:\\Users\\owner\\.codex\\generated_images\\019a2f4c-6b1d-7e83-a5c2-9d4e0f7b1a36\\exec-3e7d9b20-4c6a-4f18-b2e5-71a0c9d8f452.png",
+          "why": "the upload was lost after its retries, so the adapter says imageNotShownLine(image)"
+        },
+        "tried": {
+          "type": "imageGeneration",
+          "id": "exec-5b91c0de-2a7f-4e36-9d18-c4f06a3b7e25",
+          "status": "failed",
+          "result": ""
+        },
+        "limit": {
+          "type": "imageGeneration",
+          "id": "exec-a04e7c19-6d2b-4b85-8f31-e9c2d5a7b016",
+          "status": "failed",
+          "failure": {
+            "type": "usageLimitExceeded",
+            "limitId": "images",
+            "resetsAt": 1790247600
+          }
+        }
+      }
+    },
+    "posted": {
+      "fileName": "codex-image-7c0d9f13.png",
+      "mimeType": "image/png",
+      "bytesSha1": "90e1fb98b06b2bf14b6b8757cdab0b94ffbce0fb",
+      "fixtureSha1": "90e1fb98b06b2bf14b6b8757cdab0b94ffbce0fb",
+      "caption": "Prompt: A minimal launch banner, a gold wordmark on a charcoal background, soft light"
+    },
+    "lines": {
+      "tried": "Codex tried to make a picture, but nothing came back.",
+      "made": "Codex made a picture, but it could not be shown here. It is saved at ~\\.codex\\generated_images\\019a2f4c-6b1d-7e83-a5c2-9d4e0f7b1a36\\exec-3e7d9b20-4c6a-4f18-b2e5-71a0c9d8f452.png.",
+      "limit": "Codex has used up its picture limit for now. It resets in about 2 hours."
+    }
+  },
+  "linesHistory": [
+    {
+      "id": 990911,
+      "sender": "user",
+      "messageType": "standard",
+      "text": "Make me a small logo for the launch invite"
+    },
+    {
+      "id": 990912,
+      "sender": "assistant",
+      "messageType": "standard",
+      "text": "Codex tried to make a picture, but nothing came back."
+    },
+    {
+      "id": 990913,
+      "sender": "user",
+      "messageType": "standard",
+      "text": "Try the logo once more"
+    },
+    {
+      "id": 990914,
+      "sender": "assistant",
+      "messageType": "standard",
+      "text": "Codex made a picture, but it could not be shown here. It is saved at ~\\.codex\\generated_images\\019a2f4c-6b1d-7e83-a5c2-9d4e0f7b1a36\\exec-3e7d9b20-4c6a-4f18-b2e5-71a0c9d8f452.png."
+    },
+    {
+      "id": 990915,
+      "sender": "user",
+      "messageType": "standard",
+      "text": "Now a square banner for the feed"
+    },
+    {
+      "id": 990916,
+      "sender": "assistant",
+      "messageType": "standard",
+      "text": "Codex has used up its picture limit for now. It resets in about 2 hours."
+    }
+  ],
+  "linesNote": "BOOT 3, AFTER only, run for every target after boots 1 and 2 (frames 33 on): the same agent and chat with the switch OFF, three turns each ending in the plain line the plugin posts in place of a picture that never reached the chat. The agent's own reply that would follow each line is left out."
 }

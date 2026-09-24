@@ -864,6 +864,13 @@ html[data-theme="light"]{
   .c21-card__foot{display:flex;align-items:flex-start;gap:10px;padding:10px 16px;border-top:1px solid #24231f;color:rgba(255,255,255,.5);font-size:12px;line-height:16px}
   .c21-why{padding:14px 16px;border-radius:14px;background:rgba(255,217,0,.06);border:1px solid rgba(255,217,0,.28);color:rgba(255,255,255,.85);font-size:14px;line-height:21px}
   .c21-why b{color:#FFD900;font-weight:600}
+  .c21-since{padding:16px 18px 18px;border-radius:14px;background:rgba(255,217,0,.06);border:1px solid rgba(255,217,0,.28);display:flex;flex-direction:column;gap:14px;min-width:0}
+  .c21-since__head{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .c21-since__t{margin:0;color:#FFD900;font-size:12px;line-height:16px;font-weight:600;letter-spacing:.5px;text-transform:uppercase}
+  .c21-since__d{margin:0;color:rgba(255,255,255,.82);font-size:14px;line-height:21px}
+  .c21-since ul{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:7px;color:rgba(255,255,255,.82);font-size:13.5px;line-height:20px}
+  .c21-since li b{color:#fff;font-weight:600}
+  .c21-since code{font-family:var(--hk-font-mono);font-size:12px;color:#fff;overflow-wrap:anywhere}
 
   /* ---------- lists, canon, technical detail, footer ---------- */
   .c21-notes{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 28px;max-width:1160px}
@@ -911,9 +918,37 @@ html[data-theme="light"]{
     <div class="c21-asks">
       <div class="c21-ask"><b>What I measured first</b><span>The real app, 24 frames, dark and light, desktop and phone, 57 of 57 checks. With the technical details switch on you see a tool row named <code>image_generation</code> and a text reply, and 0 pictures. With it off (the default) you see only the reply. The gallery and Artifacts are empty. Section 01 has the frames.</span></div>
       <div class="c21-ask"><b>Always on, no setting</b><span>Codex only: Claude Code has no picture item, so there is nothing to catch there. Nothing to switch on, no per agent setting. If the agent also attaches the same picture itself, it is not posted twice.</span></div>
-      <div class="c21-ask"><b>What the AFTER frames are</b><span>The same build as BEFORE (both runs on <code>vtdist-base</code>), showing a fixture chat that holds the post exactly as the plugin sends it: one normal image message with the prompt as its text. The banner is a fixture picture, 1024 by 512. The file name in the frames is the frames lane's guess; the plugin names the file <code>codex-image-&lt;id&gt;.png</code>.</span></div>
+      <div class="c21-ask"><b>What the AFTER frames are</b><span>The same build as BEFORE (both runs on <code>vtdist-base</code>), showing a fixture chat that holds the post exactly as the plugin sends it: one normal image message with the prompt as its text. The banner is a fixture picture, 1024 by 512. The file name and the caption are what the plugin's own code builds for it (<code>codex-image-7c0d9f13.png</code>), shot again at the stage 4 close.</span></div>
     </div>
   </header>
+
+  <!-- ===================================================== SINCE FIRST SHOWN ===================================================== -->
+  <section class="c21-since" aria-labelledby="c21-since-t">
+    <div class="c21-since__head"><h2 class="c21-since__t" id="c21-since-t">Since this page was first shown</h2>
+      <div class="c21-switch" data-switch="since" role="group" aria-label="Theme of the plain line screenshots"><button type="button" class="is-on" data-theme="dark">Dark</button><button type="button" data-theme="light">Light</button></div></div>
+    <p class="c21-since__d">The plugin took the premium review's owner facing items (<code>748ec4e</code>, tests written red first) and the AFTER frames in section 02 were shot again on the same build, so they show exactly what the code posts now. Section 05's drawn line and the version and sentence in section 06 are the first version; what they became is here.</p>
+    <ul>
+      <li><b>Version 0.14.0.</b> P2's next stage took 0.13.0, so this ships as 0.14.0, and the capability guide sentence is served to daemons at 0.14.0 or later.</li>
+      <li><b>Two lines when a picture does not show.</b> "Codex made a picture, but it could not be shown here." when Codex made one, followed by where it is saved when Codex kept a copy, and "Codex tried to make a picture, but nothing came back." when nothing came back. This replaces the fallback in section 05. Each distinct line posts once per turn.</li>
+      <li><b>The reset time is relative.</b> "Codex has used up its picture limit for now. It resets in about 2 hours.", counted from when the line posts (in a moment, or about so many minutes, hours or days), never a UTC clock time. Only the first sentence when no reset is ahead.</li>
+      <li><b>A shorter file name.</b> <code>codex-image-</code> plus the last 8 characters of the item id, here <code>codex-image-7c0d9f13.png</code> (24 characters). It reads whole in the viewer, the "View all photos" card and the Artifacts card at phone width, and it is the saved file's name. The first AFTER frames showed Codex's own <code>exec-&lt;uuid&gt;.png</code>, which the plugin never posts.</li>
+      <li><b>The caption stops at 200 characters</b> (it was 280), cut on a word with an ellipsis, so it stays the one or two sentences an image model writes back instead of a paragraph under every picture. A dash between two digits now reads "to" (2024 to 2026); any other long dash still becomes a comma.</li>
+      <li><b>The agent's hint is scoped to chat turns.</b> It now starts "In a chat turn, a picture you make with image generation posts itself to the chat when the turn finishes, with its prompt as the caption; do not send it again with MEDIA: or the reply tool." and goes on to say that in a meeting, a voice task or a consult nothing posts it, and what to do there. The capability guide carries the same words, byte for byte.</li>
+    </ul>
+    <div class="c21-label is-after"><i></i>The three plain lines, real frames, desktop 1440 by 900</div>
+    <div class="c21-shots">
+      <figure class="is-after is-wide" style="--mw:808px"><img data-dark="shots/after/33-images-line-tried-dark-desktop.png" data-light="shots/after/39-images-line-tried-light-desktop.png" src="shots/after/33-images-line-tried-dark-desktop.png" alt="Desktop: the agent message Codex tried to make a picture, but nothing came back."><figcaption><b>Nothing came back.</b> No bytes, no result and no saved copy, so the line says Codex only tried.</figcaption></figure>
+      <figure class="is-after is-wide" style="--mw:808px"><img data-dark="shots/after/34-images-line-made-dark-desktop.png" data-light="shots/after/40-images-line-made-light-desktop.png" src="shots/after/34-images-line-made-dark-desktop.png" alt="Desktop: the agent message Codex made a picture, but it could not be shown here, with where it is saved"><figcaption><b>Made, not shown, and where it is saved.</b> Here the upload was lost after its retries and Codex kept its own copy. Under the home folder the path starts <code>~\</code>, so the account name never shows.</figcaption></figure>
+      <figure class="is-after is-wide" style="--mw:808px"><img data-dark="shots/after/35-images-line-limit-dark-desktop.png" data-light="shots/after/41-images-line-limit-light-desktop.png" src="shots/after/35-images-line-limit-dark-desktop.png" alt="Desktop: the agent message Codex has used up its picture limit for now. It resets in about 2 hours."><figcaption><b>The limit, with a relative reset.</b> A plain agent message, not a red error.</figcaption></figure>
+    </div>
+    <div class="c21-label is-after"><i></i>Phone, 390 by 844</div>
+    <div class="c21-shots c21-shots--3">
+      <figure class="is-after"><img data-dark="shots/after/36-images-line-tried-dark-phone.png" data-light="shots/after/42-images-line-tried-light-phone.png" src="shots/after/36-images-line-tried-dark-phone.png" alt="Phone: Codex tried to make a picture, but nothing came back."><figcaption><b>Nothing came back,</b> phone.</figcaption></figure>
+      <figure class="is-after"><img data-dark="shots/after/37-images-line-made-dark-phone.png" data-light="shots/after/43-images-line-made-light-phone.png" src="shots/after/37-images-line-made-dark-phone.png" alt="Phone: Codex made a picture, but it could not be shown here, with where it is saved"><figcaption><b>Made, not shown,</b> phone. With Codex's real folder names the saved path runs to four lines.</figcaption></figure>
+      <figure class="is-after"><img data-dark="shots/after/38-images-line-limit-dark-phone.png" data-light="shots/after/44-images-line-limit-light-phone.png" src="shots/after/38-images-line-limit-dark-phone.png" alt="Phone: Codex has used up its picture limit for now. It resets in about 2 hours."><figcaption><b>The limit,</b> phone.</figcaption></figure>
+    </div>
+    <div class="c21-proofline">Frames 33 to 44: the same agent and chat with the technical details switch off, three turns each ending in one of the lines. Every word is what the plugin's own builders return for these cases (the inputs and outputs are in <code>shots/after/fixture.json</code>); the agent's own reply that would follow each line is left out. The whole AFTER run: 44 frames, 93 of 93 checks plus 4 observations, read only on every target, <code>shots/after/findings.jsonl</code>.</div>
+  </section>
 
   <!-- ===================================================== 01 BEFORE ===================================================== -->
   <section class="c21-sec">
@@ -947,7 +982,7 @@ html[data-theme="light"]{
   <section class="c21-sec">
     <div class="c21-sec__head"><span class="c21-sec__n">02</span><h2 class="c21-sec__t">After: the picture posts itself, first, with its prompt</h2>
       <div class="c21-switch" data-switch="after" role="group" aria-label="Theme of the AFTER screenshots"><button type="button" class="is-on" data-theme="dark">Dark</button><button type="button" data-theme="light">Light</button></div></div>
-    <p class="c21-sec__d">The same build, the same agent, the same tool card row. The one difference is the message the plugin now posts when the turn ends: <b>the picture, then the caption "Prompt: ..." in the same bubble, then the agent's own words</b>, in that order. Every frame is real; 61 checks passed, 0 failed, plus 4 recorded observations (section 06).</p>
+    <p class="c21-sec__d">The same build, the same agent, the same tool card row. The one difference is the message the plugin now posts when the turn ends: <b>the picture, then the caption "Prompt: ..." in the same bubble, then the agent's own words</b>, in that order. Every frame is real; 93 checks passed, 0 failed, plus 4 recorded observations (section 06), 32 of the checks for the plain lines in the box at the top.</p>
 
     <div class="c21-label is-after"><i></i>Desktop, 1440 by 900</div>
     <div class="c21-shots">
@@ -955,12 +990,12 @@ html[data-theme="light"]{
       <figure class="is-after"><img data-dark="shots/after/02-images-toolcard-open-dark-desktop.png" data-light="shots/after/18-images-toolcard-open-light-desktop.png" src="shots/after/02-images-toolcard-open-dark-desktop.png" alt="Desktop after, the tool card opened: the same one row as before, and the picture below it"><figcaption><b>The card is unchanged.</b> Opened by a click it reads the same one row, <code>image_generation 64s ✓</code>. The picture is a message of its own, below the card, not a row inside it.</figcaption></figure>
       <figure class="is-after"><img data-dark="shots/after/04-images-chat-techoff-dark-desktop.png" data-light="shots/after/20-images-chat-techoff-light-desktop.png" src="shots/after/04-images-chat-techoff-dark-desktop.png" alt="Desktop after, technical details off: the ask, the banner with its prompt, then the reply"><figcaption><b>Technical details off, the default: the owner now sees the banner.</b> The ask, the picture with its prompt, then "Done, the banner is ready."</figcaption></figure>
       <figure class="is-after"><img data-dark="shots/after/06-images-viewer-dark-desktop.png" data-light="shots/after/22-images-viewer-light-desktop.png" src="shots/after/06-images-viewer-dark-desktop.png" alt="Desktop after: tapping the picture opens the viewer over the whole window"><figcaption><b>Tap it and the viewer opens</b> over the whole window: the banner at 1325 by 738 px (92 percent of the fit), with the close and save controls. Nothing of the sidebar or the transcript sits on top. The viewer names the file, not the prompt (an app matter, see section 06).</figcaption></figure>
-      <figure class="is-after"><img data-dark="shots/after/07-images-gallery-dark-desktop.png" data-light="shots/after/23-images-gallery-light-desktop.png" src="shots/after/07-images-gallery-dark-desktop.png" alt="Desktop after: View all photos opens the chat's Artifacts with the banner in it"><figcaption><b>"View all photos" now has it.</b> "Artifacts · 1 item", one card drawn from the picture itself, "Today 8:48", PNG.</figcaption></figure>
-      <figure class="is-after"><img data-dark="shots/after/08-images-artifacts-dark-desktop.png" data-light="shots/after/24-images-artifacts-light-desktop.png" src="shots/after/08-images-artifacts-dark-desktop.png" alt="Desktop after: the Artifacts screen lists the banner"><figcaption><b>The Artifacts screen lists it too:</b> 1 item, the banner, "Codey · Today 8:48", PNG.</figcaption></figure>
+      <figure class="is-after"><img data-dark="shots/after/07-images-gallery-dark-desktop.png" data-light="shots/after/23-images-gallery-light-desktop.png" src="shots/after/07-images-gallery-dark-desktop.png" alt="Desktop after: View all photos opens the chat's Artifacts with the banner in it"><figcaption><b>"View all photos" now has it.</b> "Artifacts · 1 item", one card drawn from the picture itself, named <code>codex-image-7c0d9f13.png</code>, "Today" and the time, PNG.</figcaption></figure>
+      <figure class="is-after"><img data-dark="shots/after/08-images-artifacts-dark-desktop.png" data-light="shots/after/24-images-artifacts-light-desktop.png" src="shots/after/08-images-artifacts-dark-desktop.png" alt="Desktop after: the Artifacts screen lists the banner"><figcaption><b>The Artifacts screen lists it too:</b> 1 item, the banner, <code>codex-image-7c0d9f13.png</code>, "Codey · Today" and the time, PNG.</figcaption></figure>
       <figure class="is-after is-wide" style="--mw:808px"><img data-dark="shots/after/05-images-post-dark-desktop.png" data-light="shots/after/21-images-post-light-desktop.png" src="shots/after/05-images-post-dark-desktop.png" alt="The picture post on its own: the banner above its prompt, in one bubble"><figcaption><b>The post on its own.</b> One bubble holding the banner above the text "Prompt: ...". The caption is the model's own revised prompt; any long dash in it becomes a comma, so nothing on screen carries one.</figcaption></figure>
       <figure class="is-after is-wide"><img data-dark="shots/after/03-images-toolcard-row-dark-desktop.png" data-light="shots/after/19-images-toolcard-row-light-desktop.png" src="shots/after/03-images-toolcard-row-dark-desktop.png" alt="The opened tool card on its own, after: identical to before"><figcaption><b>The opened card on its own,</b> identical to BEFORE pixel for pixel in the row: the plugin's tool card is not what changes.</figcaption></figure>
     </div>
-    <div class="c21-proofline">Every target stayed read only: every write the page issued was failed locally, no other API read reached production, no page exceptions, no em or en dashes on screen. <code>shots/after/findings.jsonl</code>, 61 passes, 0 fails, 4 observations.</div>
+    <div class="c21-proofline">Every target stayed read only: every write the page issued was failed locally, no other API read reached production, no page exceptions, no em or en dashes on screen. <code>shots/after/findings.jsonl</code>, 93 passes, 0 fails, 4 observations.</div>
 
     <div class="c21-label is-after"><i></i>Phone, 390 by 844</div>
     <div class="c21-shots c21-shots--4">
@@ -1138,7 +1173,7 @@ The ledger's wording; a plugin test pins the final words and the no dash rule.</
     </details>
   </section>
 
-  <div class="c21-foot">C-21 · Stage 4 of P5 · a picture a Codex agent makes posts itself with its prompt · before and after for Kc's comments · 2026-09-24 · BEFORE and AFTER frames are the real, unchanged app on one build (24 frames, 57 of 57 checks; 32 frames, 61 of 61 checks plus 4 observations), the AFTER chat a fixture holding the post as the plugin sends it · committed on the plugin branch: the probe report (205c05f) · in the tree, not yet committed at the time of this page: the stage 4 tests, written red ahead of the code · not yet: the plugin change itself and the small app PR (canon sentence, floor, What's New) · nothing merged.</div>
+  <div class="c21-foot">C-21 · Stage 4 of P5 · a picture a Codex agent makes posts itself with its prompt · before and after for Kc's comments · 2026-09-24 · BEFORE and AFTER frames are the real, unchanged app on one build (24 frames, 57 of 57 checks; 44 frames, 93 of 93 checks plus 4 observations), the AFTER chat a fixture holding the post as the plugin sends it · committed on the plugin branch: the probe report (205c05f) · in the tree, not yet committed at the time of this page: the stage 4 tests, written red ahead of the code · not yet: the plugin change itself and the small app PR (canon sentence, floor, What's New) · nothing merged · since first shown (the box at the top): the plugin change committed through 7aaf7fa at 0.14.0, and the AFTER frames shot again on it.</div>
 </div>
 
 <script>
@@ -1173,8 +1208,8 @@ The ledger's wording; a plugin test pins the final words and the no dash rule.</
   function swapShots(section,theme){
     section.querySelectorAll('.c21-shots img[data-dark]').forEach(function(img){img.src=img.getAttribute('data-'+theme)});
   }
-  document.querySelectorAll('[data-switch="before"],[data-switch="after"]').forEach(function(sw){
-    var section=sw.closest('.c21-sec');
+  document.querySelectorAll('[data-switch="before"],[data-switch="after"],[data-switch="since"]').forEach(function(sw){
+    var section=sw.closest('.c21-sec,.c21-since');
     wireSwitch(sw,function(theme){swapShots(section,theme)});
   });
   wireSwitch(document.querySelector('[data-switch="drawn"]'),function(theme){
