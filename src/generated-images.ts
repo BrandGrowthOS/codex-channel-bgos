@@ -132,6 +132,11 @@ function readFailure(raw: unknown): GeneratedImageFailure | undefined {
  *
  * A failure is carried with its failure and no bytes, so the adapter can say
  * why. Otherwise the bytes are decoded now and the base64 goes no further.
+ *
+ * `returnedOutput` records that the runtime handed back a non empty `result`
+ * at all, BEFORE decoding, so the fact survives a result that is not a
+ * picture or is over the cap (Round 5): Codex made something then, and the
+ * line that says it could not be shown must say "made", never "tried".
  */
 export function collectGeneratedImage(item: RpcObject): GeneratedImage | null {
   const itemId = typeof item.id === "string" ? item.id : "";
@@ -146,6 +151,8 @@ export function collectGeneratedImage(item: RpcObject): GeneratedImage | null {
     image.failure = failure;
     return image;
   }
+  if (typeof item.result === "string" && item.result.trim())
+    image.returnedOutput = true;
   const decoded = decodeImageResult(item.result);
   if (decoded) {
     image.bytes = decoded.bytes;
@@ -216,10 +223,14 @@ function resetTime(resetsAt: number | null | undefined): string | null {
  *    its folder), because a full path carries the account name.
  *  - Bytes but no saved copy (the upload failed, the tool's own save did
  *    not): Codex made it, and there is no file to name.
- *  - Neither: Codex only TRIED. A generation that failed without a failure
- *    object (a failed status, an empty result) made nothing, and the chat must
- *    not say a picture was made. Nothing here reads `status`, because its
- *    strings were never seen live; the absence of both is the evidence.
+ *  - A non empty `result` that did not decode (not a picture, over the cap)
+ *    and no saved copy: the runtime still handed something over, so Codex
+ *    made it (`returnedOutput`, Round 5). Saying "tried" there would be false.
+ *  - None of those: Codex only TRIED. A generation that failed without a
+ *    failure object (a failed status, an empty or absent result) made
+ *    nothing, and the chat must not say a picture was made. Nothing here
+ *    reads `status`, because its strings were never seen live; the absence
+ *    of all three is the evidence.
  *
  * `home` is for tests; the daemon passes nothing and gets this machine's.
  */
@@ -229,14 +240,15 @@ export const IMAGE_TRIED_NOT_SHOWN_LINE =
   "Codex tried to make a picture, but it could not be shown here.";
 
 export function imageNotShownLine(
-  image: Pick<GeneratedImage, "bytes" | "savedPath">,
+  image: Pick<GeneratedImage, "bytes" | "savedPath" | "returnedOutput">,
   ctx: { home?: string } = {},
 ): string {
   const where = image.savedPath
     ? shortenPath(image.savedPath, ctx.home ? { home: ctx.home } : {})
     : "";
   if (where) return `${IMAGE_MADE_NOT_SHOWN_LINE} It is saved at ${where}.`;
-  if (image.bytes && image.bytes.length > 0) return IMAGE_MADE_NOT_SHOWN_LINE;
+  if ((image.bytes && image.bytes.length > 0) || image.returnedOutput)
+    return IMAGE_MADE_NOT_SHOWN_LINE;
   return IMAGE_TRIED_NOT_SHOWN_LINE;
 }
 

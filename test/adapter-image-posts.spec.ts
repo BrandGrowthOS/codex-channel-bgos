@@ -5,8 +5,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CodexAdapter } from "../src/adapter.js";
 import type { GeneratedImage } from "../src/codex-host.js";
+import {
+  IMAGE_BYTES_MAX,
+  collectGeneratedImage,
+} from "../src/generated-images.js";
 import { OutboundSpooledError } from "../src/outbound.js";
-import { GOLD_PNG } from "./fixtures/image-generation.js";
+import { GOLD_PNG, imageItem } from "./fixtures/image-generation.js";
 
 /**
  * STAGE 4 (C-21): the pictures a Codex turn made post themselves, FIRST in the
@@ -327,6 +331,38 @@ describe("a picture Codex made posts itself at the end of the turn", () => {
     expect(reply.sendImageBytes).not.toHaveBeenCalled();
     expect(reply.sendText.mock.calls).toEqual([[NOT_SHOWN_TRIED], ["Done."]]);
     expect(reply.sendText.mock.calls[0]![0]).not.toMatch(/\bmade\b/);
+  });
+
+  it("says Codex MADE a picture when a result came back but could not be drawn, never tried", async () => {
+    // Round 5. Both items came back with a non empty result and no saved
+    // copy: one is not a picture, one is over the image cap. The runtime
+    // handed something over, so Codex made it; "tried" would be false. Both
+    // are collected by the real code, so the fact survives the base64 being
+    // dropped. One line, because the two lines are the same line.
+    const notPicture = collectGeneratedImage(
+      imageItem({
+        id: "ig_not_picture",
+        result: Buffer.from("hello there").toString("base64"),
+        savedPath: null,
+      }),
+    )!;
+    const overCap = collectGeneratedImage(
+      imageItem({
+        id: "ig_over_cap",
+        result: Buffer.concat([GOLD_PNG, Buffer.alloc(IMAGE_BYTES_MAX)]).toString(
+          "base64",
+        ),
+        savedPath: null,
+      }),
+    )!;
+    const { adapter, reply } = fixture(async () =>
+      done({ replyText: "Done.", images: [notPicture, overCap] }),
+    );
+    await adapter.executeAndReply(10, 20, "Draw", reply);
+    expect(reply.sendImageBytes).not.toHaveBeenCalled();
+    expect(reply.sendText.mock.calls).toEqual([[NOT_SHOWN_MADE], ["Done."]]);
+    for (const [line] of reply.sendText.mock.calls)
+      expect(line).not.toMatch(/\btried\b/);
   });
 
   it("counts a picture the outbox took as posted: it will land, so no line", async () => {

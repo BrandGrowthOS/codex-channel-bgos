@@ -113,6 +113,51 @@ describe("collectGeneratedImage", () => {
   it("collects nothing from an item with no id, because it cannot be deduped", () => {
     expect(collectGeneratedImage(imageItem({ id: undefined }))).toBeNull();
   });
+
+  /**
+   * Round 5. A `result` that came back but will not decode (not a picture, or
+   * over the image cap) is still the runtime handing something over: Codex
+   * MADE it, this daemon just cannot draw it. Dropping that fact with the
+   * base64 turned those into "Codex tried to make a picture", which is false.
+   * So the collected image records that something came back, and never the
+   * string itself.
+   */
+  it("records that the runtime returned something, when the result is not a picture", () => {
+    const image = collectGeneratedImage(
+      imageItem({
+        result: Buffer.from("hello there").toString("base64"),
+        savedPath: null,
+      }),
+    )!;
+    expect(image.bytes).toBeUndefined();
+    expect(image.savedPath).toBeUndefined();
+    expect(image.returnedOutput).toBe(true);
+    expect(JSON.stringify(Object.keys(image))).not.toContain("result");
+  });
+
+  it("records that the runtime returned something, when the picture is over the cap", () => {
+    const tooBig = Buffer.concat([GOLD_PNG, Buffer.alloc(IMAGE_BYTES_MAX)]);
+    const image = collectGeneratedImage(
+      imageItem({ result: tooBig.toString("base64"), savedPath: null }),
+    )!;
+    expect(image.bytes).toBeUndefined();
+    expect(image.returnedOutput).toBe(true);
+  });
+
+  it("records it for a picture that decoded too", () => {
+    expect(collectGeneratedImage(imageItem())!.returnedOutput).toBe(true);
+  });
+
+  it.each([
+    ["an empty result", ""],
+    ["a result of only spaces", "  \n "],
+    ["no result at all", undefined],
+    ["a result that is not a string", 42],
+  ])("records nothing returned for %s", (_label, result) => {
+    const image = collectGeneratedImage(imageItem({ result, savedPath: null }))!;
+    expect(image.bytes).toBeUndefined();
+    expect(image.returnedOutput).toBeUndefined();
+  });
 });
 
 describe("imageCaption", () => {
@@ -246,10 +291,43 @@ describe("imageNotShownLine", () => {
     expect(line).not.toMatch(/\bmade\b/);
   });
 
+  it("says made when the runtime returned something it could not decode", () => {
+    expect(imageNotShownLine({ returnedOutput: true }, { home: HOME })).toBe(
+      "Codex made a picture, but it could not be shown here.",
+    );
+  });
+
+  // Round 5, end to end through collection: both items came back with a non
+  // empty result and no saved copy. Codex made them; it never only tried.
+  it.each([
+    ["a result that is not a picture", () => Buffer.from("hello there").toString("base64")],
+    [
+      "a picture over the image cap",
+      () => Buffer.concat([GOLD_PNG, Buffer.alloc(IMAGE_BYTES_MAX)]).toString("base64"),
+    ],
+  ])("says made, never tried, for %s with no saved file", (_label, result) => {
+    const image = collectGeneratedImage(
+      imageItem({ result: result(), savedPath: null }),
+    )!;
+    const line = imageNotShownLine(image, { home: HOME });
+    expect(line).toBe("Codex made a picture, but it could not be shown here.");
+    expect(line).not.toMatch(/\btried\b/);
+  });
+
+  it("still says only tried for an empty or absent result with no saved file", () => {
+    for (const result of ["", undefined]) {
+      const image = collectGeneratedImage(imageItem({ result, savedPath: null }))!;
+      expect(imageNotShownLine(image, { home: HOME })).toBe(
+        "Codex tried to make a picture, but it could not be shown here.",
+      );
+    }
+  });
+
   it("carries no em dash and no en dash", () => {
     for (const line of [
       imageNotShownLine({ savedPath: SAVED }, { home: HOME }),
       imageNotShownLine({ bytes: GOLD_PNG }),
+      imageNotShownLine({ returnedOutput: true }),
       imageNotShownLine({}),
     ])
       expect(line).not.toMatch(/[\u2013\u2014]/);

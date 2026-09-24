@@ -1204,7 +1204,8 @@ export class CodexAdapter {
    * finding 3): one with no bytes the app can draw, or one whose upload
    * failed after its retries. `imageNotShownLine` picks the words (re-review
    * item 2): "made" and where it is saved when the runtime saved a copy,
-   * "made" alone when only the bytes came back, and "tried" when neither did.
+   * "made" alone when only the bytes came back or a non empty result came
+   * back that could not be drawn (Round 5), and "tried" when none of that did.
    * Each distinct line posts once per turn, so two pictures saved at one
    * place read as one line and two saved at two places name both.
    * The runtime has already told the model the picture is "displayed to the
