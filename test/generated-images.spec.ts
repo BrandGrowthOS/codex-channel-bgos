@@ -1,0 +1,202 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  IMAGE_BYTES_MAX,
+  IMAGE_CAPTION_PROMPT_MAX,
+  collectGeneratedImage,
+  decodeImageResult,
+  imageCaption,
+  imageFailureLine,
+} from "../src/generated-images.js";
+import { GOLD_PNG, imageItem } from "./fixtures/image-generation.js";
+
+/**
+ * Stage 4 (C-21): the pure half of a picture Codex made. Decoding happens at
+ * COLLECTION time, so a turn holds a Buffer and never the base64 string (a
+ * 1.9 MB PNG is about 2.6 MB of base64, held until the turn ends otherwise).
+ */
+describe("decodeImageResult", () => {
+  it("decodes bare base64 and names the picture from its own bytes", () => {
+    const decoded = decodeImageResult(GOLD_PNG.toString("base64"));
+    expect(decoded?.bytes.equals(GOLD_PNG)).toBe(true);
+    expect(decoded?.mimeType).toBe("image/png");
+  });
+
+  it("accepts a data: URI too, because the probe could not say which one arrives", () => {
+    const decoded = decodeImageResult(
+      `data:image/png;base64,${GOLD_PNG.toString("base64")}`,
+    );
+    expect(decoded?.bytes.equals(GOLD_PNG)).toBe(true);
+    expect(decoded?.mimeType).toBe("image/png");
+  });
+
+  it("trusts the bytes over a data: URI's label", () => {
+    const decoded = decodeImageResult(
+      `data:image/jpeg;base64,${GOLD_PNG.toString("base64")}`,
+    );
+    expect(decoded?.mimeType).toBe("image/png");
+  });
+
+  it("refuses a real picture over the 10 MB image cap", () => {
+    expect(IMAGE_BYTES_MAX).toBe(10 * 1024 * 1024);
+    // A PNG header in front, so only the cap can refuse it: without the cap
+    // this decodes and sniffs as a perfectly good picture.
+    const tooBig = Buffer.concat([GOLD_PNG, Buffer.alloc(IMAGE_BYTES_MAX)]);
+    expect(decodeImageResult(tooBig.toString("base64"))).toBeNull();
+    const fits = Buffer.concat([GOLD_PNG, Buffer.alloc(1024)]);
+    expect(decodeImageResult(fits.toString("base64"))?.bytes.length).toBe(
+      fits.length,
+    );
+  });
+
+  it.each([
+    ["an empty string", ""],
+    ["no string at all", undefined],
+    ["bytes that are not a picture", Buffer.from("hello there").toString("base64")],
+    // Its payload IS valid base64 of a real PNG, so only the ;base64 check
+    // refuses it: a data: URI without it is percent encoded text.
+    ["a data: URI that is not base64", `data:image/png,${GOLD_PNG.toString("base64")}`],
+  ])("returns null for %s", (_label, raw) => {
+    expect(decodeImageResult(raw)).toBeNull();
+  });
+});
+
+describe("collectGeneratedImage", () => {
+  it("keeps the bytes, the prompt and the saved path, and drops the base64", () => {
+    const image = collectGeneratedImage(imageItem())!;
+    expect(image.itemId).toBe("ig_01a0d1ba2874");
+    expect(image.bytes?.equals(GOLD_PNG)).toBe(true);
+    expect(image.mimeType).toBe("image/png");
+    expect(image.fileName).toMatch(/^codex-image-[A-Za-z0-9_]+\.png$/);
+    expect(image.revisedPrompt).toBe(
+      "A plain gold circle centred on a dark charcoal background",
+    );
+    expect(image.savedPath).toMatch(/generated_images/);
+    expect(image).not.toHaveProperty("result");
+    expect(JSON.stringify(Object.keys(image))).not.toContain("result");
+  });
+
+  it("carries a refused picture with its failure and no bytes", () => {
+    const image = collectGeneratedImage(
+      imageItem({
+        result: "",
+        failure: {
+          type: "usageLimitExceeded",
+          limitId: "image_generation",
+          resetsAt: 1790240000,
+        },
+      }),
+    )!;
+    expect(image.failure).toEqual({
+      type: "usageLimitExceeded",
+      limitId: "image_generation",
+      resetsAt: 1790240000,
+    });
+    expect(image.bytes).toBeUndefined();
+  });
+
+  it("keeps a picture whose save failed, because the bytes are what posts", () => {
+    const image = collectGeneratedImage(imageItem({ savedPath: null }))!;
+    expect(image.bytes?.equals(GOLD_PNG)).toBe(true);
+    expect(image.savedPath).toBeUndefined();
+  });
+
+  it("does not assume an ig_ style id: a code mode exec- id collects the same", () => {
+    const image = collectGeneratedImage(
+      imageItem({ id: "exec-01a0d1ba-2874-7e50-8e8d-e67f1b3b4fd6" }),
+    )!;
+    expect(image.itemId).toBe("exec-01a0d1ba-2874-7e50-8e8d-e67f1b3b4fd6");
+    expect(image.bytes?.equals(GOLD_PNG)).toBe(true);
+  });
+
+  it("collects nothing from an item with no id, because it cannot be deduped", () => {
+    expect(collectGeneratedImage(imageItem({ id: undefined }))).toBeNull();
+  });
+});
+
+describe("imageCaption", () => {
+  it("says Prompt: and the revised prompt", () => {
+    expect(imageCaption("A plain gold circle")).toBe(
+      "Prompt: A plain gold circle",
+    );
+  });
+
+  it("has no caption without a revised prompt", () => {
+    expect(imageCaption(undefined)).toBeUndefined();
+    expect(imageCaption(null)).toBeUndefined();
+    expect(imageCaption("   ")).toBeUndefined();
+  });
+
+  it("turns every em and en dash in the model's prompt into a comma", () => {
+    const caption = imageCaption(
+      "A gold circle \u2014 centred \u2013 on dark slate\u2014softly lit",
+    )!;
+    expect(caption).toBe("Prompt: A gold circle, centred, on dark slate, softly lit");
+    expect(caption).not.toMatch(/[\u2013\u2014]/);
+  });
+
+  it("never leaves a comma dangling where a dash opened or closed the prompt", () => {
+    expect(imageCaption("\u2014 a gold circle \u2014")).toBe(
+      "Prompt: a gold circle",
+    );
+  });
+
+  it("clips a long prompt on a word boundary and marks the cut", () => {
+    const words = Array.from({ length: 120 }, (_, i) => `word${i}`).join(" ");
+    const caption = imageCaption(words)!;
+    const body = caption.slice("Prompt: ".length);
+    expect(body.length).toBeLessThanOrEqual(IMAGE_CAPTION_PROMPT_MAX);
+    expect(body.endsWith("\u2026")).toBe(true);
+    // The cut lands between two words, never inside one.
+    const kept = body.slice(0, -1).split(" ");
+    expect(words.split(" ").slice(0, kept.length)).toEqual(kept);
+  });
+
+  it("folds the prompt onto one line", () => {
+    expect(imageCaption("gold\n\ncircle\ton  slate")).toBe(
+      "Prompt: gold circle on slate",
+    );
+  });
+});
+
+describe("imageFailureLine", () => {
+  it("says the limit is used up and names the reset time, in UTC", () => {
+    const line = imageFailureLine({
+      type: "usageLimitExceeded",
+      limitId: "image_generation",
+      resetsAt: 1790240000,
+    });
+    expect(line).toBe(
+      "Codex could not make a picture because the image generation limit is used up. It resets 2026-09-24 08:53 UTC.",
+    );
+  });
+
+  it("reads a reset time given in milliseconds the same way", () => {
+    expect(
+      imageFailureLine({ type: "usageLimitExceeded", resetsAt: 1790240000000 }),
+    ).toContain("It resets 2026-09-24 08:53 UTC.");
+  });
+
+  it("names no time when the runtime gave none", () => {
+    expect(
+      imageFailureLine({ type: "usageLimitExceeded", resetsAt: null }),
+    ).toBe(
+      "Codex could not make a picture because the image generation limit is used up.",
+    );
+  });
+
+  it("says something plain about a failure kind this build does not know", () => {
+    expect(imageFailureLine({ type: "somethingNew" })).toBe(
+      "Codex could not make a picture.",
+    );
+  });
+
+  it("carries no em dash and no en dash in any line", () => {
+    for (const line of [
+      imageFailureLine({ type: "usageLimitExceeded", resetsAt: 1790240000 }),
+      imageFailureLine({ type: "usageLimitExceeded" }),
+      imageFailureLine({ type: "x" }),
+    ])
+      expect(line).not.toMatch(/[\u2013\u2014]/);
+  });
+});

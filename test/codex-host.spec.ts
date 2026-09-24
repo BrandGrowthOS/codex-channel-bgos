@@ -13,6 +13,13 @@ import {
   type RunTurnResult,
 } from "../src/codex-host.js";
 import { verifyModel } from "../src/setup/verify-model.js";
+import {
+  GOLD_PNG,
+  imageItem,
+  itemCompleted,
+  itemStarted,
+  probe401Turn,
+} from "./fixtures/image-generation.js";
 
 class Server extends EventEmitter {
   onRequest: any;
@@ -1498,5 +1505,212 @@ describe("a child agent's name and its last look at the turn's end", () => {
     });
     // Nothing was left working, so the card closes the way it always has.
     expect((await settled).helpersStillRunning).toBeUndefined();
+  });
+});
+
+/**
+ * STAGE 4 (C-21): a picture the runtime's image generation tool finished is
+ * KEPT on the turn and handed back on the result, never posted from inside
+ * the notification loop. A standard post mid turn marks a Codex agent done for
+ * the rest of the turn (gap 04), so the adapter posts it at the end instead.
+ *
+ * The item fixtures are the schema's (the live probe could not make a
+ * picture, see test/fixtures/image-generation.ts); the envelopes and the
+ * failed turn are the probe's own.
+ *
+ * MUTATION PROOFS, recorded in docs/reports/2026-09-24-p5-s4-image-posts:
+ *  - collecting on `item/started` too turns the started only case red;
+ *  - a `return` after the collection (copying the plan branch) turns the row
+ *    case red, because the row is never built;
+ *  - dropping the seed in execute() turns the adopted hand over red;
+ *  - leaving `images` out of result() turns every result case red.
+ */
+describe("pictures a turn made", () => {
+  let home: string, server: Server, host: CodexHost;
+  let adopted: number[];
+  let delivered: RunTurnResult[];
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "hoai-images-"));
+    vi.stubEnv("CODEX_BGOS_HOME", home);
+    adopted = [];
+    delivered = [];
+    server = new Server();
+    host = new CodexHost({
+      auth: { ok: true, mode: "chatgpt", label: "test" },
+      workdir: home,
+      server: server as any,
+      onAdoptedTurn: (chatId) => {
+        adopted.push(chatId);
+        return {
+          callbacks: {},
+          deliver: (result) => {
+            delivered.push(result);
+          },
+        };
+      },
+    });
+  });
+  afterEach(() => {
+    host.close();
+    vi.unstubAllEnvs();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("keeps a finished picture on the result once, however often it completes", async () => {
+    const task = host.runTurn(1, "draw a gold circle");
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.emit(
+      "notification",
+      "item/started",
+      itemStarted(imageItem({ status: "inProgress", result: "" }), "thread-1"),
+    );
+    server.emit("notification", "item/completed", itemCompleted(imageItem(), "thread-1"));
+    // The same item completing twice (a replay, a second notification) is
+    // still one picture: the turn keys them on the item id.
+    server.emit("notification", "item/completed", itemCompleted(imageItem(), "thread-1"));
+    server.finish("thread-1", "Here is the gold circle.");
+    const result = await task;
+    expect(result.replyText).toBe("Here is the gold circle.");
+    expect(result.images).toHaveLength(1);
+    const [image] = result.images!;
+    expect(image!.bytes!.equals(GOLD_PNG)).toBe(true);
+    expect(image).toMatchObject({
+      itemId: "ig_01a0d1ba2874",
+      mimeType: "image/png",
+      revisedPrompt: "A plain gold circle centred on a dark charcoal background",
+    });
+    expect(image).not.toHaveProperty("result");
+  });
+
+  it("adds nothing on item/started alone, even when the runtime fills the result early", async () => {
+    const task = host.runTurn(1, "draw");
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.emit("notification", "item/started", itemStarted(imageItem(), "thread-1"));
+    server.finish("thread-1", "Still drawing.");
+    expect((await task).images ?? []).toHaveLength(0);
+  });
+
+  it("carries a refused picture with its failure, and no bytes", async () => {
+    const failure = {
+      type: "usageLimitExceeded",
+      limitId: "image_generation",
+      resetsAt: 1790240000,
+    };
+    const task = host.runTurn(1, "draw");
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.emit(
+      "notification",
+      "item/completed",
+      itemCompleted(imageItem({ result: "", failure, savedPath: null }), "thread-1"),
+    );
+    server.finish("thread-1", "");
+    const [image] = (await task).images!;
+    expect(image!.failure).toEqual(failure);
+    expect(image!.bytes).toBeUndefined();
+  });
+
+  it("keeps two pictures in the order they finished", async () => {
+    const task = host.runTurn(1, "draw two");
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.emit(
+      "notification",
+      "item/completed",
+      itemCompleted(imageItem({ id: "exec-2", revisedPrompt: "second" }), "thread-1"),
+    );
+    server.emit(
+      "notification",
+      "item/completed",
+      itemCompleted(imageItem({ id: "exec-1", revisedPrompt: "first" }), "thread-1"),
+    );
+    server.finish("thread-1", "Two.");
+    expect((await task).images!.map((i) => i.itemId)).toEqual(["exec-2", "exec-1"]);
+  });
+
+  it("still draws the image row on both phases, named from savedPath", async () => {
+    const cards: Array<{ itemId: string; card: any }> = [];
+    const task = host.runTurn(1, "draw", {
+      onTool: (card, itemId) => {
+        cards.push({ itemId, card });
+      },
+    });
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.emit(
+      "notification",
+      "item/started",
+      itemStarted(imageItem({ status: "inProgress", result: "" }), "thread-1"),
+    );
+    server.emit("notification", "item/completed", itemCompleted(imageItem(), "thread-1"));
+    server.emit(
+      "notification",
+      "item/completed",
+      itemCompleted(
+        imageItem({
+          id: "ig_refused",
+          result: "",
+          savedPath: null,
+          failure: { type: "usageLimitExceeded", limitId: "image_generation" },
+        }),
+        "thread-1",
+      ),
+    );
+    server.finish("thread-1", "Done.");
+    await task;
+    expect(cards.map((c) => [c.itemId, c.card.name, c.card.status])).toEqual([
+      ["ig_01a0d1ba2874", "image_generation", "running"],
+      ["ig_01a0d1ba2874", "image_generation", "done"],
+      ["ig_refused", "image_generation", "error"],
+    ]);
+    expect(cards[1]!.card.path).toMatch(/ig_01a0d1ba2874\.png$/);
+    // The base64 never rides a row.
+    expect(JSON.stringify(cards)).not.toContain(GOLD_PNG.toString("base64").slice(0, 40));
+  });
+
+  it("hands the watchdog's result the pictures finished before it fired", async () => {
+    const task = host.runDetached(1, "draw", {}, false, 300);
+    await vi.waitFor(() =>
+      expect(server.request.mock.calls.some((c) => c[0] === "turn/start")).toBe(true),
+    );
+    server.emit("notification", "item/completed", itemCompleted(imageItem(), "thread-1"));
+    const result = await task;
+    expect(result.error).toMatch(/timed out/);
+    expect(result.images).toHaveLength(1);
+  });
+
+  it("carries a picture through a turn that then failed, on the probe's own 401 shape", async () => {
+    const task = host.runTurn(1, "draw");
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.emit("notification", "item/completed", itemCompleted(imageItem(), "thread-1"));
+    server.emit("notification", "turn/completed", probe401Turn("thread-1"));
+    const result = await task;
+    expect(result.error).toBe(
+      "Codex needs you to sign in again. Reconnect this agent in HOAI, then retry.",
+    );
+    expect(result.images).toHaveLength(1);
+  });
+
+  it("hands the pictures an adopted turn finished to the owner turn that takes its thread", async () => {
+    const first = host.runTurn(20, "hello");
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.finish("thread-1", "hi");
+    await first;
+    server.emit("notification", "turn/started", {
+      threadId: "thread-1",
+      turn: { id: "turn-continuation", status: "inProgress" },
+    });
+    expect(adopted).toEqual([20]);
+    server.emit("notification", "item/completed", itemCompleted(imageItem(), "thread-1"));
+
+    // The owner asks something while the continuation runs: the owner's turn
+    // takes the thread and the adopted turn is released without delivering.
+    const owner = host.runTurn(20, "and make it bigger");
+    await vi.waitFor(() =>
+      expect(
+        server.request.mock.calls.filter((c) => c[0] === "turn/start").length,
+      ).toBe(2),
+    );
+    server.finish("thread-1", "Here it is.");
+    const result = await owner;
+    expect(result.images?.map((i) => i.itemId)).toEqual(["ig_01a0d1ba2874"]);
+    expect(delivered).toHaveLength(0);
   });
 });

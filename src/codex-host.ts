@@ -52,6 +52,7 @@ import {
   planModeOn,
   planWaitEnforced,
 } from "./plan-mode.js";
+import { collectGeneratedImage } from "./generated-images.js";
 
 export interface DynamicTool {
   type: "function";
@@ -147,6 +148,40 @@ export interface PlanProposalSignal {
   /** The plan, as markdown. Already finalized; never a partial. */
   text: string;
 }
+/**
+ * Why the runtime refused a picture. The 0.154.0 schema has one variant,
+ * `usageLimitExceeded {limitId, resetsAt}`; anything else is kept by its type
+ * so the adapter can still say something plain.
+ */
+export interface GeneratedImageFailure {
+  type: string;
+  limitId?: string;
+  /** Epoch seconds on this protocol. Absent when the runtime gave none. */
+  resetsAt?: number;
+}
+/**
+ * A picture the runtime's image generation tool finished this turn, as the
+ * turn keeps it (stage 4, C-21). Decoded when its `imageGeneration` item
+ * completes (generated-images.ts), so a turn holds the BYTES and never the
+ * base64 string, and posted by the adapter when the turn finishes, first in
+ * the reply. Never mid turn: a standard post mid turn marks a Codex agent
+ * done for the whole rest of the turn (gap 04).
+ */
+export interface GeneratedImage {
+  itemId: string;
+  /** The picture, capped at the 10 MB image limit. Absent when there is
+   *  nothing to post: a refusal, an empty result, or bytes that are not an
+   *  image. */
+  bytes?: Buffer;
+  mimeType?: string;
+  fileName?: string;
+  /** The prompt the image model actually used, for the caption. */
+  revisedPrompt?: string;
+  /** Where the runtime saved its own copy, when the save worked. Only ever
+   *  compared against `MEDIA:` lines and shown on the row; never read. */
+  savedPath?: string;
+  failure?: GeneratedImageFailure;
+}
 export interface RunTurnCallbacks {
   signal?: AbortSignal;
   onTool?: (card: ActivityCard, id: string) => void | Promise<void>;
@@ -206,6 +241,14 @@ export interface RunTurnResult {
    * out of the way. Absent and false both mean no plan item was seen.
    */
   sawPlanProposal?: boolean;
+  /**
+   * The pictures this turn made, in the order their items completed, one per
+   * item id. Filled by `result()`, the one constructor every outcome goes
+   * through, so a failed turn, a stopped turn and the watchdog's result all
+   * carry the pictures that finished first. Optional so a hand built result
+   * compiles; absent means none.
+   */
+  images?: GeneratedImage[];
 }
 interface ActiveTurn {
   id?: string;
@@ -261,6 +304,14 @@ interface ActiveTurn {
    */
   childBaseName: Map<string, string>;
   /**
+   * The pictures this turn finished, keyed on the item id, which is the
+   * dedupe: a second `item/completed` for the same picture is still one
+   * picture. REQUIRED, not optional, so the compiler makes BOTH constructors
+   * (`execute` and `adoptTurn`) start one; the second constructor is the one
+   * that gets forgotten.
+   */
+  images: Map<string, GeneratedImage>;
+  /**
    * The runtime already handed this turn a finished `plan` item, so the
    * adapter's `<proposed_plan>` fallback must not post a second card. Read on
    * the result, never inside the notification loop.
@@ -278,7 +329,9 @@ interface ActiveTurn {
    * Present only on an ADOPTED turn: drop its bookkeeping without delivering
    * anything. A turn the owner asks for takes the same thread key (the app
    * server steers a running turn rather than starting a second one), and the
-   * outcome then belongs to the turn that replaced it.
+   * outcome then belongs to the turn that replaced it. That includes the
+   * pictures it already finished: `execute` copies `images` across before it
+   * calls this, because nothing else would ever post them.
    */
   release?: () => void;
 }
@@ -1333,6 +1386,7 @@ export class CodexHost {
         childFirstSeen: new Map(),
         childState: new Map(),
         childBaseName: new Map(),
+        images: new Map(),
         parkWatchdog,
         resumeWatchdog,
         finish: (result) => {
@@ -1360,7 +1414,16 @@ export class CodexHost {
       // A continuation turn this process adopted holds the same thread key.
       // Drop its bookkeeping before taking the thread, or its tick outlives
       // it and its result is delivered for work this turn now owns.
-      this.active.get(id)?.release?.();
+      //
+      // The pictures it already finished come across first. The release
+      // delivers nothing, and the app server steers the same runtime turn, so
+      // this turn's result is the only place those pictures can still reach
+      // the chat: they exist and the quota is spent.
+      const prior = this.active.get(id);
+      if (prior?.release)
+        for (const [itemId, image] of prior.images)
+          turn.images.set(itemId, image);
+      prior?.release?.();
       this.active.set(id, turn);
       void this.server
         .request(
@@ -1409,6 +1472,7 @@ export class CodexHost {
       turnCompleted: completed,
       error,
       ...(turn.sawPlanProposal ? { sawPlanProposal: true } : {}),
+      ...(turn.images.size > 0 ? { images: [...turn.images.values()] } : {}),
       ...turnClock(reported),
     };
   }
@@ -1554,6 +1618,25 @@ export class CodexHost {
           );
         }
         return;
+      }
+      // A PICTURE THE MODEL MADE, kept for the end of the turn (stage 4,
+      // C-21). On `item/completed` only: `item/started` opens the row and
+      // carries no finished picture. Decoded now and the base64 dropped, so
+      // the turn holds bytes and not a string a third bigger. Keyed on the
+      // item id, which is the dedupe.
+      //
+      // It FALLS THROUGH, unlike the plan branch above: this item is still a
+      // tool row, and the row below must be built on both phases. Never posted
+      // from here: a standard post mid turn marks a Codex agent done for the
+      // rest of the turn (gap 04), so the adapter posts it with the reply.
+      if (
+        !started &&
+        item.type === "imageGeneration" &&
+        itemKey &&
+        !turn.images.has(itemKey)
+      ) {
+        const image = collectGeneratedImage(item);
+        if (image) turn.images.set(itemKey, image);
       }
       if (started && itemKey && typeof params.startedAtMs === "number")
         turn.rowStartedAt.set(itemKey, params.startedAtMs);
@@ -1996,6 +2079,7 @@ export class CodexHost {
       childFirstSeen: new Map(),
       childState: new Map(),
       childBaseName: new Map(),
+      images: new Map(),
       finish: (result) => {
         if (!forget()) return;
         void Promise.allSettled(turn.pending)
