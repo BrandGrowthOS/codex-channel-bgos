@@ -93,10 +93,33 @@ describe("DECLARED_CAPABILITIES", () => {
     expect(lane).toContain("active.pausedReason === STOP_PAUSE_REASON");
   });
 
-  it("does NOT declare sessions_library yet: this daemon does not answer the Sessions ops in this item", () => {
-    // Wave E of the same release answers list_sessions, resume_session and
-    // rename_session and flips this, deliberately. Declared before then, the
-    // app would show a Sessions circle whose every request times out.
-    expect(DECLARED_CAPABILITIES).not.toContain(SESSIONS_LIBRARY);
+  it("declares sessions_library, spelled by the contract file, because this daemon answers the Sessions ops", () => {
+    // FLIPPED in P6 stage 3 Wave E (item 28), deliberately: until item 27
+    // this daemon did not answer list_sessions, resume_session or
+    // rename_session, and this test said it must not declare the token.
+    // BGOS shows the Sessions circle, and forwards a Sessions request, only
+    // for a pairing that declares it.
+    expect(SESSIONS_LIBRARY).toBe("sessions_library");
+    expect(DECLARED_CAPABILITIES).toContain(SESSIONS_LIBRARY);
+    expect(DECLARED_CAPABILITIES.filter((t) => t === SESSIONS_LIBRARY)).toHaveLength(1);
+  });
+
+  it("declares sessions_library only beside the code that answers the three ops", () => {
+    // The token and the answers travel together: a declared token with an
+    // op the normalizer drops would be a Sessions circle whose every request
+    // times out. sessions-ops.spec.ts holds the behaviour, this the tie.
+    const read = (file: string) =>
+      readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8");
+    const rpc = read("voice-rpc.ts");
+    const adapter = read("adapter.ts");
+    const host = read("codex-host.ts");
+    for (const op of ["LIST_SESSIONS", "RESUME_SESSION", "RENAME_SESSION"]) {
+      expect(rpc).toContain(`r.op === ${op}`);
+      expect(adapter).toContain(`frame.op === ${op}`);
+    }
+    expect(adapter).toContain("this.host.listSavedThreads(");
+    expect(adapter).toContain("this.host.resumeSavedThread(");
+    expect(adapter).toContain("this.host.renameThread(");
+    expect(host).toContain('this.server.request("thread/name/set"');
   });
 });
