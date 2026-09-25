@@ -47,6 +47,12 @@ import {
   type SessionSettings,
   type CodexModel,
 } from "./session-settings.js";
+import {
+  SESSION_BRANCH_MAX,
+  SESSION_PREVIEW_MAX,
+  type SessionAbilities,
+  type SessionErrorCode,
+} from "./session-controls-contract.js";
 
 export interface DynamicTool {
   type: "function";
@@ -323,13 +329,22 @@ export function friendlyCodexError(error: unknown): string {
   return raw.slice(0, 1200);
 }
 
+/**
+ * What an owner message looks like once the routing envelope is off. The
+ * envelope carries internal ids (the sender's user id among them), so it
+ * never reaches a title, a preview or a search.
+ */
+function withoutEnvelope(text: string): string {
+  if (!/^HOAI event:/i.test(text)) return text;
+  const marker = /\nMessage:\s*\n/.exec(text);
+  return marker ? text.slice(marker.index + marker[0].length) : "";
+}
+
 /** Native previews can start with our routing envelope, which is not a title. */
 export function conversationLabel(thread: RpcObject): string {
-  let label = String(thread.name || thread.preview || "").trim();
-  if (/^HOAI event:/i.test(label)) {
-    const marker = /\nMessage:\s*\n/.exec(label);
-    label = marker ? label.slice(marker.index + marker[0].length) : "";
-  }
+  const label = withoutEnvelope(
+    String(thread.name || thread.preview || "").trim(),
+  );
   if (label) return label.replace(/\s+/g, " ").slice(0, 120);
   const timestamp = Number(thread.createdAt);
   const date = new Date(timestamp * 1000);
@@ -338,6 +353,87 @@ export function conversationLabel(thread: RpcObject): string {
     !Number.isNaN(date.getTime())
     ? `Conversation · ${date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`
     : "Saved conversation";
+}
+
+/**
+ * The one line under a saved thread's title in the Sessions sheet: the
+ * thread's first message, envelope stripped. Only for a thread with its own
+ * name: an unnamed thread's title IS that message (conversationLabel), and
+ * the same words twice on one row say nothing.
+ */
+export function conversationPreview(thread: RpcObject): string | null {
+  if (!thread.name) return null;
+  const text = withoutEnvelope(String(thread.preview ?? "").trim())
+    .replace(/\s+/g, " ")
+    .trim();
+  return text ? text.slice(0, SESSION_PREVIEW_MAX) : null;
+}
+
+/** Unix seconds as the runtime records them, as ISO 8601, or null. */
+function isoFromSeconds(value: unknown): string | null {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  const date = new Date(seconds * 1000);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+/** Case and accent insensitive, so "cafe" finds "Café". */
+function foldForSearch(text: string): string {
+  return text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
+}
+
+/** The most saved threads one list shows: the set /resume has always offered. */
+export const SAVED_THREADS_MAX = 30;
+
+/**
+ * A search reads at most this many of the chat's newest threads, one
+ * thread/read each, so a chat that has used /new for months still answers
+ * inside the backend's list timeout. Past it the answer says truncated.
+ */
+export const SAVED_THREADS_SEARCH_MAX = 200;
+
+/** One thread this HOAI chat has used, as the Sessions sheet and /resume read it. */
+export interface SavedThread {
+  id: string;
+  /** conversationLabel: its own name, else its first message, else a dated fallback. */
+  name: string;
+  /** conversationPreview: the first message, only under a thread's own name. */
+  preview: string | null;
+  /** ISO 8601 from the runtime's updatedAt, else createdAt, else null. */
+  lastActivityAt: string | null;
+  /** The git branch the runtime recorded for the thread, when it recorded one. */
+  branch: string | null;
+  /** The thread this chat is bound to right now. */
+  current: boolean;
+}
+
+/**
+ * A control the host refused, with the contract's refusal code (P6 stage 3).
+ * The message is the sentence the owner has always read for it, so the
+ * native commands that show it are unchanged; the Sessions ops read the code.
+ */
+export class ControlRefusal extends Error {
+  constructor(
+    readonly code: SessionErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ControlRefusal";
+  }
+}
+
+/**
+ * Did the runtime answer that it does not know this method? The app-server
+ * keeps only the error's message. Codex 0.154.0 says "Invalid request:
+ * unknown variant `<method>`, expected one of ..." (probe recorded in the
+ * stage 3 evidence); "method not found" is the plain JSON-RPC wording.
+ */
+function isUnknownMethod(error: unknown, method: string): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return (
+    message.includes(`unknown variant \`${method}\``) ||
+    /method not found/i.test(message)
+  );
 }
 
 export class CodexHost {
@@ -380,6 +476,12 @@ export class CodexHost {
    * the state arrived, never after a network read.
    */
   private readonly childNameKnown = new Map<string, string>();
+  /**
+   * thread/name/set works on this runtime, until it answers that it does not
+   * know the method. Then false for the life of the process (D19): the app
+   * hides Rename rather than offer a control that always fails.
+   */
+  private renameAvailable = true;
   constructor(private opts: CodexHostOptions) {
     this.authMode = opts.auth.mode;
     this.workdir = resolve(
@@ -597,7 +699,8 @@ export class CodexHost {
   ): Promise<T> {
     if (this.isBusy(chatId))
       return Promise.reject(
-        new Error(
+        new ControlRefusal(
+          "busy",
           "Stop the current response before changing this conversation.",
         ),
       );
@@ -652,40 +755,127 @@ export class CodexHost {
     const previous = loadThreadMap(file);
     setThreadId(file, previous, `${chatId}:${threadId}`, threadId);
   }
-  async savedThreads(
-    chatId: number,
-  ): Promise<Array<{ id: string; name: string }>> {
-    await this.server.start();
+  /**
+   * Every thread this HOAI chat has used, newest first: the live one, then
+   * the saved ones (previous-threads.json, keyed `${chatId}:`) from the last
+   * left. Never another chat's (D16): two chats on one native thread would
+   * interleave their turns on it. No thread is read here.
+   */
+  private chatThreadIds(chatId: number): string[] {
     const previous = loadThreadMap(
       join(dirnameOf(this.threadsFile), "previous-threads.json"),
     );
-    const ids = new Set(
-      Object.entries(previous)
-        .filter(([key]) => key.startsWith(`${chatId}:`))
-        .map(([, id]) => id),
-    );
-    if (this.map[String(chatId)]) ids.add(this.map[String(chatId)]);
-    const rows: Array<{ id: string; name: string }> = [];
-    for (const id of [...ids].slice(-30).reverse()) {
-      try {
-        const { thread } = await this.server.request("thread/read", {
-          threadId: id,
-          includeTurns: false,
-        });
-        rows.push({
-          id,
-          name: conversationLabel(thread),
-        });
-      } catch {
-        /* A deleted native session is no longer resumable. */
-      }
-    }
-    return rows;
+    const ids = new Set<string>();
+    const live = this.map[String(chatId)];
+    if (live) ids.add(live);
+    for (const id of Object.entries(previous)
+      .filter(([key]) => key.startsWith(`${chatId}:`))
+      .map(([, id]) => id)
+      .reverse())
+      ids.add(id);
+    return [...ids];
   }
-  async resumeSavedThread(chatId: number, threadId: string): Promise<void> {
+  /** The thread's metadata, or null when it is gone from disk. */
+  private async readThread(threadId: string): Promise<RpcObject | null> {
+    try {
+      const { thread } = await this.server.request("thread/read", {
+        threadId,
+        includeTurns: false,
+      });
+      return thread && typeof thread === "object" ? thread : null;
+    } catch {
+      /* A deleted native session is no longer resumable. */
+      return null;
+    }
+  }
+  private savedThreadRow(
+    chatId: number,
+    id: string,
+    thread: RpcObject,
+  ): SavedThread {
+    const branch =
+      typeof thread.gitInfo?.branch === "string"
+        ? thread.gitInfo.branch.trim().slice(0, SESSION_BRANCH_MAX)
+        : "";
+    return {
+      id,
+      name: conversationLabel(thread),
+      preview: conversationPreview(thread),
+      lastActivityAt:
+        isoFromSeconds(thread.updatedAt) ?? isoFromSeconds(thread.createdAt),
+      branch: branch || null,
+      current: this.map[String(chatId)] === id,
+    };
+  }
+  /**
+   * The chat's threads as the Sessions sheet lists them (spec 5.6): the
+   * latest SAVED_THREADS_MAX, or with a query the first SAVED_THREADS_MAX
+   * that match it on title or first message, searched BEFORE the cap so an
+   * older thread can still be found. `truncated` says the chat has more than
+   * the answer holds.
+   */
+  async listSavedThreads(
+    chatId: number,
+    query?: string,
+  ): Promise<{ threads: SavedThread[]; truncated: boolean }> {
+    await this.server.start();
+    const ids = this.chatThreadIds(chatId);
+    const needle = foldForSearch((query ?? "").trim());
+    const threads: SavedThread[] = [];
+    if (!needle) {
+      for (const id of ids.slice(0, SAVED_THREADS_MAX)) {
+        const thread = await this.readThread(id);
+        if (thread) threads.push(this.savedThreadRow(chatId, id, thread));
+      }
+      return { threads, truncated: ids.length > SAVED_THREADS_MAX };
+    }
+    for (const id of ids.slice(0, SAVED_THREADS_SEARCH_MAX)) {
+      const thread = await this.readThread(id);
+      if (!thread) continue;
+      const row = this.savedThreadRow(chatId, id, thread);
+      const text = `${row.name}\n${withoutEnvelope(String(thread.preview ?? "").trim())}`;
+      if (!foldForSearch(text).includes(needle)) continue;
+      // One match past the cap is enough to know the answer is cut.
+      if (threads.length === SAVED_THREADS_MAX)
+        return { threads, truncated: true };
+      threads.push(row);
+    }
+    return { threads, truncated: ids.length > SAVED_THREADS_SEARCH_MAX };
+  }
+  async savedThreads(chatId: number, query?: string): Promise<SavedThread[]> {
+    return (await this.listSavedThreads(chatId, query)).threads;
+  }
+  /**
+   * One thread, only when it is this chat's and still on disk. Any of the
+   * chat's threads, not only the latest 30: a search can list an older one,
+   * and "does not belong" would be untrue of it.
+   */
+  private async ownSavedThread(
+    chatId: number,
+    threadId: string,
+  ): Promise<{ row: SavedThread; thread: RpcObject } | null> {
+    await this.server.start();
+    if (!this.chatThreadIds(chatId).includes(threadId)) return null;
+    const thread = await this.readThread(threadId);
+    return thread
+      ? { row: this.savedThreadRow(chatId, threadId, thread), thread }
+      : null;
+  }
+  /** What the Sessions sheet may offer on this runtime (D19). */
+  sessionAbilities(): SessionAbilities {
+    return { resume: true, rename: this.renameAvailable };
+  }
+  async resumeSavedThread(
+    chatId: number,
+    threadId: string,
+  ): Promise<SavedThread> {
     return this.withIdleControl(chatId, async () => {
-      if (!(await this.savedThreads(chatId)).some((t) => t.id === threadId))
-        throw new Error("That conversation does not belong to this HOAI chat.");
+      const saved = await this.ownSavedThread(chatId, threadId);
+      if (!saved)
+        throw new ControlRefusal(
+          "not_found",
+          "That conversation does not belong to this HOAI chat.",
+        );
       const result = await this.server.request("thread/resume", {
         threadId,
         cwd: this.workdir,
@@ -697,7 +887,44 @@ export class CodexHost {
       setThreadId(this.threadsFile, this.map, chatId, threadId);
       // ensureThread still applies the existing tool-version migration check.
       this.loaded.delete(threadId);
+      return { ...saved.row, current: true };
     });
+  }
+  /**
+   * Give one of this chat's threads a new name, through the runtime's own
+   * `thread/name/set` ({threadId, name}, confirmed on Codex 0.154.0), so the
+   * Codex CLI's own list shows it too. A name is metadata, not the
+   * conversation, so this does not wait for the chat to be idle.
+   */
+  async renameThread(
+    chatId: number,
+    threadId: string,
+    name: string,
+  ): Promise<SavedThread> {
+    if (!this.renameAvailable)
+      throw new ControlRefusal(
+        "unsupported",
+        "Renaming is not available on this Codex runtime.",
+      );
+    const saved = await this.ownSavedThread(chatId, threadId);
+    if (!saved)
+      throw new ControlRefusal(
+        "not_found",
+        "That conversation does not belong to this HOAI chat.",
+      );
+    try {
+      await this.server.request("thread/name/set", { threadId, name });
+    } catch (error) {
+      if (isUnknownMethod(error, "thread/name/set")) {
+        this.renameAvailable = false;
+        throw new ControlRefusal(
+          "unsupported",
+          "Renaming is not available on this Codex runtime.",
+        );
+      }
+      throw new Error(friendlyCodexError(error));
+    }
+    return this.savedThreadRow(chatId, threadId, { ...saved.thread, name });
   }
   async forkThread(chatId: number): Promise<string> {
     return this.withIdleControl(chatId, async () => {

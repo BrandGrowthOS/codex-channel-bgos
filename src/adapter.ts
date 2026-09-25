@@ -25,7 +25,20 @@ import { ToolProgressOrchestrator } from "./tool-progress.js";
 import { MissionControlLane } from "./mission-control.js";
 import { MissionLane, type MissionTurnToken } from "./mission-lane.js";
 import { abortCauseOf, abortWith, missionAbortOutcome } from "./abort-cause.js";
-import { STOP_CONFIRMATION_HARD } from "./session-controls-contract.js";
+import {
+  LIST_SESSIONS,
+  RENAME_SESSION,
+  RESUME_SESSION,
+  SESSION_ID_PATTERN,
+  SESSION_QUERY_MAX,
+  SESSION_RENAME_MAX,
+  SESSIONS_LIST_MAX,
+  STOP_CONFIRMATION_HARD,
+  type ListSessionsAnswer,
+  type RenameSessionAnswer,
+  type ResumeSessionAnswer,
+  type SessionRow,
+} from "./session-controls-contract.js";
 import { GoalLane } from "./goal-lane.js";
 import { StepsLane, stepsChatKindAdmits } from "./steps-lane.js";
 import { MeetingLane } from "./meeting-lane.js";
@@ -48,7 +61,13 @@ import {
 } from "./inbound-handler.js";
 import { pendingUnknownStats } from "./pending-unknown-store.js";
 import { pickCapabilitiesText } from "./capabilities.js";
-import { CodexHost, type AdoptedTurn, type RunTurnResult } from "./codex-host.js";
+import {
+  CodexHost,
+  ControlRefusal,
+  type AdoptedTurn,
+  type RunTurnResult,
+  type SavedThread,
+} from "./codex-host.js";
 import type { RpcObject } from "./app-server.js";
 import {
   markerEventBody,
@@ -59,7 +78,7 @@ import { HOAI_TOOLS, HoaiTools, type ToolContext } from "./hoai-tools.js";
 import { BGOS_AGENT_HINTS } from "./agent-hints.js";
 import { DECLARED_CAPABILITIES } from "./declared-capabilities.js";
 import { unescapeButton } from "./interactions.js";
-import type { VoiceRpcFrame } from "./voice-rpc.js";
+import type { VoiceRpcFrame, VoiceRpcResultBody } from "./voice-rpc.js";
 import { VoiceRpcHandler } from "./hoai-shared/voice-rpc.js";
 import { buildCodexInput, type InboundFileForCodex } from "./inbound-input.js";
 import { parseReply } from "./reply-markers.js";
@@ -68,6 +87,7 @@ import type { AuthResolutionOk } from "./auth-mode.js";
 import type { Input } from "@openai/codex-sdk";
 import {
   NativeCommands,
+  RESUMED_SAVED_CONVERSATION,
   parseNativeCommand,
   normalizeNativeCommand,
   type NativeRunOptions,
@@ -101,6 +121,78 @@ function isOwnerAuthoredTurn(source?: Partial<DispatchArgs>): boolean {
   if (source.senderType === "agent" || source.senderType === "system") return false;
   if (source.peerConversationId) return false;
   return source.chatKind !== "meeting";
+}
+
+/*
+ * The Sessions ops' payloads (P6 stage 3, spec 5.5), read against the
+ * contract file's limits. The backend validates first; these are the
+ * daemon's own check on a frame that crossed a machine boundary, and each
+ * refusal is the contract's `invalid`.
+ */
+
+/** The chat a Sessions op is about. */
+function sessionChatOf(chatId: number): number {
+  if (!Number.isSafeInteger(chatId) || chatId <= 0)
+    throw new ControlRefusal("invalid", "No chat was given for this session request.");
+  return chatId;
+}
+
+/** `list_sessions`' optional search, trimmed, at most SESSION_QUERY_MAX characters. */
+function sessionQueryOf(payload: Record<string, unknown>): string | undefined {
+  const query = payload.query;
+  if (query === undefined || query === null) return undefined;
+  if (typeof query !== "string")
+    throw new ControlRefusal("invalid", "A session search must be text.");
+  const trimmed = query.trim();
+  if (trimmed.length > SESSION_QUERY_MAX)
+    throw new ControlRefusal(
+      "invalid",
+      `A session search holds at most ${SESSION_QUERY_MAX} characters.`,
+    );
+  return trimmed || undefined;
+}
+
+/** At most SESSIONS_LIST_MAX rows, whatever the frame asks for. */
+function sessionLimitOf(payload: Record<string, unknown>): number {
+  const limit = payload.limit;
+  return typeof limit === "number" && Number.isInteger(limit) && limit >= 1
+    ? Math.min(limit, SESSIONS_LIST_MAX)
+    : SESSIONS_LIST_MAX;
+}
+
+/** A session id, as this daemon lists it and the app sends it back. */
+function sessionIdOf(payload: Record<string, unknown>): string {
+  const id = payload.sessionId;
+  if (typeof id !== "string" || !SESSION_ID_PATTERN.test(id))
+    throw new ControlRefusal("invalid", "That is not a session id.");
+  return id;
+}
+
+/** A new name: 1 to SESSION_RENAME_MAX characters after trimming, one line, no control characters. */
+function sessionTitleOf(payload: Record<string, unknown>): string {
+  const title = typeof payload.title === "string" ? payload.title.trim() : "";
+  if (
+    !title ||
+    title.length > SESSION_RENAME_MAX ||
+    /[\u0000-\u001f\u007f]/.test(title)
+  )
+    throw new ControlRefusal(
+      "invalid",
+      `A session name needs 1 to ${SESSION_RENAME_MAX} characters on one line.`,
+    );
+  return title;
+}
+
+/** A saved thread as a list answer's row. Codex titles are not withheld: every thread was fed from this HOAI chat (D24). */
+function sessionRowOf(thread: SavedThread): SessionRow {
+  return {
+    id: thread.id,
+    title: thread.name,
+    preview: thread.preview,
+    lastActivityAt: thread.lastActivityAt,
+    branch: thread.branch,
+    current: thread.current,
+  };
 }
 
 export interface FatalInfo {
@@ -1410,6 +1502,27 @@ export class CodexAdapter {
         });
         return;
       }
+      // The Sessions sheet (P6 stage 3, spec 5.6): this chat's own threads,
+      // the set /resume offers, answered with the contract's shapes and
+      // refusal codes.
+      if (frame.op === LIST_SESSIONS) {
+        await this.answerSessionOp(frame.rpcId, () =>
+          this.listSessions(chatId, frame.payload),
+        );
+        return;
+      }
+      if (frame.op === RESUME_SESSION) {
+        await this.answerSessionOp(frame.rpcId, () =>
+          this.resumeSession(assistantId, chatId, frame.payload),
+        );
+        return;
+      }
+      if (frame.op === RENAME_SESSION) {
+        await this.answerSessionOp(frame.rpcId, () =>
+          this.renameSession(chatId, frame.payload),
+        );
+        return;
+      }
       if (frame.op === "cancel") {
         const controller = this.voiceTasks.get(String(frame.payload.taskId));
         controller?.abort();
@@ -1565,6 +1678,85 @@ export class CodexAdapter {
         })
         .catch(() => {});
     }
+  }
+
+  /**
+   * Post a Sessions op's answer: its payload, or its refusal. A host refusal
+   * carries the contract's code (busy, not_found, unsupported, invalid);
+   * anything else is `failed`, with the sentence the owner would read.
+   */
+  private async answerSessionOp(
+    rpcId: string,
+    answer: () => Promise<
+      ListSessionsAnswer | ResumeSessionAnswer | RenameSessionAnswer
+    >,
+  ): Promise<void> {
+    let body: VoiceRpcResultBody;
+    try {
+      body = { ok: true, payload: { ...(await answer()) } };
+    } catch (error) {
+      body = {
+        ok: false,
+        error: {
+          code: error instanceof ControlRefusal ? error.code : "failed",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Codex could not complete the request.",
+        },
+      };
+    }
+    await this.api.postVoiceRpcResult(rpcId, body);
+  }
+
+  private async listSessions(
+    chatId: number,
+    payload: Record<string, unknown>,
+  ): Promise<ListSessionsAnswer> {
+    const chat = sessionChatOf(chatId);
+    const query = sessionQueryOf(payload);
+    const limit = sessionLimitOf(payload);
+    const { threads, truncated } = await this.host.listSavedThreads(chat, query);
+    return {
+      sessions: threads.slice(0, limit).map(sessionRowOf),
+      abilities: this.host.sessionAbilities(),
+      truncated: truncated || threads.length > limit,
+      runtime: "codex",
+    };
+  }
+
+  private async resumeSession(
+    assistantId: number,
+    chatId: number,
+    payload: Record<string, unknown>,
+  ): Promise<ResumeSessionAnswer> {
+    const chat = sessionChatOf(chatId);
+    const sessionId = sessionIdOf(payload);
+    const thread = await this.host.resumeSavedThread(chat, sessionId);
+    // The context a Stop paused belongs to the thread just left, so no later
+    // owner turn may resume that mission from it (as on /new, D25).
+    this.missionLane.clearStopMarker(chat);
+    // /resume's own line. The switch has happened whether or not it posts,
+    // so a failed post is logged and never turns the answer into a failure.
+    await this.outbound
+      .sendText({ assistantId, chatId: chat, text: RESUMED_SAVED_CONVERSATION })
+      .catch((error) =>
+        console.warn(
+          `${LOG} the resume line for chat ${chat} was not posted: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      );
+    return { resumed: true, sessionId, title: thread.name };
+  }
+
+  private async renameSession(
+    chatId: number,
+    payload: Record<string, unknown>,
+  ): Promise<RenameSessionAnswer> {
+    const chat = sessionChatOf(chatId);
+    const sessionId = sessionIdOf(payload);
+    const title = sessionTitleOf(payload);
+    const thread = await this.host.renameThread(chat, sessionId, title);
+    return { renamed: true, sessionId, title: thread.name };
   }
 
   // -------------------------------------------------------------------

@@ -9,6 +9,14 @@ import type { Interactions, InteractionContext } from "./interactions.js";
 import type { SessionSettings } from "./session-settings.js";
 import type { RpcObject } from "./app-server.js";
 
+/**
+ * The line after a saved conversation is bound to the chat, from /resume and
+ * from the Sessions sheet's Resume alike (P6 stage 3, D25). BGOS's Codex
+ * canon quotes it to the model word for word, so it lives in one place.
+ */
+export const RESUMED_SAVED_CONVERSATION =
+  "Resumed the saved Codex conversation. Your HOAI messages remain in place.";
+
 export const NATIVE_COMMAND_DESCRIPTIONS = [
   ["model", "Choose this chat's Codex model and reasoning level"],
   ["effort", "Change the reasoning level for the current model"],
@@ -560,9 +568,7 @@ export class NativeCommands {
         ));
       if (id) {
         await host.resumeSavedThread(args.chatId, id);
-        await say(
-          "Resumed the saved Codex conversation. Your HOAI messages remain in place.",
-        );
+        await say(RESUMED_SAVED_CONVERSATION);
       }
       return;
     }
