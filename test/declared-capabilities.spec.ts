@@ -8,6 +8,8 @@
  * down with it), and `mission_pause` must stay out until there is a loop to
  * suspend.
  */
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -17,6 +19,10 @@ import {
   MISSION_GOAL_LOOP,
   MISSION_PAUSE,
 } from "../src/declared-capabilities.js";
+import {
+  SESSIONS_LIBRARY,
+  STOP_PAUSES_MISSION,
+} from "../src/session-controls-contract.js";
 
 // backend/src/dto/integrations/pair-exchange.dto.ts CAPABILITY_TOKEN_REGEX
 const CAPABILITY_TOKEN_REGEX = /^[a-z][a-z0-9_]{0,63}$/;
@@ -59,5 +65,38 @@ describe("DECLARED_CAPABILITIES", () => {
 
   it("is frozen, so one constant is the single source", () => {
     expect(Object.isFrozen(DECLARED_CAPABILITIES)).toBe(true);
+  });
+
+  it("declares stop_pauses_mission, spelled by the contract file, because an owner Stop now pauses the mission", () => {
+    // P6 stage 3 (C-32). BGOS serves the Codex canon's Stop sentence ("your
+    // host pauses the chat's open mission with the reason Stopped by you")
+    // only to a daemon that declares this, so the token ships in the same
+    // release as the code that keeps it.
+    expect(STOP_PAUSES_MISSION).toBe("stop_pauses_mission");
+    expect(DECLARED_CAPABILITIES).toContain(STOP_PAUSES_MISSION);
+    expect(DECLARED_CAPABILITIES.filter((t) => t === STOP_PAUSES_MISSION)).toHaveLength(1);
+  });
+
+  it("declares stop_pauses_mission only beside the code that keeps the promise", () => {
+    // The token and its enforcement travel together. If the Stop's abort
+    // stopped carrying its cause, or the lane stopped pausing with the
+    // contract's reason, the token would be a promise nothing keeps; the
+    // mission lane and adapter specs hold the behaviour, this holds the tie.
+    const read = (file: string) =>
+      readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8");
+    const adapter = read("adapter.ts");
+    const lane = read("mission-lane.ts");
+    expect(adapter).toContain('abortWith(controller, "owner_stop")');
+    expect(adapter).toContain("this.missionLane.stoppedByOwner(");
+    expect(adapter).toContain("this.missionLane.noteOwnerTurn(");
+    expect(lane).toContain("reason: STOP_PAUSE_REASON");
+    expect(lane).toContain("active.pausedReason === STOP_PAUSE_REASON");
+  });
+
+  it("does NOT declare sessions_library yet: this daemon does not answer the Sessions ops in this item", () => {
+    // Wave E of the same release answers list_sessions, resume_session and
+    // rename_session and flips this, deliberately. Declared before then, the
+    // app would show a Sessions circle whose every request times out.
+    expect(DECLARED_CAPABILITIES).not.toContain(SESSIONS_LIBRARY);
   });
 });

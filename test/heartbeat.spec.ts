@@ -137,10 +137,13 @@ describe("HeartbeatController", () => {
       });
       hb.start();
       try {
+        // P6 stage 3 (C-32) added stop_pauses_mission: an owner Stop now
+        // pauses the chat's open mission instead of failing it.
         expect(posts[0]!.capabilities).toEqual([
           "mission_events",
           "mission_goal_loop",
           "mission_pause",
+          "stop_pauses_mission",
         ]);
       } finally {
         hb.stop();
@@ -191,6 +194,7 @@ describe("HeartbeatController", () => {
             "mission_events",
             "mission_goal_loop",
             "mission_pause",
+            "stop_pauses_mission",
           ]);
       } finally {
         hb.stop();
