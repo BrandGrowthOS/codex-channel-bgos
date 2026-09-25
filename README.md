@@ -45,6 +45,8 @@ Do not run two foreground daemons for the same home. Managed services use a rene
 | Missions | Explicit mission tools and automatic native plans; derived plans cannot overwrite a self-reported mission |
 | Components and trackers | Manifest-validated rich components, health event tools and tracker cards |
 | Voice control | Caller-credential mint, invisible read-only consult/compose, confirmed detached tasks, per-chat stop/cancel, durable task claims |
+| Stop and resume | An owner Stop (the app's Stop button or `/stop`) cancels the turn, posts "Stopped." and pauses the chat's open mission with the reason "Stopped by you" instead of failing it; the owner's next message in that chat, the app's Resume included, resumes it. `/new`, a daemon shutdown and a revoked pairing still end the mission. Declared as `stop_pauses_mission` |
+| Sessions | The app's Sessions sheet lists this chat's own Codex conversations (the set `/resume` offers: the latest 30, searchable by title and first message), renames one through Codex's own thread name, and resumes one into the chat with `/resume`'s line. Declared as `sessions_library`; rename turns itself off on a Codex runtime without it |
 
 Receiving an audio/video file does not imply transcription or video understanding. Codex can inspect file paths with its available tools. Meeting turn-refresh is not advertised. Codex consults return directly through the host; they do not expose Claude's cooperative `voice_consult_reply` tool. Outbound caps: images 10 MB, videos 100 MB, other files 25 MB.
 
