@@ -24,6 +24,7 @@ import { CommandUpgrade } from "./command-upgrade.js";
 import { ToolProgressOrchestrator } from "./tool-progress.js";
 import { MissionControlLane } from "./mission-control.js";
 import { MissionLane, type MissionTurnToken } from "./mission-lane.js";
+import { StopDiscards } from "./stop-discards.js";
 import { abortCauseOf, abortWith, missionAbortOutcome } from "./abort-cause.js";
 import {
   LIST_SESSIONS,
@@ -311,6 +312,14 @@ export class CodexAdapter {
       // echo; the owner's next turn gives it back (P6 stage 3, C-32).
       pauseGoalForChat: (chatId) => this.goalLane.pauseForChat(chatId),
       resumeGoalForMission: (missionId) => this.goalLane.noteResumed(missionId),
+      // A Stop pause /new or a Sessions resume discarded must not come back
+      // to life at the next restart's first owner turn (review F4).
+      stopDiscards: new StopDiscards(
+        join(
+          process.env.CODEX_BGOS_HOME ?? join(homedir(), ".codex-bgos"),
+          "stop-discards.json",
+        ),
+      ),
     });
     this.goalLane = new GoalLane({
       api: this.api,
@@ -780,7 +789,8 @@ export class CodexAdapter {
           abortWith(controller, command.name === "stop" ? "owner_stop" : "new");
         // A later owner turn must not resume a mission from the context /new
         // just discarded.
-        if (command.name === "new") this.missionLane.clearStopMarker(chatId);
+        if (command.name === "new")
+          await this.missionLane.clearStopMarker(chatId, assistantId);
         await this.host.stopTurn(chatId);
       }
       if (command.name === "stop") {
@@ -1745,7 +1755,7 @@ export class CodexAdapter {
     const thread = await this.host.resumeSavedThread(chat, sessionId);
     // The context a Stop paused belongs to the thread just left, so no later
     // owner turn may resume that mission from it (as on /new, D25).
-    this.missionLane.clearStopMarker(chat);
+    await this.missionLane.clearStopMarker(chat, assistantId);
     // /resume's own line. The switch has happened whether or not it posts,
     // so a failed post is logged and never turns the answer into a failure.
     await this.outbound

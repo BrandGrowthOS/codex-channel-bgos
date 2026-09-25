@@ -1863,10 +1863,71 @@ describe("MissionLane: an owner Stop pauses, never fails (P6 stage 3)", () => {
     stagePause(301);
     await target.stoppedByOwner({ chatId: 42, turnToken: turn.turnToken, assistantId: 7 });
 
-    target.clearStopMarker(42);
+    await target.clearStopMarker(42, 7);
     const before = server.requests.length;
     await target.noteOwnerTurn(42, 7);
     expect(server.requests.length).toBe(before);
+  });
+
+  /**
+   * /new and a Sessions resume leave the context a Stop paused (review F4).
+   * Clearing only the in memory marker held for this process: after a
+   * restart the D12 probe found the same pause on the server and resumed it
+   * in the fresh context. The discard now outlives the process (the store
+   * stands in for the daemon's file, shared by the lane before and after).
+   */
+  function sharedDiscards() {
+    const ids = new Set<number>();
+    return {
+      has: (id: number) => ids.has(id),
+      add: (id: number) => {
+        ids.add(id);
+      },
+      delete: (id: number) => {
+        ids.delete(id);
+      },
+    };
+  }
+
+  it("/new after a Stop survives a restart: the first owner turn does not resume the discarded pause", async () => {
+    const discards = sharedDiscards();
+    const before = lane({ stopDiscards: discards });
+    stageCreate(301);
+    const turn = await attach(before, 42, "Ship the strip");
+    stagePause(301);
+    await before.stoppedByOwner({ chatId: 42, turnToken: turn.turnToken, assistantId: 7 });
+    await before.clearStopMarker(42, 7);
+
+    // The daemon restarts for an update: a fresh lane, the same disk.
+    const after = lane({ stopDiscards: discards });
+    stageActive(snapshot(301, "paused", { pausedReason: STOP_PAUSE_REASON }));
+    await after.noteOwnerTurn(42, 7);
+    expect(hits(/\/resume$/)).toHaveLength(0);
+
+    // The owner resumes it from the Mission view, works on in the new
+    // context and presses Stop: that pause is theirs to resume again.
+    stageActive(snapshot(301, "active"));
+    const next = startTurn(after, { assistantId: 7, chatId: 42, prompt: "Back to it" });
+    stagePause(301);
+    await after.stoppedByOwner({ chatId: 42, turnToken: next.turnToken, assistantId: 7 });
+    stageActive(snapshot(301, "paused", { pausedReason: STOP_PAUSE_REASON }));
+    stageResume(301);
+    await after.noteOwnerTurn(42, 7);
+    expect(hits(/\/missions\/301\/resume$/)).toHaveLength(1);
+  });
+
+  it("after a restart, /new reads the chat once and discards a Stop pause it finds there", async () => {
+    const discards = sharedDiscards();
+    const first = lane({ stopDiscards: discards });
+    stageActive(snapshot(301, "paused", { pausedReason: STOP_PAUSE_REASON }));
+    await first.clearStopMarker(42, 7);
+    expect(hits(/\/missions\/active$/)).toHaveLength(1);
+    await first.noteOwnerTurn(42, 7);
+
+    const second = lane({ stopDiscards: discards });
+    stageActive(snapshot(301, "paused", { pausedReason: STOP_PAUSE_REASON }));
+    await second.noteOwnerTurn(42, 7);
+    expect(hits(/\/resume$/)).toHaveLength(0);
   });
 
   it("a Stop between turns opens nothing, so the next owner turn is not held back", async () => {

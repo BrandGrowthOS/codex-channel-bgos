@@ -430,7 +430,7 @@ describe("the Sessions ops on the control lane", () => {
         text: RESUMED_LINE,
       });
       // The context a Stop paused belongs to the thread just left, as on /new.
-      expect(adapter.missionLane.clearStopMarker).toHaveBeenCalledWith(20);
+      expect(adapter.missionLane.clearStopMarker).toHaveBeenCalledWith(20, 10);
       expect(answerTo(adapter, f)).toEqual({
         ok: true,
         payload: { resumed: true, sessionId: "t-old1", title: "Invoice export" },

@@ -6,6 +6,7 @@ import type {
   PatchMissionProgressInput,
 } from "./bgos-api.js";
 import { STOP_PAUSE_REASON } from "./session-controls-contract.js";
+import { StopDiscards, type StopDiscardStore } from "./stop-discards.js";
 
 const LOG = "[codex-channel-bgos]";
 const DISPOSE_TIMEOUT_MS = 3_000;
@@ -85,6 +86,11 @@ export interface MissionLaneOptions {
   resumeGoalForMission?: (missionId: number) => Promise<unknown>;
   /** The bound on an owner turn's wait for a Stop's pause. Tests shorten it. */
   stopSettleMaxMs?: number;
+  /**
+   * The Stop pauses /new or a Sessions resume discarded, kept where a
+   * restart can read them (review F4). In memory only when not given.
+   */
+  stopDiscards?: StopDiscardStore;
 }
 
 export interface BeginMissionTurnParams {
@@ -127,6 +133,7 @@ export class MissionLane {
   private readonly pauseGoalForChat: (chatId: number) => Promise<unknown>;
   private readonly resumeGoalForMission: (missionId: number) => Promise<unknown>;
   private readonly stopSettleMaxMs: number;
+  private readonly stopDiscards: StopDiscardStore;
   /**
    * chat -> the mission this daemon's own owner Stop paused there, recorded
    * only when the server answered with STOP_PAUSE_REASON. The owner's next
@@ -164,6 +171,7 @@ export class MissionLane {
     this.pauseGoalForChat = options.pauseGoalForChat ?? (async () => {});
     this.resumeGoalForMission = options.resumeGoalForMission ?? (async () => {});
     this.stopSettleMaxMs = options.stopSettleMaxMs ?? STOP_SETTLE_MAX_MS;
+    this.stopDiscards = options.stopDiscards ?? new StopDiscards(null);
   }
 
   /**
@@ -301,14 +309,38 @@ export class MissionLane {
   }
 
   /**
-   * `/new`: the context this chat's Stop paused is gone, so no later owner
-   * turn may resume it. The chat also counts as read, so the restart check
-   * cannot find the same pause on the server and resume it after all.
+   * `/new` or a Sessions resume: the context this chat's Stop paused is
+   * gone, so no later owner turn may resume that mission from it (spec 4.2,
+   * D25), in this process or after a restart (review F4). The mission stays
+   * paused on the server exactly as it is, for the owner to resume from the
+   * Mission view; its id goes into the discards, which the restart's first
+   * owner turn reads (D12). With no marker in memory and the chat not yet
+   * read by this process (a restart came in between), the chat's open
+   * mission is read once to find the pause. Never throws.
    */
-  clearStopMarker(chatId: number): void {
+  async clearStopMarker(chatId: number, assistantId: number): Promise<void> {
+    const marked = this.stopPausedByChat.get(chatId);
+    const unconfirmed = this.stopUnconfirmedByChat.get(chatId);
+    const read = this.checkedChats.has(chatId);
     this.stopPausedByChat.delete(chatId);
     this.stopUnconfirmedByChat.delete(chatId);
     this.checkedChats.add(chatId);
+    if (marked !== undefined) this.stopDiscards.add(marked);
+    // A pause whose answer was lost may have landed all the same.
+    if (unconfirmed !== undefined) this.stopDiscards.add(unconfirmed.missionId);
+    if (marked !== undefined || unconfirmed !== undefined || read) return;
+    try {
+      const active = await this.api.getActiveMission(assistantId, { chatId });
+      if (isStopPausedIn(active, chatId)) this.stopDiscards.add(active.id);
+    } catch (err) {
+      // The chat stays read, so this process resumes nothing from the
+      // discarded context; only a second restart could, and only if the
+      // server was unreachable at this very moment.
+      // eslint-disable-next-line no-console
+      console.warn(
+        `${LOG} mission read on /new failed chat=` + chatId + " err=" + errorText(err),
+      );
+    }
   }
 
   /**
@@ -365,13 +397,11 @@ export class MissionLane {
       return;
     try {
       const active = await this.api.getActiveMission(assistantId, { chatId });
-      if (
-        active !== null &&
-        active.status === "paused" &&
-        active.pausedReason === STOP_PAUSE_REASON &&
-        belongsToChat(active, chatId)
-      ) {
-        await this.resumeStopPause(assistantId, chatId, active);
+      if (isStopPausedIn(active, chatId)) {
+        // A pause /new or a Sessions resume discarded stays paused, even
+        // when a restart has emptied every marker above (review F4).
+        if (!this.stopDiscards.has(active.id))
+          await this.resumeStopPause(assistantId, chatId, active);
       } else if (
         unconfirmed?.goalHeld === true &&
         active !== null &&
@@ -491,6 +521,9 @@ export class MissionLane {
       // resume on their next message.
       if (answer?.pausedReason === STOP_PAUSE_REASON) {
         this.stopPausedByChat.set(chatId, missionId);
+        // A fresh Stop in the context the owner is in now: theirs to resume,
+        // whatever an older /new discarded for the same mission.
+        this.stopDiscards.delete(missionId);
       }
     } catch (err) {
       // Refused or unreachable: the mission stays as the server has it, so it
@@ -970,6 +1003,19 @@ export class MissionLane {
 }
 
 /** An old backend echoes no chat; a chat scoped one must echo this one. */
+/** Paused in this chat by an owner Stop: the exact contract reason. */
+function isStopPausedIn(
+  mission: MissionSnapshot | null,
+  chatId: number,
+): mission is MissionSnapshot {
+  return (
+    mission !== null &&
+    mission.status === "paused" &&
+    mission.pausedReason === STOP_PAUSE_REASON &&
+    belongsToChat(mission, chatId)
+  );
+}
+
 function belongsToChat(mission: MissionSnapshot, chatId: number): boolean {
   return (
     mission.chatId === undefined ||

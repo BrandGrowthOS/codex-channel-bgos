@@ -250,7 +250,8 @@ describe("an owner Stop pauses the mission, never fails it (P6 stage 3)", () => 
     await adapter.codexDispatch(args("new"));
     expect(abortCauseOf(controller.signal)).toBe("new");
     expect(adapter.missionLane.noteStopRequested).not.toHaveBeenCalled();
-    expect(adapter.missionLane.clearStopMarker).toHaveBeenCalledWith(20);
+    // With the agent, so a restart's first /new can read the chat once.
+    expect(adapter.missionLane.clearStopMarker).toHaveBeenCalledWith(20, 10);
     expect(order).toEqual(["forget, aborted=true"]);
     expect(adapter.host.resetChat).toHaveBeenCalledWith(20);
   });
@@ -592,5 +593,12 @@ describe("the Stop wiring of the mission lane", () => {
     expect(construction).toContain(
       "resumeGoalForMission: (missionId) => this.goalLane.noteResumed(missionId)",
     );
+  });
+
+  it("hands the mission lane the discards file, so a /new outlives a restart (review F4)", () => {
+    const start = source.indexOf("new MissionLane(");
+    const construction = source.slice(start, source.indexOf("});", start));
+    expect(construction).toMatch(/stopDiscards: new StopDiscards\(\s*join\(/);
+    expect(construction).toContain('"stop-discards.json"');
   });
 });
