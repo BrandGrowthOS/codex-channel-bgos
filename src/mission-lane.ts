@@ -134,6 +134,17 @@ export class MissionLane {
    */
   private readonly stopPausedByChat = new Map<number, number>();
   /**
+   * chat -> a Stop whose pause PATCH failed (review F2). The server may or
+   * may not have paused the mission (a timeout can land after its answer is
+   * lost), and the chat's native goal may be held. The owner's next turn
+   * reads the chat again: it resumes the pause if it landed, and gives back
+   * a goal this Stop held if the mission is still active.
+   */
+  private readonly stopUnconfirmedByChat = new Map<
+    number,
+    { missionId: number; goalHeld: boolean }
+  >();
+  /**
    * Chats an owner turn has read the open mission of since this process
    * started (D12). A restart forgets every marker above, so the first owner
    * turn in each chat asks the server once.
@@ -296,6 +307,7 @@ export class MissionLane {
    */
   clearStopMarker(chatId: number): void {
     this.stopPausedByChat.delete(chatId);
+    this.stopUnconfirmedByChat.delete(chatId);
     this.checkedChats.add(chatId);
   }
 
@@ -344,7 +356,13 @@ export class MissionLane {
   async noteOwnerTurn(chatId: number, assistantId: number): Promise<void> {
     const settle = this.stopSettles.get(chatId);
     if (settle) await waitAtMost(settle.promise, this.stopSettleMaxMs);
-    if (!this.stopPausedByChat.has(chatId) && this.checkedChats.has(chatId)) return;
+    const unconfirmed = this.stopUnconfirmedByChat.get(chatId);
+    if (
+      !this.stopPausedByChat.has(chatId) &&
+      unconfirmed === undefined &&
+      this.checkedChats.has(chatId)
+    )
+      return;
     try {
       const active = await this.api.getActiveMission(assistantId, { chatId });
       if (
@@ -354,8 +372,19 @@ export class MissionLane {
         belongsToChat(active, chatId)
       ) {
         await this.resumeStopPause(assistantId, chatId, active);
+      } else if (
+        unconfirmed?.goalHeld === true &&
+        active !== null &&
+        active.id === unconfirmed.missionId &&
+        active.status === "active"
+      ) {
+        // The Stop's pause never landed: the mission is still active on the
+        // server, and the goal the Stop held is all there is to give back.
+        // A mission the owner paused since then keeps its goal held.
+        await this.giveGoalBack(chatId, active.id);
       }
       this.stopPausedByChat.delete(chatId);
+      this.stopUnconfirmedByChat.delete(chatId);
       this.checkedChats.add(chatId);
     } catch (err) {
       // eslint-disable-next-line no-console
@@ -441,9 +470,11 @@ export class MissionLane {
     // Held locally first: no progress and no close from here on, and a
     // native goal cannot start a continuation turn before the echo.
     this.notePaused(missionId);
+    let goalHeld = false;
     if (this.goalOwnsChat(chatId)) {
       try {
         await this.pauseGoalForChat(chatId);
+        goalHeld = true;
       } catch (err) {
         // eslint-disable-next-line no-console
         console.warn(
@@ -467,6 +498,10 @@ export class MissionLane {
       // it again.
       this.pausedMissions.delete(missionId);
       if (isNotFound(err)) this.forgetMission(missionId);
+      // The goal stays held: giving it back now would start a continuation
+      // turn the moment after the owner pressed Stop. The owner's next turn
+      // settles it instead, from what the server then says.
+      this.stopUnconfirmedByChat.set(chatId, { missionId, goalHeld });
       // eslint-disable-next-line no-console
       console.warn(
         `${LOG} mission pause PATCH failed chat=` +
@@ -487,14 +522,7 @@ export class MissionLane {
     this.onSelfWrite(mission.id);
     await this.api.resumeMission(assistantId, mission.id);
     this.noteResumed(mission.id);
-    try {
-      await this.resumeGoalForMission(mission.id);
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        `${LOG} goal resume on owner turn failed chat=` + chatId + " err=" + errorText(err),
-      );
-    }
+    await this.giveGoalBack(chatId, mission.id);
     // A derived plan mission is this lane's own work again, so canAdopt takes
     // it when the plan arrives instead of creating a second one; after a
     // restart nothing else would tell the lane. A goal's mission is not: the
@@ -513,6 +541,18 @@ export class MissionLane {
           lastSnapshot: [],
         });
       }
+    }
+  }
+
+  /** The native goal a Stop held, back to the goal lane. Logged, never thrown. */
+  private async giveGoalBack(chatId: number, missionId: number): Promise<void> {
+    try {
+      await this.resumeGoalForMission(missionId);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `${LOG} goal resume on owner turn failed chat=` + chatId + " err=" + errorText(err),
+      );
     }
   }
 
@@ -648,6 +688,7 @@ export class MissionLane {
     this.createdMissionIds.clear();
     this.pausedMissions.clear();
     this.stopPausedByChat.clear();
+    this.stopUnconfirmedByChat.clear();
     this.checkedChats.clear();
     for (const settle of this.stopSettles.values()) settle.resolve();
     this.stopSettles.clear();

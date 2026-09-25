@@ -1988,6 +1988,90 @@ describe("MissionLane: an owner Stop pauses, never fails (P6 stage 3)", () => {
     expect(hits(/\/resume$/)).toHaveLength(0);
   });
 
+  /**
+   * A goal chat whose pause PATCH fails (review F2). The goal was held
+   * BEFORE the PATCH, so a failure left it held with nothing to give it
+   * back: the chat was already checked, no Stop marker was recorded, and the
+   * owner's next turn asked nothing. Keep working then read On it with no
+   * loop running, until a restart.
+   */
+  function goalLane(order: string[]) {
+    return lane({
+      goalOwnsChat: (chatId) => chatId === 42,
+      pauseGoalForChat: async (chatId) => {
+        order.push(`goal paused ${chatId}`);
+      },
+      resumeGoalForMission: async (missionId) => {
+        order.push(`goal resumed ${missionId}`);
+      },
+    });
+  }
+
+  async function stopWithFailedPause(target: MissionLane) {
+    // An owner turn before the Stop: the chat is checked, as in a live chat.
+    stageActive(snapshot(701, "active", { keepWorking: true }));
+    await target.noteOwnerTurn(42, 7);
+    const turn = startTurn(target, { assistantId: 7, chatId: 42, prompt: "Keep working" });
+    stageActive(snapshot(701, "active", { keepWorking: true }));
+    server.stage("PATCH", "/api/v1/integrations/assistants/7/missions/701/pause", 502, {
+      message: "Bad gateway",
+    });
+    await expect(
+      target.stoppedByOwner({ chatId: 42, turnToken: turn.turnToken, assistantId: 7 }),
+    ).resolves.toBeUndefined();
+  }
+
+  it("a failed pause in a goal chat keeps the goal held, and the owner's next turn gives it back", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const order: string[] = [];
+    const target = goalLane(order);
+    await stopWithFailedPause(target);
+    // Held, not given back at once: that would start a continuation turn
+    // the moment after the owner pressed Stop.
+    expect(order).toEqual(["goal paused 42"]);
+
+    // The pause never landed: the server still has the mission active.
+    stageActive(snapshot(701, "active", { keepWorking: true }));
+    await target.noteOwnerTurn(42, 7);
+    expect(order).toEqual(["goal paused 42", "goal resumed 701"]);
+    expect(hits(/\/resume$/)).toHaveLength(0);
+
+    // Once: the owner's following turn asks nothing more.
+    const reads = hits(/\/missions\/active$/).length;
+    await target.noteOwnerTurn(42, 7);
+    expect(hits(/\/missions\/active$/)).toHaveLength(reads);
+    expect(order).toEqual(["goal paused 42", "goal resumed 701"]);
+  });
+
+  it("a pause whose answer was lost but which landed is resumed on the owner's next turn, goal included", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const order: string[] = [];
+    const target = goalLane(order);
+    await stopWithFailedPause(target);
+
+    // A timeout can land on the server after the answer is lost.
+    stageActive(snapshot(701, "paused", { keepWorking: true, pausedReason: STOP_PAUSE_REASON }));
+    stageResume(701);
+    await target.noteOwnerTurn(42, 7);
+    expect(hits(/\/missions\/701\/resume$/)).toHaveLength(1);
+    expect(order).toEqual(["goal paused 42", "goal resumed 701"]);
+  });
+
+  it("after a failed pause the owner's next turn reads the chat again, and an owner's own Pause since then stands", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const order: string[] = [];
+    const target = goalLane(order);
+    await stopWithFailedPause(target);
+    const reads = hits(/\/missions\/active$/).length;
+
+    // The owner paused it from the Mission view before writing again.
+    stageActive(snapshot(701, "paused", { keepWorking: true, pausedReason: null }));
+    await target.noteOwnerTurn(42, 7);
+    expect(hits(/\/missions\/active$/)).toHaveLength(reads + 1);
+    expect(hits(/\/resume$/)).toHaveLength(0);
+    expect(order).toEqual(["goal paused 42"]);
+  });
+
   it("an owner turn whose read fails never throws, and the next owner turn asks again", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const target = lane();
