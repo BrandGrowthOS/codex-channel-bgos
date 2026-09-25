@@ -23,7 +23,11 @@ import { CommandsSync } from "./commands-sync.js";
 import { CommandUpgrade } from "./command-upgrade.js";
 import { ToolProgressOrchestrator } from "./tool-progress.js";
 import { MissionControlLane } from "./mission-control.js";
-import { MissionLane, type MissionTurnToken } from "./mission-lane.js";
+import {
+  MissionLane,
+  type GoalStop,
+  type MissionTurnToken,
+} from "./mission-lane.js";
 import { StopDiscards } from "./stop-discards.js";
 import { abortCauseOf, abortWith, missionAbortOutcome } from "./abort-cause.js";
 import {
@@ -242,6 +246,12 @@ export class CodexAdapter {
   private readonly tools: HoaiTools;
   private readonly meetings: MeetingLane;
   private readonly turnControllers = new Map<number, Set<AbortController>>();
+  /**
+   * chat -> the continuation turn the runtime is running there, which the
+   * host adopted outside executeAndReply. An owner Stop marks it, so its
+   * interrupted result is the Stop's and not a reply or an error (D35).
+   */
+  private readonly adoptedTurns = new Map<number, AbortController>();
   private capabilityText = BGOS_AGENT_HINTS;
   private ownerId = "";
   private readonly rpcSeen = new Set<string>();
@@ -777,7 +787,9 @@ export class CodexAdapter {
       args.senderType !== "system" &&
       ["new", "retry", "status", "stop", "compact"].includes(command.name)
     ) {
+      let goalStop: GoalStop | null = null;
       if (command.name === "stop" || command.name === "new") {
+        const active = this.turnControllers.get(chatId);
         this.nativeCommands.cancel(chatId);
         this.generations.set(chatId, (this.generations.get(chatId) ?? 0) + 1);
         // BEFORE the abort: an owner turn racing the unwind waits for the
@@ -785,8 +797,13 @@ export class CodexAdapter {
         if (command.name === "stop") this.missionLane.noteStopRequested(chatId);
         // /stop is the owner's Stop and pauses the chat's open mission; /new
         // ends the plan's mission, with its own words.
-        for (const controller of this.turnControllers.get(chatId) ?? [])
+        for (const controller of active ?? [])
           abortWith(controller, command.name === "stop" ? "owner_stop" : "new");
+        // A Keep working chat with no turn of the owner's to unwind (D35):
+        // the goal is held BEFORE the interrupt below.
+        if (command.name === "stop")
+          goalStop = this.stopKeepWorking(chatId, assistantId, !!active?.size);
+        await goalStop?.held;
         // A later owner turn must not resume a mission from the context /new
         // just discarded.
         if (command.name === "new")
@@ -795,6 +812,7 @@ export class CodexAdapter {
       }
       if (command.name === "stop") {
         await replyHandle.sendText(STOP_CONFIRMATION_HARD);
+        await goalStop?.settled;
         return;
       }
       if (command.name === "compact") {
@@ -1223,6 +1241,36 @@ export class CodexAdapter {
   }
 
   /**
+   * An owner Stop (the Stop button or /stop) in a chat Keep working holds,
+   * when no turn the owner asked for was aborted (D35, review F1).
+   *
+   * The runtime runs a goal's continuation turns by itself and the host
+   * adopts them outside executeAndReply, so they have no turn controller and
+   * no unwind: the Stop interrupted one turn, the goal stayed active and the
+   * runtime could start the next one, while the mission kept reading On it.
+   * Here the Stop pauses the goal's mission as D10 pauses a running turn's,
+   * and the owner's next turn resumes both (D11). The continuation turn, if
+   * one is running, is marked stopped by the owner, so its interrupted
+   * result is not posted as a reply or an error.
+   *
+   * Null when there is nothing for this path to do: a turn the owner asked
+   * for was aborted (its own unwind pauses the mission), or no goal this
+   * daemon armed holds the chat (a Stop between turns pauses nothing).
+   */
+  private stopKeepWorking(
+    chatId: number,
+    assistantId: number,
+    ownerTurnAborted: boolean,
+  ): GoalStop | null {
+    const continuation = this.adoptedTurns.get(chatId);
+    if (continuation) abortWith(continuation, "owner_stop");
+    if (ownerTurnAborted) return null;
+    const missionId = this.goalLane.missionFor(chatId);
+    if (missionId === null) return null;
+    return this.missionLane.stoppedGoalByOwner({ chatId, assistantId, missionId });
+  }
+
+  /**
    * Take ownership of a turn the app server started by itself.
    *
    * While a goal is active the runtime runs continuation turns with nobody
@@ -1247,6 +1295,10 @@ export class CodexAdapter {
       { assistantId, chatId },
     );
     let sentViaTool = false;
+    // An owner Stop aborts it (stopKeepWorking, D35): its tool waits end, and
+    // its interrupted result is the Stop's, not a reply.
+    const controller = new AbortController();
+    this.adoptedTurns.set(chatId, controller);
     const context: ToolContext = {
       assistantId,
       chatId,
@@ -1254,7 +1306,7 @@ export class CodexAdapter {
       // owner is the only person it can act for.
       userId: this.ownerId,
       readUserId: this.ownerId,
-      signal: new AbortController().signal,
+      signal: controller.signal,
       onReply: () => {
         sentViaTool = true;
       },
@@ -1339,28 +1391,48 @@ export class CodexAdapter {
         // the goal ended would make it build a SECOND mission for this work.
       },
       deliver: async (result) => {
-        await progressWork;
-        // The same clock an ordinary turn notes, in the same place: before
-        // this turn's card is closed inside publishTurnResult.
-        this.noteTurnClock(chatId, result);
-        // Before the reply, exactly where an ordinary turn clears it: a list
-        // left behind is the finished turn's plan sitting under the next
-        // turn's work, re sent by the lane's keepalive until the backend
-        // sweeps it.
-        await this.stepsLane?.finalizeTurn(chatId);
-        await this.publishTurnResult({
-          assistantId,
-          chatId,
-          replyHandle,
-          result,
-          sentViaTool,
-        });
-        // After the reply, never before: the run report is the record of a
-        // turn that finished, and the cap is only reached at the end of one.
-        await this.goalLane.noteTurnFinished(chatId, {
-          text: result.finalAgentMessageText,
-          error: result.error,
-        });
+        try {
+          await progressWork;
+          if (controller.signal.aborted && result.error) {
+            // The owner's Stop interrupted it (D35). "Stopped." already said
+            // so, and the partial text and the runtime's "Stopped by you."
+            // are neither a reply nor an error, exactly as for a turn the
+            // owner asked for. A turn that finished before the Stop reached
+            // it has no error and is delivered below as usual. The goal
+            // lane still counts the turn it started.
+            await this.stepsLane?.finalizeTurn(chatId);
+            await replyHandle.finalizeTurn().catch(() => {});
+            await this.goalLane.noteTurnFinished(chatId, {
+              text: result.finalAgentMessageText,
+              error: result.error,
+            });
+            return;
+          }
+          // The same clock an ordinary turn notes, in the same place: before
+          // this turn's card is closed inside publishTurnResult.
+          this.noteTurnClock(chatId, result);
+          // Before the reply, exactly where an ordinary turn clears it: a list
+          // left behind is the finished turn's plan sitting under the next
+          // turn's work, re sent by the lane's keepalive until the backend
+          // sweeps it.
+          await this.stepsLane?.finalizeTurn(chatId);
+          await this.publishTurnResult({
+            assistantId,
+            chatId,
+            replyHandle,
+            result,
+            sentViaTool,
+          });
+          // After the reply, never before: the run report is the record of a
+          // turn that finished, and the cap is only reached at the end of one.
+          await this.goalLane.noteTurnFinished(chatId, {
+            text: result.finalAgentMessageText,
+            error: result.error,
+          });
+        } finally {
+          if (this.adoptedTurns.get(chatId) === controller)
+            this.adoptedTurns.delete(chatId);
+        }
       },
     };
   }
@@ -1507,6 +1579,11 @@ export class CodexAdapter {
         // The owner's Stop: the unwind pauses the chat's open mission with
         // "Stopped by you" instead of failing it.
         for (const controller of active ?? []) abortWith(controller, "owner_stop");
+        // A Keep working chat with no turn of the owner's to unwind (D35):
+        // the goal is held BEFORE the interrupt, so the runtime cannot start
+        // its next continuation turn in between.
+        const goalStop = this.stopKeepWorking(chatId, assistantId, stoppedTurn);
+        await goalStop?.held;
         await this.host.stopTurn(chatId);
         // The stop endpoint is advisory: its RPC result does not reach the
         // chat UI. A reply also settles a pending picker or stale Thinking
@@ -1520,6 +1597,7 @@ export class CodexAdapter {
           ok: true,
           payload: { stopped: stoppedTurn || stoppedControl, supported: true },
         });
+        await goalStop?.settled;
         return;
       }
       // The Sessions sheet (P6 stage 3, spec 5.6): this chat's own threads,

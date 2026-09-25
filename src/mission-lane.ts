@@ -119,6 +119,25 @@ export interface StoppedByOwnerParams {
   assistantId: number;
 }
 
+export interface StoppedGoalByOwnerParams {
+  chatId: number;
+  assistantId: number;
+  /** The mission behind the chat's Keep working goal, as the goal lane names it. */
+  missionId: number;
+}
+
+/** An owner Stop in a Keep working chat, on its way (D35). Neither promise rejects. */
+export interface GoalStop {
+  /**
+   * The chat's native goal is held (or the hold failed and was logged), so
+   * the runtime starts no next continuation turn: the caller interrupts the
+   * running one now, without waiting for the pause to be answered.
+   */
+  held: Promise<void>;
+  /** The pause has been answered, and an owner turn waiting on it may go. */
+  settled: Promise<void>;
+}
+
 /** Host-driven mission lifecycle derived from Codex todo_list events. */
 export class MissionLane {
   private readonly api: BgosApi;
@@ -297,15 +316,55 @@ export class MissionLane {
    * the owner's /stop). Opens the chat's settle, so an owner turn racing the
    * unwinding one waits for the pause before it reads the mission (D11): a
    * quick Resume ends active, never paused. A Stop between turns opens
-   * nothing and pauses nothing (D10).
+   * nothing here and pauses nothing (D10); in a chat Keep working holds,
+   * stoppedGoalByOwner takes it instead (D35).
    */
   noteStopRequested(chatId: number): void {
-    if (!this.turnByChat.has(chatId) || this.stopSettles.has(chatId)) return;
-    let resolve!: () => void;
-    const promise = new Promise<void>((done) => {
-      resolve = done;
+    if (!this.turnByChat.has(chatId)) return;
+    this.openStopSettle(chatId);
+  }
+
+  /**
+   * An owner Stop in a chat Keep working holds, when no turn the owner asked
+   * for was running there to unwind (D35, review F1). The runtime starts a
+   * continuation turn by itself and the host adopts it outside this lane, so
+   * without this the Stop interrupted one turn, the goal stayed active and
+   * the next continuation began: a Stop that did not stop. The goal's
+   * mission is paused exactly as D10 pauses a running turn's (stamped,
+   * held locally, the goal held, then the PATCH with STOP_PAUSE_REASON), and
+   * the owner's next turn resumes both as D11 says.
+   *
+   * The chat's settle opens at once, before anything is awaited, so an owner
+   * turn racing this Stop waits for the pause. `held` resolves once the goal
+   * is held and `settled` once the pause is answered; neither rejects. A
+   * mission the owner already paused keeps their reason, and their Pause
+   * already holds the goal.
+   */
+  stoppedGoalByOwner(params: StoppedGoalByOwnerParams): GoalStop {
+    const { chatId, assistantId, missionId } = params;
+    // Only the Stop that opened the chat's settle releases it: a second
+    // press while the first pause is in flight must not let a Resume past it.
+    const opened = this.openStopSettle(chatId);
+    let markHeld!: () => void;
+    const held = new Promise<void>((done) => {
+      markHeld = done;
     });
-    this.stopSettles.set(chatId, { promise, resolve });
+    const settled = (async () => {
+      try {
+        // Paused already, by the owner: theirs stands, with their reason.
+        if (this.pausedMissions.has(missionId)) return;
+        await this.pauseForStop(assistantId, chatId, missionId, markHeld);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `${LOG} mission stop pause failed chat=` + chatId + " err=" + errorText(err),
+        );
+      } finally {
+        markHeld();
+        if (opened) this.settleStop(chatId);
+      }
+    })();
+    return { held, settled };
   }
 
   /**
@@ -492,6 +551,7 @@ export class MissionLane {
     assistantId: number,
     chatId: number,
     missionId: number,
+    onGoalHeld: () => void = () => {},
   ): Promise<void> {
     // Stamped BEFORE the write, as a close is: the gateway emits
     // mission_paused from inside the request, and an unstamped frame would be
@@ -512,6 +572,7 @@ export class MissionLane {
         );
       }
     }
+    onGoalHeld();
     try {
       const answer = await this.api.pauseMission(assistantId, missionId, {
         reason: STOP_PAUSE_REASON,
@@ -587,6 +648,17 @@ export class MissionLane {
         `${LOG} goal resume on owner turn failed chat=` + chatId + " err=" + errorText(err),
       );
     }
+  }
+
+  /** Opens the chat's settle unless one is open. True when this call opened it. */
+  private openStopSettle(chatId: number): boolean {
+    if (this.stopSettles.has(chatId)) return false;
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => {
+      resolve = done;
+    });
+    this.stopSettles.set(chatId, { promise, resolve });
+    return true;
   }
 
   private settleStop(chatId: number): void {

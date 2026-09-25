@@ -2148,4 +2148,193 @@ describe("MissionLane: an owner Stop pauses, never fails (P6 stage 3)", () => {
     expect(hits(/\/missions\/active$/)).toHaveLength(2);
     expect(hits(/\/missions\/301\/resume$/)).toHaveLength(1);
   });
+
+  /**
+   * A Stop during a Keep working continuation turn (D35, review F1). The
+   * runtime starts that turn by itself and the host adopts it outside
+   * executeAndReply, so no turn of this lane's is there to unwind: the Stop
+   * pauses the goal's mission straight away, exactly as D10 pauses a running
+   * turn's, with the goal held first, and the owner's next turn puts both
+   * back as D11 says.
+   */
+  function keepWorkingLane(order: string[], api?: BgosApi) {
+    return lane(
+      {
+        goalOwnsChat: (chatId) => chatId === 42,
+        pauseGoalForChat: async (chatId) => {
+          order.push(`goal held ${chatId} @${server.requests.length}`);
+        },
+        resumeGoalForMission: async (missionId) => {
+          order.push(`goal given back ${missionId}`);
+        },
+        onSelfWrite: (missionId) => {
+          order.push(`stamp ${missionId} @${server.requests.length}`);
+        },
+      },
+      api,
+    );
+  }
+
+  /** An owner turn before the Stop: the chat is read once, as in a live chat. */
+  async function checkChat(target: MissionLane) {
+    stageActive(snapshot(701, "active", { keepWorking: true }));
+    await target.noteOwnerTurn(42, 7);
+  }
+
+  function gatedPause() {
+    const api = makeApi(baseUrl);
+    const gate = deferred<void>();
+    const realPause = api.pauseMission.bind(api);
+    vi.spyOn(api, "pauseMission").mockImplementation(async (...args) => {
+      await gate.promise;
+      return realPause(...args);
+    });
+    return { api, gate };
+  }
+
+  it("a Stop in a Keep working chat with no turn of the lane's holds the goal, then pauses the goal's mission, and the owner's next turn puts both back (D35)", async () => {
+    const order: string[] = [];
+    const target = keepWorkingLane(order);
+    await checkChat(target);
+    const before = server.requests.length;
+    stagePause(701);
+
+    const stop = target.stoppedGoalByOwner({ chatId: 42, assistantId: 7, missionId: 701 });
+    await stop.held;
+    await stop.settled;
+
+    const pause = server.requests.findIndex((r) => r.url.endsWith("/missions/701/pause"));
+    expect(pause).toBe(before);
+    expect(server.requests[pause]!.method).toBe("PATCH");
+    expect(server.requests[pause]!.body).toEqual({ reason: STOP_PAUSE_REASON });
+    // Stamped and held BEFORE the PATCH, as D10 does for a running turn.
+    expect(order).toEqual([`stamp 701 @${pause}`, `goal held 42 @${pause}`]);
+    // The goal lane names the mission, so nothing is read; nothing closes it.
+    expect(server.requests).toHaveLength(before + 1);
+    expect(hits(/\/missions\/701\/(fail|complete)$/)).toHaveLength(0);
+
+    // The owner's next turn: the chat was already read, so only the Stop's
+    // own marker makes it ask again, and it resumes both.
+    stageActive(snapshot(701, "paused", { keepWorking: true, pausedReason: STOP_PAUSE_REASON }));
+    stageResume(701);
+    await target.noteOwnerTurn(42, 7);
+    expect(hits(/\/missions\/701\/resume$/)).toHaveLength(1);
+    expect(order.at(-1)).toBe("goal given back 701");
+  });
+
+  it("the goal is held before the pause is answered, so the continuation turn can be interrupted at once (D35)", async () => {
+    const { api, gate } = gatedPause();
+    const order: string[] = [];
+    const target = keepWorkingLane(order, api);
+    stagePause(701);
+
+    const stop = target.stoppedGoalByOwner({ chatId: 42, assistantId: 7, missionId: 701 });
+    let settled = false;
+    void stop.settled.then(() => {
+      settled = true;
+    });
+    await stop.held;
+    expect(order).toEqual(["stamp 701 @0", "goal held 42 @0"]);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(settled).toBe(false);
+
+    gate.resolve();
+    await stop.settled;
+    expect(hits(/\/missions\/701\/pause$/)).toHaveLength(1);
+  });
+
+  it("a Resume that races that pause waits for it, with no turn of the lane's to wait on, so the mission ends active (D35)", async () => {
+    const { api, gate } = gatedPause();
+    const order: string[] = [];
+    const target = keepWorkingLane(order, api);
+    await checkChat(target);
+    const before = server.requests.length;
+    stagePause(701);
+    stageActive(snapshot(701, "paused", { keepWorking: true, pausedReason: STOP_PAUSE_REASON }));
+    stageResume(701);
+
+    const stop = target.stoppedGoalByOwner({ chatId: 42, assistantId: 7, missionId: 701 });
+    const owner = target.noteOwnerTurn(42, 7);
+    let ownerDone = false;
+    void owner.then(() => {
+      ownerDone = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(ownerDone).toBe(false);
+    expect(server.requests).toHaveLength(before);
+
+    gate.resolve();
+    await Promise.all([stop.settled, owner]);
+    expect(
+      server.requests
+        .slice(before)
+        .map((r) => `${r.method} ${r.url.split("?")[0]!.split("/").pop()}`),
+    ).toEqual(["PATCH pause", "GET active", "PATCH resume"]);
+    expect(order.at(-1)).toBe("goal given back 701");
+  });
+
+  it("a second Stop while the first one's pause is in flight does not let a Resume past it (D35)", async () => {
+    const { api, gate } = gatedPause();
+    const order: string[] = [];
+    const target = keepWorkingLane(order, api);
+    await checkChat(target);
+    stagePause(701);
+    stageActive(snapshot(701, "paused", { keepWorking: true, pausedReason: STOP_PAUSE_REASON }));
+    stageResume(701);
+
+    const first = target.stoppedGoalByOwner({ chatId: 42, assistantId: 7, missionId: 701 });
+    const second = target.stoppedGoalByOwner({ chatId: 42, assistantId: 7, missionId: 701 });
+    await second.settled;
+    const owner = target.noteOwnerTurn(42, 7);
+    let ownerDone = false;
+    void owner.then(() => {
+      ownerDone = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(ownerDone).toBe(false);
+
+    gate.resolve();
+    await Promise.all([first.settled, owner]);
+    expect(hits(/\/missions\/701\/pause$/)).toHaveLength(1);
+    expect(hits(/\/missions\/701\/resume$/)).toHaveLength(1);
+  });
+
+  it("an owner's own Pause stands: a Stop in the Keep working chat neither holds nor writes (D35)", async () => {
+    const order: string[] = [];
+    const target = keepWorkingLane(order);
+    // The owner paused it in the Mission view; the frame reached the lane.
+    target.notePaused(701);
+
+    const stop = target.stoppedGoalByOwner({ chatId: 42, assistantId: 7, missionId: 701 });
+    await stop.held;
+    await stop.settled;
+    expect(hits(/\/pause$/)).toHaveLength(0);
+    expect(order).toEqual([]);
+
+    stageActive(snapshot(701, "paused", { keepWorking: true, pausedReason: null }));
+    await target.noteOwnerTurn(42, 7);
+    expect(hits(/\/resume$/)).toHaveLength(0);
+  });
+
+  it("a failed pause in the Keep working chat keeps the goal held, and the owner's next turn gives it back (D35 with review F2)", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const order: string[] = [];
+    const target = keepWorkingLane(order);
+    await checkChat(target);
+    server.stage("PATCH", "/api/v1/integrations/assistants/7/missions/701/pause", 502, {
+      message: "Bad gateway",
+    });
+
+    const stop = target.stoppedGoalByOwner({ chatId: 42, assistantId: 7, missionId: 701 });
+    await expect(stop.settled).resolves.toBeUndefined();
+    expect(order.filter((line) => line.startsWith("goal"))).toEqual([
+      `goal held 42 @${server.requests.length - 1}`,
+    ]);
+
+    // The pause never landed: the server still has the mission active.
+    stageActive(snapshot(701, "active", { keepWorking: true }));
+    await target.noteOwnerTurn(42, 7);
+    expect(order.at(-1)).toBe("goal given back 701");
+    expect(hits(/\/resume$/)).toHaveLength(0);
+  });
 });

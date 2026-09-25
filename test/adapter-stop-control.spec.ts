@@ -29,7 +29,11 @@ function fixture(pendingMenu = false, running = false) {
     outbound: { sendText: vi.fn(async () => ({ id: 1 })) },
     // P6 stage 3: the Stop opens the chat's settle on the mission lane
     // before it aborts, so a racing Resume waits for the pause.
-    missionLane: { noteStopRequested: vi.fn() },
+    missionLane: { noteStopRequested: vi.fn(), stoppedGoalByOwner: vi.fn() },
+    // No Keep working goal holds the chat, and no continuation turn runs
+    // (D35 has its own cases below).
+    goalLane: { missionFor: vi.fn(() => null) },
+    adoptedTurns: new Map(),
     api: {
       postVoiceRpcAck: vi.fn(async () => {}),
       postVoiceRpcResult: vi.fn(async () => {}),
@@ -170,7 +174,10 @@ describe("an owner Stop pauses the mission, never fails it (P6 stage 3)", () => 
       missionLane: {
         noteStopRequested: vi.fn(() => order.push(`settle, aborted=${controller.signal.aborted}`)),
         clearStopMarker: vi.fn(() => order.push(`forget, aborted=${controller.signal.aborted}`)),
+        stoppedGoalByOwner: vi.fn(),
       },
+      goalLane: { missionFor: vi.fn(() => null) },
+      adoptedTurns: new Map(),
     });
     const replyHandle = { sendText: vi.fn(async () => {}) };
     const args = (name: string) => ({
@@ -573,6 +580,330 @@ describe("an owner Stop pauses the mission, never fails it (P6 stage 3)", () => 
       "goal given back 701",
     ]);
     expect(api.failMission).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * A Stop during a Keep working continuation turn (D35, review F1).
+ *
+ * The runtime starts a continuation turn by itself and the host adopts it
+ * outside executeAndReply, so it has no turn controller: before this, the
+ * Stop interrupted that one turn and nothing else. No pause, no goal hold,
+ * the native goal still active, and the runtime free to start the next
+ * continuation, so the mission kept reading On it. Now, when no turn the
+ * owner asked for was aborted but Keep working holds the chat, the Stop
+ * pauses the goal's mission as D10 pauses a running turn's: the goal held
+ * first, THEN the interrupt, and the pause answered before the handler ends.
+ * A chat with no goal and no running turn still pauses nothing.
+ */
+describe("a Stop in a Keep working chat pauses the goal's mission (D35)", () => {
+  function goalStopStub(order: string[]) {
+    return vi.fn(() => {
+      order.push("pause started");
+      return {
+        held: Promise.resolve().then(() => {
+          order.push("goal held");
+        }),
+        settled: new Promise<void>((resolve) =>
+          setTimeout(() => {
+            order.push("pause answered");
+            resolve();
+          }, 10),
+        ),
+      };
+    });
+  }
+
+  function keepWorking(adapter: any, order: string[]) {
+    adapter.goalLane = { missionFor: vi.fn((chatId: number) => (chatId === 20 ? 701 : null)) };
+    adapter.missionLane.stoppedGoalByOwner = goalStopStub(order);
+    adapter.host.stopTurn = vi.fn(async () => {
+      order.push("interrupt");
+    });
+  }
+
+  it("the Stop button, with no turn of the owner's running: the goal held, THEN the interrupt, and the pause answered before the handler ends", async () => {
+    const { adapter, frame } = fixture();
+    const order: string[] = [];
+    keepWorking(adapter, order);
+    adapter.outbound.sendText = vi.fn(async () => {
+      order.push("Stopped.");
+      return { id: 1 };
+    });
+
+    await adapter.handleControl(frame);
+
+    expect(adapter.missionLane.stoppedGoalByOwner).toHaveBeenCalledTimes(1);
+    expect(adapter.missionLane.stoppedGoalByOwner).toHaveBeenCalledWith({
+      chatId: 20,
+      assistantId: 10,
+      missionId: 701,
+    });
+    expect(order).toEqual(["pause started", "goal held", "interrupt", "Stopped.", "pause answered"]);
+    expect(adapter.outbound.sendText).toHaveBeenCalledTimes(1);
+  });
+
+  it("/stop, with no turn of the owner's running: the same pause, the goal held before the interrupt", async () => {
+    const { adapter, replyHandle, args } = dispatchFixtureWithout();
+    const order: string[] = [];
+    keepWorking(adapter, order);
+    replyHandle.sendText = vi.fn(async () => {
+      order.push("Stopped.");
+    });
+
+    await adapter.codexDispatch(args("stop"));
+
+    expect(adapter.missionLane.stoppedGoalByOwner).toHaveBeenCalledWith({
+      chatId: 20,
+      assistantId: 10,
+      missionId: 701,
+    });
+    expect(order).toEqual(["pause started", "goal held", "interrupt", "Stopped.", "pause answered"]);
+    expect(replyHandle.sendText).toHaveBeenCalledWith(STOP_CONFIRMATION_HARD);
+  });
+
+  it("a Stop with no goal and no running turn pauses nothing (the Stop between turns row)", async () => {
+    const { adapter, frame } = fixture();
+    await adapter.handleControl(frame);
+    expect(adapter.goalLane.missionFor).toHaveBeenCalledWith(20);
+    expect(adapter.missionLane.stoppedGoalByOwner).not.toHaveBeenCalled();
+
+    const dispatch = dispatchFixtureWithout();
+    await dispatch.adapter.codexDispatch(dispatch.args("stop"));
+    expect(dispatch.adapter.missionLane.stoppedGoalByOwner).not.toHaveBeenCalled();
+  });
+
+  it("a Stop that aborts a turn the owner asked for leaves the pause to that turn's unwind (D10)", async () => {
+    const { adapter, frame } = fixture(false, true);
+    keepWorking(adapter, []);
+    await adapter.handleControl(frame);
+    expect(adapter.missionLane.stoppedGoalByOwner).not.toHaveBeenCalled();
+
+    const dispatch = dispatchFixture();
+    keepWorking(dispatch.adapter, []);
+    await dispatch.adapter.codexDispatch(dispatch.args("stop"));
+    expect(dispatch.adapter.missionLane.stoppedGoalByOwner).not.toHaveBeenCalled();
+  });
+
+  it("/new in a Keep working chat pauses nothing", async () => {
+    const { adapter, args } = dispatchFixtureWithout();
+    keepWorking(adapter, []);
+    await adapter.codexDispatch(args("new"));
+    expect(adapter.missionLane.stoppedGoalByOwner).not.toHaveBeenCalled();
+  });
+
+  /** /stop's harness with no turn of the owner's running in the chat. */
+  function dispatchFixtureWithout() {
+    const adapter = Object.create(CodexAdapter.prototype) as any;
+    Object.assign(adapter, {
+      chatToAssistant: new Map<number, number>(),
+      turnControllers: new Map(),
+      generations: new Map(),
+      lastInput: new Map(),
+      lastNativeOptions: new Map(),
+      nativeCommands: { handle: vi.fn(async () => false), cancel: vi.fn(() => false) },
+      host: { stopTurn: vi.fn(async () => {}), resetChat: vi.fn() },
+      missionLane: {
+        noteStopRequested: vi.fn(),
+        clearStopMarker: vi.fn(async () => {}),
+        stoppedGoalByOwner: vi.fn(),
+      },
+      goalLane: { missionFor: vi.fn(() => null) },
+      adoptedTurns: new Map(),
+    });
+    const replyHandle = { sendText: vi.fn(async () => {}) };
+    const args = (name: string) => ({
+      origin: "bgos",
+      agentRoute: "codex",
+      assistantId: 10,
+      chatId: 20,
+      messageId: 5,
+      userId: "owner-1",
+      text: `/${name}`,
+      attachments: [],
+      systemPrompt: "",
+      replyHandle,
+      command: { name, args: "" },
+      messageType: "slash_command",
+      senderType: "user",
+    });
+    return { adapter, replyHandle, args };
+  }
+
+  function dispatchFixture() {
+    const made = dispatchFixtureWithout();
+    made.adapter.turnControllers = new Map([[20, new Set([new AbortController()])]]);
+    return made;
+  }
+
+  /**
+   * End to end, with the real mission lane and a real adopted continuation
+   * turn: the failure the review found, step by step. The owner armed Keep
+   * working, the runtime started a continuation turn on its own, and the
+   * owner pressed Stop.
+   */
+  function continuationFixture() {
+    const order: string[] = [];
+    let paused = false;
+    const mission = () => ({
+      id: 701,
+      assistantId: 10,
+      chatId: 20,
+      title: "Make the page load in under two seconds",
+      status: paused ? "paused" : "active",
+      origin: "derived",
+      progress: null,
+      keepWorking: true,
+      pausedReason: paused ? STOP_PAUSE_REASON : null,
+    });
+    const api = {
+      getActiveMission: vi.fn(async () => mission()),
+      pauseMission: vi.fn(async (_a: number, id: number, body: { reason?: string }) => {
+        order.push(`PATCH pause ${id} "${body.reason}"`);
+        paused = true;
+        return mission();
+      }),
+      resumeMission: vi.fn(async (_a: number, id: number) => {
+        order.push(`PATCH resume ${id}`);
+        paused = false;
+        return mission();
+      }),
+      failMission: vi.fn(async () => {
+        order.push("PATCH fail");
+      }),
+      completeMission: vi.fn(async () => {
+        order.push("PATCH complete");
+      }),
+      setStatus: vi.fn(async () => {}),
+      postVoiceRpcAck: vi.fn(async () => {}),
+      postVoiceRpcResult: vi.fn(async () => {}),
+    };
+    const goalLane = {
+      owns: (chatId: number) => chatId === 20,
+      missionFor: (chatId: number) => (chatId === 20 ? 701 : null),
+      noteTurnStarted: vi.fn(),
+      noteTurnFinished: vi.fn(async () => {}),
+      pauseForChat: vi.fn(async (chatId: number) => {
+        order.push(`goal held ${chatId}`);
+        return null;
+      }),
+      noteResumed: vi.fn(async (missionId: number) => {
+        order.push(`goal given back ${missionId}`);
+      }),
+    };
+    const { adapter, frame } = fixture();
+    adapter.ownerId = "owner-1";
+    adapter.chatToAssistant.set(20, 10);
+    adapter.api = api;
+    adapter.goalLane = goalLane;
+    adapter.missionLane = new MissionLane(api as never, {
+      goalOwnsChat: (chatId) => goalLane.owns(chatId),
+      pauseGoalForChat: (chatId) => goalLane.pauseForChat(chatId),
+      resumeGoalForMission: (missionId) => goalLane.noteResumed(missionId),
+      onSelfWrite: (missionId) => order.push(`stamp ${missionId}`),
+    });
+    adapter.missionControl = { applyBulletin: (_chatId: number, input: unknown) => input };
+    adapter.tools = { handleRequest: vi.fn(async () => ({})) };
+    adapter.toolProgress = {
+      sendToolStart: vi.fn(async () => {}),
+      finalizeTurn: vi.fn(async () => {}),
+      noteTurnMeta: vi.fn(),
+    };
+    adapter.outbound.sendAgentError = vi.fn(async () => {});
+    adapter.host.stopTurn = vi.fn(async () => {
+      order.push("interrupt");
+    });
+    return { adapter, frame, api, goalLane, order };
+  }
+
+  it("end to end: the Stop pauses the goal's mission and holds the goal before it interrupts; the interrupted turn is not a reply or an error; Resume puts both back", async () => {
+    const { adapter, frame, api, goalLane, order } = continuationFixture();
+    const continuation = adapter.adoptGoalTurn(20)!;
+    expect(continuation).not.toBeNull();
+
+    await adapter.handleControl(frame);
+
+    expect(order).toContain(`PATCH pause 701 "${STOP_PAUSE_REASON}"`);
+    expect(order.indexOf("stamp 701")).toBeLessThan(order.indexOf(`PATCH pause 701 "${STOP_PAUSE_REASON}"`));
+    expect(order.indexOf("goal held 20")).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf("goal held 20")).toBeLessThan(order.indexOf("interrupt"));
+    expect(api.failMission).not.toHaveBeenCalled();
+
+    // The runtime reports the interrupted continuation turn back.
+    await continuation.deliver({
+      replyText: "I measured the page and started on the",
+      finalAgentMessageText: "I measured the page and started on the",
+      turnCompleted: false,
+      error: "Stopped by you.",
+      threadId: "thread-20",
+    });
+    // "Stopped." once, and nothing else: no half sentence, no red error.
+    expect(adapter.outbound.sendText).toHaveBeenCalledTimes(1);
+    expect(adapter.outbound.sendText).toHaveBeenCalledWith({
+      assistantId: 10,
+      chatId: 20,
+      text: STOP_CONFIRMATION_HARD,
+    });
+    expect(adapter.outbound.sendAgentError).not.toHaveBeenCalled();
+    // The goal lane still counts the turn it started.
+    expect(goalLane.noteTurnFinished).toHaveBeenCalledWith(20, {
+      text: "I measured the page and started on the",
+      error: "Stopped by you.",
+    });
+
+    // The owner presses Resume: an ordinary owner message.
+    adapter.host.runTurn = vi.fn(async () => ({
+      error: null,
+      replyText: "Picking up from the images.",
+      turnCompleted: true,
+      finalAgentMessageText: "Picking up from the images.",
+    }));
+    const reply = {
+      sendTyping: vi.fn(async () => {}),
+      finalizeTurn: vi.fn(async () => {}),
+      sendText: vi.fn(async () => {}),
+    };
+    await adapter.executeAndReply(10, 20, RESUME_TURN_TEXT, reply, {
+      userId: "owner-1",
+      senderType: "user",
+      messageId: 6,
+    });
+    expect(order.slice(-3)).toEqual(["stamp 701", "PATCH resume 701", "goal given back 701"]);
+    expect(api.failMission).not.toHaveBeenCalled();
+  });
+
+  it("a continuation turn that finished before the Stop reached it still delivers its reply", async () => {
+    const { adapter, frame } = continuationFixture();
+    const continuation = adapter.adoptGoalTurn(20)!;
+    await adapter.handleControl(frame);
+
+    await continuation.deliver({
+      replyText: "The page now loads in 1.8 seconds.",
+      finalAgentMessageText: "The page now loads in 1.8 seconds.",
+      turnCompleted: true,
+      error: null,
+      threadId: "thread-20",
+    });
+    expect(adapter.outbound.sendText).toHaveBeenCalledWith(
+      expect.objectContaining({ chatId: 20, text: "The page now loads in 1.8 seconds." }),
+    );
+  });
+
+  it("a continuation turn with no Stop still shows a real error as an error", async () => {
+    const { adapter } = continuationFixture();
+    const continuation = adapter.adoptGoalTurn(20)!;
+    await continuation.deliver({
+      replyText: "",
+      finalAgentMessageText: "",
+      turnCompleted: false,
+      error: "Codex could not finish the turn.",
+      threadId: "thread-20",
+    });
+    expect(adapter.outbound.sendAgentError).toHaveBeenCalledWith({
+      assistantId: 10,
+      chatId: 20,
+      reason: "Codex could not finish the turn.",
+    });
   });
 });
 
