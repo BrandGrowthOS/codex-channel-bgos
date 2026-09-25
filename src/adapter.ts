@@ -81,6 +81,7 @@ import { unescapeButton } from "./interactions.js";
 import type { VoiceRpcFrame, VoiceRpcResultBody } from "./voice-rpc.js";
 import { VoiceRpcHandler } from "./hoai-shared/voice-rpc.js";
 import { buildCodexInput, type InboundFileForCodex } from "./inbound-input.js";
+import { characterCount } from "./clip-text.js";
 import { parseReply } from "./reply-markers.js";
 import { createSkillsHandler } from "./skills-handler.js";
 import type { AuthResolutionOk } from "./auth-mode.js";
@@ -144,7 +145,7 @@ function sessionQueryOf(payload: Record<string, unknown>): string | undefined {
   if (typeof query !== "string")
     throw new ControlRefusal("invalid", "A session search must be text.");
   const trimmed = query.trim();
-  if (trimmed.length > SESSION_QUERY_MAX)
+  if (characterCount(trimmed) > SESSION_QUERY_MAX)
     throw new ControlRefusal(
       "invalid",
       `A session search holds at most ${SESSION_QUERY_MAX} characters.`,
@@ -173,7 +174,7 @@ function sessionTitleOf(payload: Record<string, unknown>): string {
   const title = typeof payload.title === "string" ? payload.title.trim() : "";
   if (
     !title ||
-    title.length > SESSION_RENAME_MAX ||
+    characterCount(title) > SESSION_RENAME_MAX ||
     /[\u0000-\u001f\u007f]/.test(title)
   )
     throw new ControlRefusal(

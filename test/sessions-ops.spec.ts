@@ -22,6 +22,7 @@ import {
   RENAME_SESSION,
   RESUME_SESSION,
   SESSION_OPS,
+  SESSION_QUERY_MAX,
   SESSION_RENAME_MAX,
 } from "../src/session-controls-contract.js";
 import { normalizeVoiceRpc } from "../src/voice-rpc.js";
@@ -374,6 +375,18 @@ describe("the Sessions ops on the control lane", () => {
       expect(server.request).not.toHaveBeenCalled();
     });
 
+    it("counts a search in characters, as the app and the backend do: 80 emoji pass, 81 are refused", async () => {
+      // One emoji is one character to the app (Array.from) and to the
+      // backend's validator, and two UTF-16 units to String.length.
+      const smile = "\u{1F600}";
+      const ok = frame(LIST_SESSIONS, { limit: 50, query: smile.repeat(SESSION_QUERY_MAX) });
+      await adapter.handleControl(ok);
+      expect(answerTo(adapter, ok)).toMatchObject({ ok: true, payload: { sessions: [] } });
+      const long = frame(LIST_SESSIONS, { limit: 50, query: smile.repeat(SESSION_QUERY_MAX + 1) });
+      await adapter.handleControl(long);
+      expect(answerTo(adapter, long).error.code).toBe("invalid");
+    });
+
     it("answers failed when Codex cannot be reached", async () => {
       server.start.mockRejectedValueOnce(new Error("Codex is not connected."));
       const f = frame(LIST_SESSIONS, { limit: 50 });
@@ -538,6 +551,21 @@ describe("the Sessions ops on the control lane", () => {
       const ok = frame(RENAME_SESSION, { sessionId: "t-old1", title: "x".repeat(SESSION_RENAME_MAX) });
       await adapter.handleControl(ok);
       expect(answerTo(adapter, ok).ok).toBe(true);
+    });
+
+    it("counts a name in characters, as the app and the backend do: 80 emoji pass, 81 are refused", async () => {
+      const smile = "\u{1F600}";
+      const long = frame(RENAME_SESSION, { sessionId: "t-old1", title: smile.repeat(SESSION_RENAME_MAX + 1) });
+      await adapter.handleControl(long);
+      expect(answerTo(adapter, long).error.code).toBe("invalid");
+      const name = smile.repeat(SESSION_RENAME_MAX);
+      const ok = frame(RENAME_SESSION, { sessionId: "t-old1", title: name });
+      await adapter.handleControl(ok);
+      expect(answerTo(adapter, ok)).toEqual({
+        ok: true,
+        payload: { renamed: true, sessionId: "t-old1", title: name },
+      });
+      expect(server.request).toHaveBeenCalledWith("thread/name/set", { threadId: "t-old1", name });
     });
 
     it("method not found gives unsupported and turns the rename ability off for the life of the process", async () => {

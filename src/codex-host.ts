@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { resolve, join, dirname as dirnameOf } from "node:path";
 import { homedir } from "node:os";
 import { AppServer, codexEnvironment, type RpcObject } from "./app-server.js";
+import { clipCharacters } from "./clip-text.js";
 import { type TodoListSignal } from "./event-mapper.js";
 import {
   childRowsFromCollabItem,
@@ -50,6 +51,7 @@ import {
 import {
   SESSION_BRANCH_MAX,
   SESSION_PREVIEW_MAX,
+  SESSION_TITLE_MAX,
   type SessionAbilities,
   type SessionErrorCode,
 } from "./session-controls-contract.js";
@@ -345,7 +347,9 @@ export function conversationLabel(thread: RpcObject): string {
   const label = withoutEnvelope(
     String(thread.name || thread.preview || "").trim(),
   );
-  if (label) return label.replace(/\s+/g, " ").slice(0, 120);
+  // In characters, as the backend reads a row: a name the rename accepted
+  // (80 characters, any of them an emoji) comes back whole.
+  if (label) return clipCharacters(label.replace(/\s+/g, " "), SESSION_TITLE_MAX);
   const timestamp = Number(thread.createdAt);
   const date = new Date(timestamp * 1000);
   return Number.isFinite(timestamp) &&
@@ -366,7 +370,7 @@ export function conversationPreview(thread: RpcObject): string | null {
   const text = withoutEnvelope(String(thread.preview ?? "").trim())
     .replace(/\s+/g, " ")
     .trim();
-  return text ? text.slice(0, SESSION_PREVIEW_MAX) : null;
+  return text ? clipCharacters(text, SESSION_PREVIEW_MAX) : null;
 }
 
 /** Unix seconds as the runtime records them, as ISO 8601, or null. */
@@ -795,7 +799,7 @@ export class CodexHost {
   ): SavedThread {
     const branch =
       typeof thread.gitInfo?.branch === "string"
-        ? thread.gitInfo.branch.trim().slice(0, SESSION_BRANCH_MAX)
+        ? clipCharacters(thread.gitInfo.branch.trim(), SESSION_BRANCH_MAX)
         : "";
     return {
       id,
