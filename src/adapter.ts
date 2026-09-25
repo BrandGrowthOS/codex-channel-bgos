@@ -23,7 +23,9 @@ import { CommandsSync } from "./commands-sync.js";
 import { CommandUpgrade } from "./command-upgrade.js";
 import { ToolProgressOrchestrator } from "./tool-progress.js";
 import { MissionControlLane } from "./mission-control.js";
-import { MissionLane } from "./mission-lane.js";
+import { MissionLane, type MissionTurnToken } from "./mission-lane.js";
+import { abortCauseOf, abortWith, missionAbortOutcome } from "./abort-cause.js";
+import { STOP_CONFIRMATION_HARD } from "./session-controls-contract.js";
 import { GoalLane } from "./goal-lane.js";
 import { StepsLane, stepsChatKindAdmits } from "./steps-lane.js";
 import { MeetingLane } from "./meeting-lane.js";
@@ -84,6 +86,21 @@ const LOG = "[codex-channel-bgos]";
 function promptTextFromInput(input: Input): string {
   if (typeof input === "string") return input;
   return input.find((part) => part.type === "text")?.text ?? "";
+}
+
+/**
+ * Is this turn a person coming back to the chat (P6 stage 3, D11)? A typed
+ * message, the Resume sentence, an owner slash command that starts a turn,
+ * a button they clicked. Never a scheduled wake (sender system), a peer
+ * agent's message or side thread, or a meeting turn; a goal's continuation
+ * turn never reaches executeAndReply at all. A turn with no person on it is
+ * not one: only the owner coming back resumes a mission their Stop paused.
+ */
+function isOwnerAuthoredTurn(source?: Partial<DispatchArgs>): boolean {
+  if (!source || typeof source.userId !== "string" || !source.userId) return false;
+  if (source.senderType === "agent" || source.senderType === "system") return false;
+  if (source.peerConversationId) return false;
+  return source.chatKind !== "meeting";
 }
 
 export interface FatalInfo {
@@ -187,6 +204,11 @@ export class CodexAdapter {
       // this the first plan of the goal's own first turn would create a
       // SECOND derived mission for one piece of work.
       goalOwnsChat: (chatId) => this.goalLane.owns(chatId),
+      // An owner Stop holds the chat's native goal before it pauses the
+      // mission, so no continuation turn starts ahead of the mission_paused
+      // echo; the owner's next turn gives it back (P6 stage 3, C-32).
+      pauseGoalForChat: (chatId) => this.goalLane.pauseForChat(chatId),
+      resumeGoalForMission: (missionId) => this.goalLane.noteResumed(missionId),
     });
     this.goalLane = new GoalLane({
       api: this.api,
@@ -535,8 +557,10 @@ export class CodexAdapter {
     this.stopSecretsWatch();
     this.meetings.stop();
     for (const controller of this.voiceTasks.values()) controller.abort();
+    // Tagged, so the unwind fails the plan's mission with the shutdown's own
+    // words; a mission a Stop already paused is left paused by dispose.
     for (const controllers of this.turnControllers.values())
-      for (const controller of controllers) controller.abort();
+      for (const controller of controllers) abortWith(controller, "shutdown");
     this.host.close();
     this.heartbeat.stop();
     this.ws.disconnect();
@@ -645,12 +669,20 @@ export class CodexAdapter {
       if (command.name === "stop" || command.name === "new") {
         this.nativeCommands.cancel(chatId);
         this.generations.set(chatId, (this.generations.get(chatId) ?? 0) + 1);
+        // BEFORE the abort: an owner turn racing the unwind waits for the
+        // pause, so a quick Resume ends active (P6 stage 3, D11).
+        if (command.name === "stop") this.missionLane.noteStopRequested(chatId);
+        // /stop is the owner's Stop and pauses the chat's open mission; /new
+        // ends the plan's mission, with its own words.
         for (const controller of this.turnControllers.get(chatId) ?? [])
-          controller.abort();
+          abortWith(controller, command.name === "stop" ? "owner_stop" : "new");
+        // A later owner turn must not resume a mission from the context /new
+        // just discarded.
+        if (command.name === "new") this.missionLane.clearStopMarker(chatId);
         await this.host.stopTurn(chatId);
       }
       if (command.name === "stop") {
-        await replyHandle.sendText("Stopped.");
+        await replyHandle.sendText(STOP_CONFIRMATION_HARD);
         return;
       }
       if (command.name === "compact") {
@@ -772,6 +804,12 @@ export class CodexAdapter {
     // refused by the backend's write gate, so the lane must never be handed
     // one. An absent kind is a DM (the REST inbound backfill carries none).
     const stepsAdmitted = stepsChatKindAdmits(source?.chatKind);
+    // The owner coming back resumes the mission their own Stop paused in this
+    // chat, and the first owner turn after a restart asks the server once
+    // (P6 stage 3, D11 and D12). Awaited BEFORE beginTurn, so the plan this
+    // turn makes lands on the resumed mission. Never throws.
+    if (isOwnerAuthoredTurn(source))
+      await this.missionLane.noteOwnerTurn(chatId, assistantId);
     const missionTurn = this.missionLane.beginTurn({
       assistantId,
       chatId,
@@ -875,21 +913,34 @@ export class CodexAdapter {
         // Stop already acknowledges in chat. Native interruption may resolve
         // with partial text and an error; neither is a new assistant reply.
         await progressWork;
-        await this.missionLane.finalizeTurn({
+        await this.settleAbortedMission(
+          assistantId,
           chatId,
-          turnToken: missionTurn,
-          error: "Stopped by you.",
-        });
+          missionTurn,
+          controller.signal,
+        );
         if (stepsAdmitted) await this.stepsLane?.finalizeTurn(chatId);
         await replyHandle.finalizeTurn().catch(() => {});
         return;
       }
     } catch (err) {
-      await this.missionLane.finalizeTurn({
-        chatId,
-        turnToken: missionTurn,
-        error: err instanceof Error ? err.message : String(err),
-      });
+      // The abort's cause FIRST. This branch used to fail the mission before
+      // it looked at the signal, so an owner Stop that made the runtime throw
+      // read Did not finish. An abort is never a failure of its own.
+      if (controller.signal.aborted) {
+        await this.settleAbortedMission(
+          assistantId,
+          chatId,
+          missionTurn,
+          controller.signal,
+        );
+      } else {
+        await this.missionLane.finalizeTurn({
+          chatId,
+          turnToken: missionTurn,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
       if (stepsAdmitted) await this.stepsLane?.finalizeTurn(chatId);
       if (controller.signal.aborted) {
         await progressWork;
@@ -935,6 +986,30 @@ export class CodexAdapter {
       replyHandle,
       result,
       sentViaTool,
+    });
+  }
+
+  /**
+   * An aborted turn's mission, by the abort's cause (P6 stage 3, D9). An
+   * owner Stop PAUSES it with the contract's reason; /new, a shutdown, a
+   * revoked pairing and an untagged abort FAIL it, each with its own words,
+   * as an abort always did.
+   */
+  private async settleAbortedMission(
+    assistantId: number,
+    chatId: number,
+    turnToken: MissionTurnToken,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const outcome = missionAbortOutcome(abortCauseOf(signal));
+    if (outcome.kind === "pause") {
+      await this.missionLane.stoppedByOwner({ chatId, turnToken, assistantId });
+      return;
+    }
+    await this.missionLane.finalizeTurn({
+      chatId,
+      turnToken,
+      error: outcome.summary,
     });
   }
 
@@ -1314,12 +1389,21 @@ export class CodexAdapter {
         const stoppedControl = this.nativeCommands.cancel(chatId);
         const stoppedTurn = !!active?.size;
         this.generations.set(chatId, (this.generations.get(chatId) ?? 0) + 1);
-        for (const controller of active ?? []) controller.abort();
+        // BEFORE the abort: an owner turn racing the unwind waits for the
+        // pause, so a quick Resume ends active (P6 stage 3, D11).
+        this.missionLane.noteStopRequested(chatId);
+        // The owner's Stop: the unwind pauses the chat's open mission with
+        // "Stopped by you" instead of failing it.
+        for (const controller of active ?? []) abortWith(controller, "owner_stop");
         await this.host.stopTurn(chatId);
         // The stop endpoint is advisory: its RPC result does not reach the
         // chat UI. A reply also settles a pending picker or stale Thinking
         // state when there is no native model turn left to emit completion.
-        await this.outbound.sendText({ assistantId, chatId, text: "Stopped." });
+        await this.outbound.sendText({
+          assistantId,
+          chatId,
+          text: STOP_CONFIRMATION_HARD,
+        });
         await this.api.postVoiceRpcResult(frame.rpcId, {
           ok: true,
           payload: { stopped: stoppedTurn || stoppedControl, supported: true },
@@ -1661,8 +1745,10 @@ export class CodexAdapter {
   ): void {
     if (this.fatalLatched) return;
     this.fatalLatched = true;
+    // Tagged, so the unwind fails the plan's mission with the latch's own
+    // words rather than "Stopped by you", which is now a pause reason.
     for (const controllers of this.turnControllers.values())
-      for (const controller of controllers) controller.abort();
+      for (const controller of controllers) abortWith(controller, "revoked");
     for (const controller of this.voiceTasks.values()) controller.abort();
     this.meetings.stop();
     this.nativeCommands.close();
