@@ -110,18 +110,27 @@ function promptTextFromInput(input: Input): string {
 }
 
 /**
- * Is this turn a person coming back to the chat (P6 stage 3, D11)? A typed
+ * Is this turn the OWNER coming back to the chat (P6 stage 3, D11)? A typed
  * message, the Resume sentence, an owner slash command that starts a turn,
  * a button they clicked. Never a scheduled wake (sender system), a peer
  * agent's message or side thread, or a meeting turn; a goal's continuation
- * turn never reaches executeAndReply at all. A turn with no person on it is
- * not one: only the owner coming back resumes a mission their Stop paused.
+ * turn never reaches executeAndReply at all. And never another person: a
+ * group member or a shared agent's recipient is not the owner, so the sender
+ * must be the owner whoami named, compared exactly as the native session
+ * controls compare it (NativeCommands.handle) and as the Claude plugin reads
+ * D11 (isOwnerAuthoredInbound). A turn with no person on it is not one, and
+ * neither is any turn before the daemon knows who its owner is.
  */
-function isOwnerAuthoredTurn(source?: Partial<DispatchArgs>): boolean {
-  if (!source || typeof source.userId !== "string" || !source.userId) return false;
+function isOwnerAuthoredTurn(
+  source: Partial<DispatchArgs> | undefined,
+  ownerId: string,
+): boolean {
+  if (!source || typeof ownerId !== "string" || !ownerId) return false;
   if (source.senderType === "agent" || source.senderType === "system") return false;
   if (source.peerConversationId) return false;
-  return source.chatKind !== "meeting";
+  if (source.chatKind === "meeting") return false;
+  const sender = source.senderUserId ?? source.userId;
+  return typeof sender === "string" && sender !== "" && sender === ownerId;
 }
 
 /*
@@ -901,7 +910,7 @@ export class CodexAdapter {
     // chat, and the first owner turn after a restart asks the server once
     // (P6 stage 3, D11 and D12). Awaited BEFORE beginTurn, so the plan this
     // turn makes lands on the resumed mission. Never throws.
-    if (isOwnerAuthoredTurn(source))
+    if (isOwnerAuthoredTurn(source, this.ownerId))
       await this.missionLane.noteOwnerTurn(chatId, assistantId);
     const missionTurn = this.missionLane.beginTurn({
       assistantId,

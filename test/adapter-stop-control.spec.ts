@@ -209,6 +209,8 @@ describe("an owner Stop pauses the mission, never fails it (P6 stage 3)", () => 
     adapter.missionControl = { applyBulletin: (_chatId: number, input: unknown) => input };
     adapter.outbound.sendAgentError = vi.fn(async () => {});
     adapter.host.runTurn = vi.fn(async () => run(adapter));
+    // whoami's answer: only this person coming back resumes a Stop pause.
+    adapter.ownerId = "owner-1";
     return { adapter, reply };
   }
 
@@ -384,6 +386,24 @@ describe("an owner Stop pauses the mission, never fails it (P6 stage 3)", () => 
     ["a meeting turn", { userId: "owner-1", chatKind: "meeting" }, false],
     ["a turn with no person on it", {}, false],
     ["a turn with no source at all", undefined, false],
+    // D11 says OWNER authored, as the Claude plugin reads it: another person
+    // in a group chat or on a shared agent is not the owner coming back.
+    [
+      "a group member's message, not the owner's",
+      { userId: "owner-1", senderUserId: "member-2", senderType: "user", senderRelationship: "member" },
+      false,
+    ],
+    [
+      "a shared agent's recipient writing to it",
+      { userId: "recipient-3", senderUserId: "recipient-3", senderType: "user", senderRelationship: "shared_recipient" },
+      false,
+    ],
+    ["a message whose sender is blank", { userId: "owner-1", senderUserId: "", senderType: "user" }, false],
+    [
+      "the owner named as the sender in a group chat",
+      { userId: "owner-1", senderUserId: "owner-1", senderType: "user", chatKind: "group" },
+      true,
+    ],
   ] as const)("asks the mission lane about the owner's return for %s: %s", async (_label, source, owner) => {
     const { adapter, reply } = turnFixture(async () => ({
       error: null,
@@ -399,6 +419,17 @@ describe("an owner Stop pauses the mission, never fails it (P6 stage 3)", () => 
     } else {
       expect(adapter.missionLane.noteOwnerTurn).not.toHaveBeenCalled();
     }
+  });
+
+  it("never counts a turn as the owner's before the daemon knows who its owner is", async () => {
+    const { adapter, reply } = turnFixture(async () => ({
+      error: null,
+      replyText: "done",
+      turnCompleted: true,
+    }));
+    adapter.ownerId = "";
+    await adapter.executeAndReply(10, 20, "Work", reply, { userId: "owner-1", senderType: "user" });
+    expect(adapter.missionLane.noteOwnerTurn).not.toHaveBeenCalled();
   });
 
   it("waits for the owner's return to be settled BEFORE the turn begins", async () => {
@@ -471,6 +502,7 @@ describe("an owner Stop pauses the mission, never fails it (P6 stage 3)", () => 
       }),
     };
     const { adapter, frame } = fixture();
+    adapter.ownerId = "owner-1";
     adapter.api = api;
     adapter.goalLane = goalLane;
     // Built with the adapter's own wiring of these options (pinned below).
