@@ -1761,12 +1761,22 @@ describe("MissionLane: an owner Stop pauses, never fails (P6 stage 3)", () => {
   it("never resumes a mission paused with any reason but the exact contract one", async () => {
     const target = lane();
     for (const pausedReason of ["Waiting for the invoice", "stopped by you", "Stopped by you."]) {
-      stageActive(snapshot(301, "paused", { pausedReason }));
-      // A fresh chat each time, so the first owner turn reads the server.
-      await target.noteOwnerTurn(40 + pausedReason.length, 7);
+      // A fresh chat each time, so the first owner turn reads the server,
+      // and the mission IN that chat: a mission of another chat is never
+      // resumed whatever its reason, which would make this pass for the
+      // wrong reason.
+      const chatId = 40 + pausedReason.length;
+      stageActive(snapshot(301, "paused", { pausedReason, chatId }));
+      await target.noteOwnerTurn(chatId, 7);
     }
     expect(hits(/\/missions\/active$/)).toHaveLength(3);
     expect(hits(/\/resume$/)).toHaveLength(0);
+
+    // The same read with the exact reason does resume: the path is live.
+    stageActive(snapshot(301, "paused", { pausedReason: STOP_PAUSE_REASON, chatId: 70 }));
+    stageResume(301);
+    await target.noteOwnerTurn(70, 7);
+    expect(hits(/\/missions\/301\/resume$/)).toHaveLength(1);
   });
 
   it("a Resume that races the Stop's own pause waits for it, so the mission ends active", async () => {
