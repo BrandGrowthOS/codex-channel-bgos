@@ -154,6 +154,75 @@ describe("the publish workflow never advertises a held version as latest", () =>
   });
 
   /**
+   * P5 stage 5 (C-27, Build C): 0.15.0 is the steer fallback. It needs no
+   * backend of its own (a steer with nothing to steer runs as an ordinary
+   * message, and a landed steer posts nothing), and it is held only because it
+   * carries every hold before it, 0.14.0's included. So the one order that
+   * cannot leave latest behind is the same rule 0.14.0 set, one step on:
+   * promote it only after 0.14.0 is on latest, never before or in the same
+   * step, and say what promoting an older version afterwards does. The HOAI
+   * app steers only daemons at or past 0.15.0, so a host on latest keeps plain
+   * sends until this is promoted; that is the floor working, not a gap.
+   */
+  const ORDER_15 = "only after 0.14.0 is on latest, never before or in the same step";
+  const MOVES_BACK_15 = /promoting an older version after 0\.15\.0 moves latest back/i;
+
+  it("holds 0.15.0 behind 0.14.0 in all three texts a release reads", () => {
+    if (!heldInSource().includes("0.15.0")) return;
+    const flat = (text: string) =>
+      text
+        .split("\n")
+        .map((line) => line.replace(/^\s*(?:#|\*)?\s?/, ""))
+        .join(" ")
+        .replace(/\s+/g, " ");
+    const texts: Record<string, string> = {
+      "publish.yml": flat(workflow),
+      "src/interactions.ts": flat(readFileSync("src/interactions.ts", "utf8")),
+      "README.md": flat(readFileSync("README.md", "utf8")),
+    };
+    for (const [name, text] of Object.entries(texts)) {
+      expect(text, `${name} lost "0.15.0 adds no hold of its own"`).toMatch(
+        /0\.15\.0[^.]*adds no hold of its own/i,
+      );
+      expect(
+        text.split(ORDER_15).length - 1,
+        `${name} does not say "${ORDER_15}" in both places`,
+      ).toBeGreaterThanOrEqual(2);
+      expect(
+        text,
+        `${name} does not say that promoting an older version after 0.15.0 moves latest back`,
+      ).toMatch(MOVES_BACK_15);
+    }
+  });
+
+  it("prints 0.15.0's own condition before the promote command when it lands on next", () => {
+    if (!heldFromLatest().includes("0.15.0")) return;
+    const printed = printedBy("Held from latest");
+    const command = printed.findIndex((line) =>
+      line.text.includes("npm dist-tag add codex-channel-bgos@"),
+    );
+    const own = printed.findIndex(
+      (line) =>
+        line.only === "0.15.0" &&
+        line.text.startsWith("::warning::") &&
+        line.text.includes(ORDER_15),
+    );
+    const back = printed.findIndex(
+      (line) =>
+        line.only === "0.15.0" &&
+        line.text.startsWith("::warning::") &&
+        MOVES_BACK_15.test(line.text),
+    );
+    expect(own, `the warning does not name 0.15.0's condition: ${ORDER_15}`).toBeGreaterThanOrEqual(0);
+    expect(
+      back,
+      "the 0.15.0 warning does not say that promoting an older version after it moves latest back",
+    ).toBeGreaterThanOrEqual(0);
+    expect(own, "the promote command is printed before 0.15.0's condition").toBeLessThan(command);
+    expect(back, "the promote command is printed before the line about moving latest back").toBeLessThan(command);
+  });
+
+  /**
    * What one step PRINTS, not its comments: every `echo "..."` line, with the
    * version its `if [ "$VERSION" = "<v>" ]; then ... fi` branch is for (null
    * outside a branch), in order. The printed text is the only thing a person

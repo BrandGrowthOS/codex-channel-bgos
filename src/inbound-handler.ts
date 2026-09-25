@@ -44,6 +44,19 @@ import type {
 } from "./types.js";
 
 /**
+ * The message type a slash command arrives under. A frame of this type carries
+ * its command as `commandName` and `commandArgs`, and those are what the
+ * router reads; any other frame is read as text, where a leading `/name` is
+ * still parsed (adapter.ts, for a cold catalog).
+ *
+ * Named because it is one half of a CROSS REPO contract: the HOAI app's Send
+ * now sends its steer under this type (P5 stage 5, C-27), and
+ * test/steer-contract.spec.ts rebuilds the pinned contract string from this
+ * constant. Change it only with the app's PR.
+ */
+export const SLASH_COMMAND_MESSAGE_TYPE = "slash_command";
+
+/**
  * Reply handle the fork's `processMessageForAgent` calls into.
  *
  * Mirrors the Telegram side (which the fork builds in
@@ -488,7 +501,7 @@ export function createInboundHandler(
     const systemPrompt = buildSystemPromptWithHints(baseSystemPrompt);
 
     const command =
-      event.messageType === "slash_command"
+      event.messageType === SLASH_COMMAND_MESSAGE_TYPE
         ? {
             name: (event.commandName ?? "").toLowerCase(),
             args: event.commandArgs ?? "",
