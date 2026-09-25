@@ -76,12 +76,16 @@ export interface MissionLaneOptions {
    * chat's open mission, and a goal left active could start a continuation
    * turn before the mission_paused echo reached the goal lane. Called only
    * for a chat goalOwnsChat answers yes for, BEFORE the pause PATCH. A
-   * failure is logged, never thrown.
+   * failure is logged, never thrown. The goal lane's hold also records
+   * whether the goal was running when the Stop came (D36).
    */
   pauseGoalForChat?: (chatId: number) => Promise<unknown>;
   /**
    * Give the goal back when the owner's next turn resumes the mission a Stop
-   * paused. The goal lane answers only for a goal it holds.
+   * paused. The goal lane answers only for a goal it holds, and starts it
+   * again only if it was running when the Stop held it (D36): a goal held at
+   * its cap, for lack of progress, or by the owner stays held, and the
+   * owner's turn runs as an ordinary one.
    */
   resumeGoalForMission?: (missionId: number) => Promise<unknown>;
   /** The bound on an owner turn's wait for a Stop's pause. Tests shorten it. */

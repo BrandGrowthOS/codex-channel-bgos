@@ -403,6 +403,116 @@ describe("GoalLane", () => {
     expect(host.goals.get(42)!.objective).toBe(CONDITION);
   });
 
+  /**
+   * An owner Stop in a Keep working chat holds the goal, and the owner's next
+   * turn resumes the mission and gives the goal back (P6 stage 3, D35). D36:
+   * only a goal that was RUNNING when the Stop came is given back. One that
+   * had already stood down, at its turn cap, for lack of progress, or because
+   * the owner held it with /goal pause, stays held through the resume that
+   * follows the Stop, from both of its doors: the mission lane's give back
+   * and the mission_resumed echo. Starting it there would run a loop the
+   * owner's Resume never asked for, past its own cap.
+   */
+  describe("a Stop gives the goal back only if it was running (D36)", () => {
+    const frame: GoalFrameContext = {
+      assistantId: 7,
+      chatId: 42,
+      objective: CONDITION,
+      turnCap: 1,
+      keepWorking: true,
+    };
+
+    /** The resume that follows the Stop, through both of its doors. */
+    async function resumeAfterStop(lane: GoalLane) {
+      // The mission lane's give back, on the owner's next turn.
+      await lane.noteResumed(101);
+      // The mission_resumed echo of that same resume.
+      await lane.noteResumed(101, frame);
+    }
+
+    /** Every time anything asked the runtime to start the goal again. */
+    function starts(host: ReturnType<typeof makeHost>): number {
+      return host.setGoal.mock.calls.filter(
+        (call) => (call[2] as { status?: string } | undefined)?.status === "active",
+      ).length;
+    }
+
+    it("a running goal: the Stop says it was running, and the resume starts it again", async () => {
+      const { lane, host } = makeLane();
+      await armed(lane);
+
+      await expect(lane.holdForStop(42)).resolves.toBe(true);
+      expect(host.goals.get(42)!.status).toBe("paused");
+
+      await resumeAfterStop(lane);
+      expect(host.goals.get(42)!.status).toBe("active");
+      expect(host.goals.get(42)!.objective).toBe(CONDITION);
+    });
+
+    it("a goal held at its cap stays held through the resume, and more turns still start it", async () => {
+      server.stage("PATCH", "/api/v1/integrations/assistants/7/missions/101/progress", 200, missionBody(101));
+      server.stage("POST", "/api/v1/integrations/assistants/7/missions/101/stopped", 200, missionBody(101));
+      const { lane, host } = makeLane();
+      await armed(lane, 1);
+      lane.noteTurnStarted(42);
+      await lane.noteTurnFinished(42, {});
+      expect(host.goals.get(42)!.status).toBe("paused");
+
+      await expect(lane.holdForStop(42)).resolves.toBe(false);
+      await resumeAfterStop(lane);
+
+      expect(host.goals.get(42)!.status).toBe("paused");
+      expect(starts(host)).toBe(0);
+      // Still this lane's goal, for the owner's own answer to the stop.
+      expect(lane.owns(42)).toBe(true);
+      await lane.noteUpdated({ missionId: 101, keepWorking: true, turnCap: 11 });
+      expect(host.goals.get(42)!.status).toBe("active");
+    });
+
+    it("a goal that stopped for lack of progress stays held through the resume", async () => {
+      server.stage("POST", "/api/v1/integrations/assistants/7/missions/101/stopped", 200, missionBody(101));
+      const { lane, host } = makeLane();
+      await armed(lane);
+      // The runtime's own rule: three turns in a row on the same obstacle.
+      host.goals.set(42, liveGoal({ status: "blocked" }));
+      await lane.handleGoalUpdate(42, liveGoal({ status: "blocked" }));
+
+      await expect(lane.holdForStop(42)).resolves.toBe(false);
+      await resumeAfterStop(lane);
+
+      expect(host.goals.get(42)!.status).toBe("paused");
+      expect(starts(host)).toBe(0);
+    });
+
+    it("a goal the owner held with /goal pause stays held through the resume, and /goal resume still starts it", async () => {
+      const { lane, host } = makeLane();
+      await armed(lane);
+      // What /goal pause calls.
+      await lane.pauseForChat(42);
+
+      await expect(lane.holdForStop(42)).resolves.toBe(false);
+      await resumeAfterStop(lane);
+
+      expect(host.goals.get(42)!.status).toBe("paused");
+      expect(starts(host)).toBe(0);
+      // What /goal resume calls: the owner starting it again, which is theirs.
+      await lane.resumeForChat(42);
+      expect(host.goals.get(42)!.status).toBe("active");
+    });
+
+    it("the Stop's own hold and its mission_paused echo are not the owner's: a second Stop still finds the goal running", async () => {
+      const { lane, host } = makeLane();
+      await armed(lane);
+      await lane.holdForStop(42);
+      // The echo of the Stop's own pause, which reaches the lane as a Pause.
+      await lane.notePaused(101, frame);
+
+      await expect(lane.holdForStop(42)).resolves.toBe(true);
+      await resumeAfterStop(lane);
+      expect(host.goals.get(42)!.status).toBe("active");
+    });
+  });
+
   it("writes nothing for a chat it does not own", async () => {
     const { lane } = makeLane();
 

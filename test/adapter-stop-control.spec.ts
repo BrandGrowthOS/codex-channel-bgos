@@ -4,6 +4,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import { abortCauseOf, abortWith, type AbortCause } from "../src/abort-cause.js";
 import { CodexAdapter } from "../src/adapter.js";
+import { GoalLane } from "../src/goal-lane.js";
+import { MissionControlLane } from "../src/mission-control.js";
 import { MissionLane } from "../src/mission-lane.js";
 import {
   RESUME_TURN_TEXT,
@@ -501,9 +503,10 @@ describe("an owner Stop pauses the mission, never fails it (P6 stage 3)", () => 
     };
     const goalLane = {
       owns: (chatId: number) => chatId === 20,
-      pauseForChat: vi.fn(async (chatId: number) => {
+      // The Stop's own hold: true, the goal was running (D36).
+      holdForStop: vi.fn(async (chatId: number) => {
         order.push(`goal held ${chatId}`);
-        return null;
+        return true;
       }),
       noteResumed: vi.fn(async (missionId: number) => {
         order.push(`goal given back ${missionId}`);
@@ -516,7 +519,7 @@ describe("an owner Stop pauses the mission, never fails it (P6 stage 3)", () => 
     // Built with the adapter's own wiring of these options (pinned below).
     adapter.missionLane = new MissionLane(api as never, {
       goalOwnsChat: (chatId) => goalLane.owns(chatId),
-      pauseGoalForChat: (chatId) => goalLane.pauseForChat(chatId),
+      pauseGoalForChat: (chatId) => goalLane.holdForStop(chatId),
       resumeGoalForMission: (missionId) => goalLane.noteResumed(missionId),
       onSelfWrite: (missionId) => order.push(`stamp ${missionId}`),
     });
@@ -783,9 +786,10 @@ describe("a Stop in a Keep working chat pauses the goal's mission (D35)", () => 
       missionFor: (chatId: number) => (chatId === 20 ? 701 : null),
       noteTurnStarted: vi.fn(),
       noteTurnFinished: vi.fn(async () => {}),
-      pauseForChat: vi.fn(async (chatId: number) => {
+      // The Stop's own hold: true, the goal was running (D36).
+      holdForStop: vi.fn(async (chatId: number) => {
         order.push(`goal held ${chatId}`);
-        return null;
+        return true;
       }),
       noteResumed: vi.fn(async (missionId: number) => {
         order.push(`goal given back ${missionId}`);
@@ -798,7 +802,7 @@ describe("a Stop in a Keep working chat pauses the goal's mission (D35)", () => 
     adapter.goalLane = goalLane;
     adapter.missionLane = new MissionLane(api as never, {
       goalOwnsChat: (chatId) => goalLane.owns(chatId),
-      pauseGoalForChat: (chatId) => goalLane.pauseForChat(chatId),
+      pauseGoalForChat: (chatId) => goalLane.holdForStop(chatId),
       resumeGoalForMission: (missionId) => goalLane.noteResumed(missionId),
       onSelfWrite: (missionId) => order.push(`stamp ${missionId}`),
     });
@@ -908,6 +912,275 @@ describe("a Stop in a Keep working chat pauses the goal's mission (D35)", () => 
 });
 
 /**
+ * A Stop resume gives the goal back only if the goal was running when the
+ * Stop came (D36, found by the Codex review fix lane).
+ *
+ * End to end with the REAL goal lane, mission lane and mission control lane,
+ * and with each mission frame delivered from inside the request that caused
+ * it, as the gateway does, so the mission_resumed echo reaches the goal lane
+ * exactly as it would live. The failure: a goal that had stopped itself at
+ * its turn cap or for lack of progress (the goal held, the mission still
+ * open), or that the owner held with /goal pause, got a typed /stop, and the
+ * owner's next message handed the goal back and restarted the loop past its
+ * own cap. Now the mission resumes, the goal stays held, and the message runs
+ * as an ordinary turn. A goal that WAS running is still given back.
+ */
+describe("a Stop resume gives the goal back only if it was running (D36)", () => {
+  const OBJECTIVE = "the page loads in under two seconds";
+
+  function realLanesFixture() {
+    const { adapter, frame } = fixture();
+    let status: "active" | "paused" = "active";
+    let pausedReason: string | null = null;
+    const snapshot = () => ({
+      id: 701,
+      assistantId: 10,
+      chatId: 20,
+      title: "Make the page load in under two seconds",
+      doneWhen: OBJECTIVE,
+      status,
+      origin: "derived",
+      progress: null,
+      keepWorking: true,
+      turnCap: 1,
+      pausedReason,
+    });
+    const echo = (eventType: "mission_paused" | "mission_resumed") =>
+      adapter.missionControl.handle({
+        eventType,
+        userId: "owner-1",
+        assistantId: 10,
+        chatId: 20,
+        mission: snapshot(),
+        timestamp: "",
+      });
+    const api = {
+      getActiveMission: vi.fn(async () => snapshot()),
+      pauseMission: vi.fn(async (_a: number, _id: number, body: { reason?: string }) => {
+        status = "paused";
+        pausedReason = body.reason ?? null;
+        // The gateway emits the frame from inside the request.
+        await echo("mission_paused");
+        return snapshot();
+      }),
+      resumeMission: vi.fn(async () => {
+        status = "active";
+        pausedReason = null;
+        await echo("mission_resumed");
+        return snapshot();
+      }),
+      failMission: vi.fn(async () => {}),
+      completeMission: vi.fn(async () => {}),
+      createMission: vi.fn(async () => snapshot()),
+      patchMissionProgress: vi.fn(async () => snapshot()),
+      postMissionStopped: vi.fn(async () => snapshot()),
+      postVoiceRpcAck: vi.fn(async () => {}),
+      postVoiceRpcResult: vi.fn(async () => {}),
+    };
+    // The runtime's own goal for chat 20, as the app server keeps it.
+    const runtime = { status: "none" as string, starts: 0 };
+    const goalHost = {
+      setGoal: vi.fn(
+        async (_chatId: number, _objective: string | null, opts: { status?: string } = {}) => {
+          runtime.status = opts.status ?? (runtime.status === "none" ? "active" : runtime.status);
+          if (opts.status === "active") runtime.starts += 1;
+          return null;
+        },
+      ),
+      clearGoal: vi.fn(async () => true),
+      hasThread: () => true,
+    };
+    const goalLane = new GoalLane({
+      api: api as never,
+      host: goalHost,
+      onSelfWrite: (missionId) => adapter.missionControl.noteSelfWrite(missionId),
+      log: () => {},
+    });
+    // Built with the adapter's own wiring of these options (pinned below).
+    const missionLane = new MissionLane(api as never, {
+      onSelfWrite: (missionId) => adapter.missionControl.noteSelfWrite(missionId),
+      goalOwnsChat: (chatId) => goalLane.owns(chatId),
+      pauseGoalForChat: (chatId) => goalLane.holdForStop(chatId),
+      resumeGoalForMission: (missionId) => goalLane.noteResumed(missionId),
+    });
+    Object.assign(adapter, {
+      ownerId: "owner-1",
+      api,
+      goalLane,
+      missionLane,
+      missionControl: new MissionControlLane({
+        host: { steer: vi.fn(async () => {}) },
+        missionLane,
+        goalLane,
+        noteChat: () => {},
+        chatsForAssistant: () => [20],
+        isOwned: (assistantId) => assistantId === 10,
+        log: () => {},
+      }),
+      // What /stop needs beyond the Stop button's harness.
+      lastInput: new Map(),
+      lastNativeOptions: new Map(),
+      nativeCommands: { handle: vi.fn(async () => false), cancel: vi.fn(() => false) },
+      tools: { handleRequest: vi.fn(async () => ({})) },
+      toolProgress: {
+        sendToolStart: vi.fn(async () => {}),
+        finalizeTurn: vi.fn(async () => {}),
+        noteTurnMeta: vi.fn(),
+      },
+    });
+    adapter.chatToAssistant.set(20, 10);
+    adapter.outbound.sendAgentError = vi.fn(async () => {});
+    adapter.host.resetChat = vi.fn();
+    adapter.host.runTurn = vi.fn(async () => ({
+      error: null,
+      replyText: "It measured 2.4 seconds before you stopped it.",
+      turnCompleted: true,
+      finalAgentMessageText: "It measured 2.4 seconds before you stopped it.",
+    }));
+    const armed = () =>
+      goalLane.armFromMission({
+        assistantId: 10,
+        chatId: 20,
+        missionId: 701,
+        objective: OBJECTIVE,
+        turnCap: 1,
+      });
+    const stopTyped = () =>
+      adapter.codexDispatch({
+        origin: "bgos",
+        agentRoute: "codex",
+        assistantId: 10,
+        chatId: 20,
+        messageId: 5,
+        userId: "owner-1",
+        text: "/stop",
+        attachments: [],
+        systemPrompt: "",
+        replyHandle: { sendText: vi.fn(async () => {}) },
+        command: { name: "stop", args: "" },
+        messageType: "slash_command",
+        senderType: "user",
+      });
+    const reply = {
+      sendTyping: vi.fn(async () => {}),
+      finalizeTurn: vi.fn(async () => {}),
+      sendText: vi.fn(async () => {}),
+    };
+    const ownerWrites = () =>
+      adapter.executeAndReply(10, 20, "How far did it get?", reply, {
+        userId: "owner-1",
+        senderType: "user",
+        messageId: 6,
+      });
+    return {
+      adapter,
+      frame,
+      api,
+      goalLane,
+      runtime,
+      armed,
+      stopTyped,
+      ownerWrites,
+      state: () => ({ status, pausedReason }),
+    };
+  }
+
+  type Fixture = ReturnType<typeof realLanesFixture>;
+
+  it.each([
+    [
+      "held at its turn cap",
+      async (f: Fixture) => {
+        await f.armed();
+        f.goalLane.noteTurnStarted(20);
+        await f.goalLane.noteTurnFinished(20, { text: "Measured it at 2.4 seconds." });
+      },
+    ],
+    [
+      "stopped for lack of progress",
+      async (f: Fixture) => {
+        await f.armed();
+        f.runtime.status = "blocked";
+        await f.goalLane.handleGoalUpdate(20, {
+          threadId: "thread-20",
+          objective: OBJECTIVE,
+          status: "blocked",
+          tokenBudget: null,
+          tokensUsed: 0,
+          timeUsedSeconds: 0,
+          createdAt: 1789932968,
+          updatedAt: 1789932999,
+        });
+      },
+    ],
+    [
+      "held by the owner with /goal pause",
+      async (f: Fixture) => {
+        await f.armed();
+        await f.goalLane.pauseForChat(20);
+      },
+    ],
+  ])(
+    "a goal %s: /stop pauses the mission, the owner's next message resumes it and runs as an ordinary turn, and the goal stays held",
+    async (_why, standDown) => {
+      const f = realLanesFixture();
+      await standDown(f);
+      expect(f.runtime.status).not.toBe("active");
+      const startsBefore = f.runtime.starts;
+
+      await f.stopTyped();
+      expect(f.state()).toEqual({ status: "paused", pausedReason: STOP_PAUSE_REASON });
+
+      await f.ownerWrites();
+
+      // The mission the Stop paused is resumed, once, and never failed.
+      expect(f.api.resumeMission).toHaveBeenCalledTimes(1);
+      expect(f.state()).toEqual({ status: "active", pausedReason: null });
+      expect(f.api.failMission).not.toHaveBeenCalled();
+      // The goal stays where it had stood down: nothing started it again,
+      // through the give back or through the mission_resumed echo.
+      expect(f.runtime.status).toBe("paused");
+      expect(f.runtime.starts).toBe(startsBefore);
+      expect(f.goalLane.owns(20)).toBe(true);
+      // And the owner's message is an ordinary turn, answered.
+      expect(f.adapter.host.runTurn).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("a goal that WAS running: the Stop button holds it, and the owner's next message gives it back", async () => {
+    const f = realLanesFixture();
+    await f.armed();
+    expect(f.runtime.status).toBe("active");
+
+    await f.adapter.handleControl(f.frame);
+    expect(f.runtime.status).toBe("paused");
+    expect(f.state()).toEqual({ status: "paused", pausedReason: STOP_PAUSE_REASON });
+
+    await f.ownerWrites();
+
+    expect(f.api.resumeMission).toHaveBeenCalledTimes(1);
+    expect(f.state()).toEqual({ status: "active", pausedReason: null });
+    expect(f.runtime.status).toBe("active");
+    expect(f.adapter.host.runTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("a goal held at its cap: the Stop button the same, the goal stays held", async () => {
+    const f = realLanesFixture();
+    await f.armed();
+    f.goalLane.noteTurnStarted(20);
+    await f.goalLane.noteTurnFinished(20, { text: "Measured it at 2.4 seconds." });
+    const startsBefore = f.runtime.starts;
+
+    await f.adapter.handleControl(f.frame);
+    await f.ownerWrites();
+
+    expect(f.api.resumeMission).toHaveBeenCalledTimes(1);
+    expect(f.runtime.status).toBe("paused");
+    expect(f.runtime.starts).toBe(startsBefore);
+  });
+});
+
+/**
  * The adapter hands the mission lane the goal lane's hold and give back.
  * Constructor arguments, so nothing else in the suite notices one going
  * missing: without the hold a goal chat's runtime could start a continuation
@@ -920,7 +1193,9 @@ describe("the Stop wiring of the mission lane", () => {
     const start = source.indexOf("new MissionLane(");
     expect(start).toBeGreaterThan(0);
     const construction = source.slice(start, source.indexOf("});", start));
-    expect(construction).toContain("pauseGoalForChat: (chatId) => this.goalLane.pauseForChat(chatId)");
+    // The Stop's own hold, never the owner's /goal pause door: only it
+    // records whether the goal was running, which the give back reads (D36).
+    expect(construction).toContain("pauseGoalForChat: (chatId) => this.goalLane.holdForStop(chatId)");
     expect(construction).toContain(
       "resumeGoalForMission: (missionId) => this.goalLane.noteResumed(missionId)",
     );

@@ -109,7 +109,29 @@ interface GoalState {
   timeUsedSeconds: number;
   /** One stop per arming, so a later turn cannot report the same stop twice. */
   stopped: boolean;
+  /**
+   * The owner held this goal themselves with `/goal pause`. Anything that
+   * starts it again clears it. An owner Stop reads it (D36).
+   */
+  ownerHeld: boolean;
+  /**
+   * An owner Stop found this goal NOT running (P6 stage 3, D36): held at its
+   * cap, stopped for lack of progress, or held by the owner. The mission
+   * resume that follows the Stop then leaves it held, through both of its
+   * doors (the mission lane's give back and the mission_resumed echo),
+   * because a Resume continues what was stopped and never starts what had
+   * already ended. Only the owner starting the goal again clears it: more
+   * turns, or `/goal resume`.
+   */
+  keptByStop: boolean;
 }
+
+/**
+ * Who holds a goal. Only the owner's own `/goal pause` is remembered as the
+ * owner holding the loop; the lane's holds (the mission's Pause, the cap,
+ * an owner Stop) name themselves so they are never mistaken for it.
+ */
+export type GoalHold = "owner" | "mission" | "cap" | "stop";
 
 export interface ArmGoalInput {
   assistantId: number;
@@ -193,6 +215,8 @@ export class GoalLane {
       turnsUsed: 0,
       timeUsedSeconds: 0,
       stopped: false,
+      ownerHeld: false,
+      keptByStop: false,
     });
     await this.setObjective(input.chatId, objective);
   }
@@ -230,6 +254,8 @@ export class GoalLane {
       turnsUsed: 0,
       timeUsedSeconds: 0,
       stopped: false,
+      ownerHeld: false,
+      keptByStop: false,
     });
     await this.setObjective(input.chatId, objective);
     return missionId;
@@ -339,7 +365,7 @@ export class GoalLane {
     const chatId = this.chatForControl(missionId, frame);
     if (!chatId) return;
     try {
-      await this.pauseForChat(chatId);
+      await this.pauseForChat(chatId, "mission");
     } catch (err) {
       this.log(`goal pause failed chat=${chatId} err=${errorText(err)}`);
     }
@@ -358,6 +384,11 @@ export class GoalLane {
     frame?: GoalFrameContext | null,
   ): Promise<void> {
     const held = this.stateForMission(missionId);
+    // An owner Stop found this goal already stood down (D36): the resume
+    // that follows it, the mission lane's or its echo, continues the mission
+    // and leaves the goal where it was. Starting it here would run the loop
+    // past its own cap, or over the owner's /goal pause.
+    if (held?.keptByStop) return;
     const state = held ?? this.adoptFromFrame(missionId, frame);
     if (!state) return;
     if (!(await this.resumeGoal(state)) && !held) {
@@ -374,15 +405,52 @@ export class GoalLane {
    * the owner typed `/goal pause` and is owed the reason. They also work on a
    * goal this lane never armed, which is the one the owner set in their own
    * terminal: the control is about the thread, not about the card.
+   *
+   * `by` says whose hold it is. The default is the owner's own `/goal pause`,
+   * the one caller outside this lane, and it is remembered once the runtime
+   * has taken it, so an owner Stop later knows the goal was not running
+   * (D36). The lane's own holds name themselves.
    */
-  async pauseForChat(chatId: number): Promise<ThreadGoal | null> {
-    return this.deps.host.setGoal(chatId, null, { status: "paused" });
+  async pauseForChat(
+    chatId: number,
+    by: GoalHold = "owner",
+  ): Promise<ThreadGoal | null> {
+    const goal = await this.deps.host.setGoal(chatId, null, { status: "paused" });
+    const state = this.byChat.get(chatId);
+    if (state && by === "owner") state.ownerHeld = true;
+    return goal;
+  }
+
+  /**
+   * An owner Stop holds this chat's goal (P6 stage 3, D35), and says whether
+   * the goal was RUNNING when the Stop came (D36).
+   *
+   * Running means this lane armed it and nothing had stood it down: not the
+   * turn cap, not the runtime's own no progress rule, not the owner's
+   * `/goal pause`. A goal that was not running is marked here, BEFORE the
+   * hold, so the resume that follows the Stop leaves it held (noteResumed).
+   * The Stop's own hold is not the owner's, so a second Stop before the
+   * resume still finds a running goal running. Throws when the host does,
+   * as pauseForChat does.
+   */
+  async holdForStop(chatId: number): Promise<boolean> {
+    const state = this.byChat.get(chatId);
+    const running = state !== undefined && !state.stopped && !state.ownerHeld;
+    if (state) state.keptByStop = !running;
+    await this.pauseForChat(chatId, "stop");
+    return running;
   }
 
   /** Start it again. Setting the status back to active starts a turn at once. */
   async resumeForChat(chatId: number): Promise<ThreadGoal | null> {
     const state = this.byChat.get(chatId);
-    if (state) state.stopped = false;
+    if (state) {
+      // Whatever held it, it is running from here: the owner's own restart,
+      // or a resume this lane was right to give.
+      state.stopped = false;
+      state.ownerHeld = false;
+      state.keptByStop = false;
+    }
     return this.deps.host.setGoal(chatId, null, { status: "active" });
   }
 
@@ -520,6 +588,8 @@ export class GoalLane {
       turnsUsed: 0,
       timeUsedSeconds: 0,
       stopped: false,
+      ownerHeld: false,
+      keptByStop: false,
     };
     this.attach(state);
     return state;
@@ -555,7 +625,7 @@ export class GoalLane {
   /** The cap and the frame paths: a failure here is logged, never thrown. */
   private async holdGoal(state: GoalState): Promise<void> {
     try {
-      await this.pauseForChat(state.chatId);
+      await this.pauseForChat(state.chatId, "cap");
     } catch (err) {
       this.log(`goal pause failed chat=${state.chatId} err=${errorText(err)}`);
     }

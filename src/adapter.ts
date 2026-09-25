@@ -319,8 +319,10 @@ export class CodexAdapter {
       goalOwnsChat: (chatId) => this.goalLane.owns(chatId),
       // An owner Stop holds the chat's native goal before it pauses the
       // mission, so no continuation turn starts ahead of the mission_paused
-      // echo; the owner's next turn gives it back (P6 stage 3, C-32).
-      pauseGoalForChat: (chatId) => this.goalLane.pauseForChat(chatId),
+      // echo; the owner's next turn gives it back (P6 stage 3, C-32). The
+      // Stop's own hold, never the /goal pause door: it records whether the
+      // goal was running, and only a running goal is given back (D36).
+      pauseGoalForChat: (chatId) => this.goalLane.holdForStop(chatId),
       resumeGoalForMission: (missionId) => this.goalLane.noteResumed(missionId),
       // A Stop pause /new or a Sessions resume discarded must not come back
       // to life at the next restart's first owner turn (review F4).
