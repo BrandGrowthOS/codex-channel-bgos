@@ -89,8 +89,13 @@ describe("DECLARED_CAPABILITIES", () => {
     expect(adapter).toContain('abortWith(controller, "owner_stop")');
     expect(adapter).toContain("this.missionLane.stoppedByOwner(");
     expect(adapter).toContain("this.missionLane.noteOwnerTurn(");
+    // A Stop during a Keep working continuation turn keeps it too (D35).
+    expect(adapter).toContain("this.missionLane.stoppedGoalByOwner(");
     expect(lane).toContain("reason: STOP_PAUSE_REASON");
-    expect(lane).toContain("active.pausedReason === STOP_PAUSE_REASON");
+    // Only the exact reason is resumed. Review F4 moved that check into one
+    // guard, which the owner turn's read and the /new read both use.
+    expect(lane).toContain("mission.pausedReason === STOP_PAUSE_REASON");
+    expect(lane).toContain("if (isStopPausedIn(active, chatId)) {");
   });
 
   it("declares sessions_library, spelled by the contract file, because this daemon answers the Sessions ops", () => {
