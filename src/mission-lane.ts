@@ -1002,12 +1002,16 @@ export class MissionLane {
   }
 }
 
-/** An old backend echoes no chat; a chat scoped one must echo this one. */
-/** Paused in this chat by an owner Stop: the exact contract reason. */
+/**
+ * Paused in this chat by an owner Stop: the exact contract reason. The guard
+ * names a PAUSED snapshot, so a false answer still leaves the mission in
+ * hand: it may be an active one, which a failed Stop's read goes on to check
+ * (review F2). A bare `mission is MissionSnapshot` narrowed it to null there.
+ */
 function isStopPausedIn(
   mission: MissionSnapshot | null,
   chatId: number,
-): mission is MissionSnapshot {
+): mission is MissionSnapshot & { status: "paused" } {
   return (
     mission !== null &&
     mission.status === "paused" &&
@@ -1016,6 +1020,7 @@ function isStopPausedIn(
   );
 }
 
+/** An old backend echoes no chat; a chat scoped one must echo this one. */
 function belongsToChat(mission: MissionSnapshot, chatId: number): boolean {
   return (
     mission.chatId === undefined ||
