@@ -1,0 +1,261 @@
+{
+  "_recorded": "codex-cli 0.154.0 app server wire, recorded live on 2026-09-26 by the P5 stage 7 gate (BGOS docs/reports/2026-09-26-p5-s7-model-row/feasibility/logs/codex-03-roundtrip.raw.jsonl: request 4 thread/start, requests 5 and 7 thread/read, the thread/settings/updated notification) and by the Plugin lane's resume probe (codex-06-resume.raw.jsonl: thread/resume of the same thread with no model and no turn). Every key and every model, effort and tier value is as recorded; only the owner's home folder and the probe folder in path strings are neutralised.",
+  "threadStartResponse": {
+    "thread": {
+      "id": "01a0db7f-2284-7062-a185-fc8f8dd51eef",
+      "environments": [
+        {
+          "environmentId": "local",
+          "cwd": "E:\\probe\\cwd",
+          "runtimeWorkspaceRoots": [
+            "E:\\probe\\cwd"
+          ]
+        }
+      ],
+      "extra": null,
+      "sessionId": "01a0db7f-2284-7062-a185-fc8f8dd51eef",
+      "forkedFromId": null,
+      "parentThreadId": null,
+      "preview": "",
+      "ephemeral": false,
+      "section": null,
+      "sectionEnteredAt": null,
+      "projectId": null,
+      "historyMode": "paginated",
+      "modelProvider": "openai",
+      "model": "gpt-6-astra",
+      "reasoningEffort": "ultra",
+      "createdAt": 1790388937,
+      "updatedAt": 1790388937,
+      "recencyAt": 1790388937,
+      "status": {
+        "type": "idle"
+      },
+      "path": "C:\\Users\\owner\\.codex\\sessions\\2026\\09\\26\\rollout-2026-09-26T06-15-37-01a0db7f-2284-7062-a185-fc8f8dd51eef.jsonl",
+      "cwd": "E:\\probe\\cwd",
+      "cliVersion": "0.154.0",
+      "originator": "hoai_codex",
+      "source": "vscode",
+      "canAcceptDirectInput": true,
+      "threadSource": null,
+      "agentNickname": null,
+      "agentRole": null,
+      "gitInfo": null,
+      "name": null,
+      "daybreakEnabled": null,
+      "turns": []
+    },
+    "model": "gpt-6-astra",
+    "modelProvider": "openai",
+    "serviceTier": "default",
+    "cwd": "E:\\probe\\cwd",
+    "runtimeWorkspaceRoots": [
+      "E:\\probe\\cwd"
+    ],
+    "instructionSources": [],
+    "approvalPolicy": "on-request",
+    "approvalsReviewer": "user",
+    "sandbox": {
+      "type": "workspaceWrite",
+      "writableRoots": [],
+      "networkAccess": false,
+      "excludeTmpdirEnvVar": false,
+      "excludeSlashTmp": false
+    },
+    "activePermissionProfile": null,
+    "reasoningEffort": "ultra",
+    "multiAgentMode": "explicitRequestOnly"
+  },
+  "threadReadBeforeUpdate": {
+    "thread": {
+      "id": "01a0db7f-2284-7062-a185-fc8f8dd51eef",
+      "environments": [
+        {
+          "environmentId": "local",
+          "cwd": "E:\\probe\\cwd",
+          "runtimeWorkspaceRoots": [
+            "E:\\probe\\cwd"
+          ]
+        }
+      ],
+      "extra": null,
+      "sessionId": "01a0db7f-2284-7062-a185-fc8f8dd51eef",
+      "forkedFromId": null,
+      "parentThreadId": null,
+      "preview": "",
+      "ephemeral": false,
+      "section": null,
+      "sectionEnteredAt": null,
+      "projectId": null,
+      "historyMode": "paginated",
+      "modelProvider": "openai",
+      "model": "gpt-6-astra",
+      "reasoningEffort": "ultra",
+      "createdAt": 1790388937,
+      "updatedAt": 1790388937,
+      "recencyAt": 1790388937,
+      "status": {
+        "type": "idle"
+      },
+      "path": "C:\\Users\\owner\\.codex\\sessions\\2026\\09\\26\\rollout-2026-09-26T06-15-37-01a0db7f-2284-7062-a185-fc8f8dd51eef.jsonl",
+      "cwd": "E:\\probe\\cwd",
+      "cliVersion": "0.154.0",
+      "originator": "hoai_codex",
+      "source": "vscode",
+      "canAcceptDirectInput": true,
+      "threadSource": null,
+      "agentNickname": null,
+      "agentRole": null,
+      "gitInfo": null,
+      "name": null,
+      "daybreakEnabled": null,
+      "turns": []
+    }
+  },
+  "threadSettingsUpdated": {
+    "threadId": "01a0db7f-2284-7062-a185-fc8f8dd51eef",
+    "threadSettings": {
+      "cwd": "E:\\probe\\cwd",
+      "approvalPolicy": "on-request",
+      "approvalsReviewer": "user",
+      "sandboxPolicy": {
+        "type": "workspaceWrite",
+        "writableRoots": [],
+        "networkAccess": false,
+        "excludeTmpdirEnvVar": false,
+        "excludeSlashTmp": false
+      },
+      "activePermissionProfile": null,
+      "model": "gpt-5.6-sol",
+      "modelProvider": "openai",
+      "serviceTier": "default",
+      "effort": "medium",
+      "summary": null,
+      "collaborationMode": {
+        "mode": "default",
+        "settings": {
+          "model": "gpt-5.6-sol",
+          "reasoning_effort": "medium",
+          "developer_instructions": "# Collaboration Mode: Default\r\n\r\nYou are now in Default mode. Any previous instructions for other modes (e.g. Plan mode) are no longer active.\r\n\r\nYour active mode changes only when new developer instructions with a different `<collaboration_mode>...</collaboration_mode>` change it; user requests or tool descriptions do not change mode by themselves. Known mode names are Default and Plan.\r\n\r\n## request_user_input availability\r\n\r\nUse the `request_user_input` tool only when it is listed in the available tools for this turn.\r\n\r\nIn Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions.\r\n\r\nUse the `request_user_input` tool only for optional questions where the answer would materially improve the quality of the work.\r\n\r\nIf `request_user_input` returns no answers, continue with best judgment instead of asking again or treating the turn as blocked.\r\n\r\nNever use the `request_user_input` tool for permission requests or permission-related escalations.\r\n\r\nIf explicit user input is required for another reason before progress can safely continue, do not use the `request_user_input` tool. Ask the user directly with one concise plain-text question instead. Never write a multiple choice question as a textual assistant message.\r\n"
+        }
+      },
+      "multiAgentMode": "explicitRequestOnly",
+      "personality": "none"
+    }
+  },
+  "threadReadAfterUpdate": {
+    "thread": {
+      "id": "01a0db7f-2284-7062-a185-fc8f8dd51eef",
+      "environments": [
+        {
+          "environmentId": "local",
+          "cwd": "E:\\probe\\cwd",
+          "runtimeWorkspaceRoots": [
+            "E:\\probe\\cwd"
+          ]
+        }
+      ],
+      "extra": null,
+      "sessionId": "01a0db7f-2284-7062-a185-fc8f8dd51eef",
+      "forkedFromId": null,
+      "parentThreadId": null,
+      "preview": "",
+      "ephemeral": false,
+      "section": null,
+      "sectionEnteredAt": null,
+      "projectId": null,
+      "historyMode": "paginated",
+      "modelProvider": "openai",
+      "model": "gpt-5.6-sol",
+      "reasoningEffort": "medium",
+      "createdAt": 1790388937,
+      "updatedAt": 1790388937,
+      "recencyAt": 1790388937,
+      "status": {
+        "type": "idle"
+      },
+      "path": "C:\\Users\\owner\\.codex\\sessions\\2026\\09\\26\\rollout-2026-09-26T06-15-37-01a0db7f-2284-7062-a185-fc8f8dd51eef.jsonl",
+      "cwd": "E:\\probe\\cwd",
+      "cliVersion": "0.154.0",
+      "originator": "hoai_codex",
+      "source": "vscode",
+      "canAcceptDirectInput": true,
+      "threadSource": null,
+      "agentNickname": null,
+      "agentRole": null,
+      "gitInfo": null,
+      "name": null,
+      "daybreakEnabled": null,
+      "turns": []
+    }
+  },
+  "threadResumeResponse": {
+    "thread": {
+      "id": "01a0db7f-2284-7062-a185-fc8f8dd51eef",
+      "environments": [
+        {
+          "environmentId": "local",
+          "cwd": "E:\\probe\\cwd",
+          "runtimeWorkspaceRoots": [
+            "E:\\probe\\cwd"
+          ]
+        }
+      ],
+      "extra": null,
+      "sessionId": "01a0db7f-2284-7062-a185-fc8f8dd51eef",
+      "forkedFromId": null,
+      "parentThreadId": null,
+      "preview": "hi",
+      "ephemeral": false,
+      "section": null,
+      "sectionEnteredAt": null,
+      "projectId": null,
+      "historyMode": "paginated",
+      "modelProvider": "openai",
+      "model": "gpt-5.6-sol",
+      "reasoningEffort": "medium",
+      "createdAt": 1790388937,
+      "updatedAt": 1790414690,
+      "recencyAt": 1790388938,
+      "status": {
+        "type": "idle"
+      },
+      "path": "C:\\Users\\owner\\.codex\\sessions\\2026\\09\\26\\rollout-2026-09-26T06-15-37-01a0db7f-2284-7062-a185-fc8f8dd51eef.jsonl",
+      "cwd": "E:\\probe\\cwd",
+      "cliVersion": "0.154.0",
+      "originator": "hoai_codex",
+      "source": "vscode",
+      "canAcceptDirectInput": true,
+      "threadSource": null,
+      "agentNickname": null,
+      "agentRole": null,
+      "gitInfo": null,
+      "name": null,
+      "daybreakEnabled": null,
+      "turns": []
+    },
+    "model": "gpt-5.6-sol",
+    "modelProvider": "openai",
+    "serviceTier": "default",
+    "cwd": "E:\\probe\\cwd",
+    "runtimeWorkspaceRoots": [
+      "E:\\probe\\cwd"
+    ],
+    "instructionSources": [],
+    "approvalPolicy": "on-request",
+    "approvalsReviewer": "user",
+    "sandbox": {
+      "type": "workspaceWrite",
+      "writableRoots": [],
+      "networkAccess": false,
+      "excludeTmpdirEnvVar": false,
+      "excludeSlashTmp": false
+    },
+    "activePermissionProfile": null,
+    "reasoningEffort": "medium",
+    "multiAgentMode": "explicitRequestOnly",
+    "initialTurnsPage": null,
+    "turnsBackwardsCursor": "{\"requestedThreadId\":\"01a0db7f-2284-7062-a185-fc8f8dd51eef\",\"rolloutOrdinal\":1,\"includeAnchor\":true,\"scope\":{\"kind\":\"turns\"}}",
+    "itemsBackwardsCursor": "{\"requestedThreadId\":\"01a0db7f-2284-7062-a185-fc8f8dd51eef\",\"rolloutOrdinal\":10,\"includeAnchor\":true,\"scope\":{\"kind\":\"itemsByCreatedAtOrdinal\"}}"
+  }
+}
