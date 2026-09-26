@@ -65,7 +65,10 @@
  * remote (its upload-pack, its ssh command) and can hang on the network.
  * Every command runs with GIT_NO_LAZY_FETCH=1, so such a read fails instead:
  * both diffs exit 128 and the answer is read_failed (measured with a file://
- * promisor on Git 2.55.0.windows.3, fix round w5, W4-N1).
+ * promisor on Git 2.55.0.windows.3, fix round w5, W4-N1). That holds on a Git
+ * that knows the variable: Ubuntu's build of 2.43.0 did too, Git's release
+ * notes first name the switch in 2.45.0, and an older Git without it ignores
+ * the variable and can still fetch.
  *
  * RUNS NO PROGRAM THE REPOSITORY NAMES FOR ITS FSMONITOR. core.fsmonitor in
  * the repository's own config (which the agent writes) names a program Git
