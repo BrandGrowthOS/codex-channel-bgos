@@ -592,6 +592,59 @@ describe("collectChanges", () => {
     );
   });
 
+  // Fix round w4, F5: Windows reads environment names case blind, so on that
+  // host Git_Dir or git_index_file points Git elsewhere just as GIT_DIR does
+  // (measured with real Git below and in the round's probe).
+  it("on Windows drops the repository variables in any spelling; elsewhere another spelling is another variable and passes through (fix round w4, F5)", async () => {
+    const spelled: Record<string, string | undefined> = {
+      Git_Dir: "C:\\Users\\owner\\other\\.git",
+      git_work_tree: "C:\\Users\\owner\\other",
+      Git_Index_File: "C:\\Users\\owner\\other\\.git\\index",
+      git_common_dir: "C:\\Users\\owner\\other\\.git",
+      Git_Object_Directory: "C:\\Users\\owner\\other\\.git\\objects",
+      git_alternate_object_directories: "C:\\Users\\owner\\shared\\objects",
+      Git_Namespace: "elsewhere",
+      gIT_pREFIX: "services/",
+    };
+    const daemonEnv: Record<string, string | undefined> = {
+      Path: "C:\\Program Files\\Git\\cmd",
+      GIT_CONFIG_GLOBAL: "C:\\Users\\owner\\.gitconfig",
+      ...spelled,
+    };
+    const given = { ...daemonEnv };
+    const settings = { GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" };
+    for (const [platform, expected] of [
+      [
+        "win32",
+        {
+          Path: "C:\\Program Files\\Git\\cmd",
+          GIT_CONFIG_GLOBAL: "C:\\Users\\owner\\.gitconfig",
+          ...settings,
+        },
+      ],
+      ["linux", { ...daemonEnv, ...settings }],
+    ] as Array<[string, Record<string, string | undefined>]>) {
+      const { runGit, calls } = fakeGit(okScript());
+      const result = await collectChanges({
+        workdir: WORKDIR,
+        caps: readCaps({}),
+        runGit,
+        fs: okFs().fs,
+        now: FIXED_NOW,
+        env: daemonEnv,
+        platform,
+      } as Parameters<typeof collectChanges>[0]);
+      expect(result.ok && result.payload.state, platform).toBe("ok");
+      expect(calls, platform).toHaveLength(7);
+      for (const call of calls) {
+        expect(call.env, `${platform}: ${key(call.args)}`).toEqual(expected);
+      }
+    }
+    expect(daemonEnv, "the daemon's own environment is left as it was").toEqual(
+      given,
+    );
+  });
+
   it("a detached HEAD answers branch null and keeps the short head", async () => {
     const { runGit } = fakeGit(okScript({ [key(BRANCH)]: { code: 1 } }));
     const result = await collectChanges({
@@ -1853,5 +1906,67 @@ describe.skipIf(!gitOnPath)("against a real Git repository", () => {
       expect(lines).toContain("+two");
       expect(lines.filter((line) => line.includes("b.txt"))).toEqual([]);
     }, 30_000);
+  }
+
+  // Fix round w4, F5: on Windows the same variables in other letters reach
+  // Git too, since the host reads environment names case blind.
+  for (const variable of ["Git_Dir", "git_index_file"] as const) {
+    it.skipIf(process.platform !== "win32")(
+      `on Windows, a daemon started with ${variable} (another spelling) naming another repository still reads the folder it is given (fix round w4, F5)`,
+      async () => {
+        writeFileSync(globalConfig, "");
+        const other = elsewhereRepo();
+        const daemonEnv: Record<string, string | undefined> = {
+          ...env,
+          [variable]:
+            variable === "Git_Dir"
+              ? join(other, ".git")
+              : join(other, ".git", "index"),
+        };
+        const tracked = (runEnv: Record<string, string | undefined>) =>
+          String(
+            spawnSync("git", ["ls-files"], {
+              cwd: repo,
+              env: runEnv,
+              windowsHide: true,
+            }).stdout,
+          )
+            .split(/\r?\n/)
+            .filter((line) => line.length > 0);
+        // The control: on this host the spelling really moves a read, so the
+        // case below can fail.
+        expect(tracked(env), "control: without the variable").toEqual([
+          "a.txt",
+          "sub/keep.txt",
+        ]);
+        expect(tracked(daemonEnv), `control: with ${variable}`).toEqual(["b.txt"]);
+
+        const head = String(runDirect(["rev-parse", "--short", "HEAD"]).stdout).trim();
+        expect(head).toMatch(/^[0-9a-f]{4,40}$/);
+        const result = await collectChanges({
+          workdir: repo,
+          caps: readCaps({}),
+          runGit: createNodeRunGit(),
+          fs: nodeChangesFs,
+          env: daemonEnv,
+        });
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.payload).toMatchObject({
+          state: "ok",
+          folder: basename(repo),
+          branch: "main",
+          head,
+          numstat: "1\t1\ta.txt\0",
+          untracked: "new.txt\0",
+          untrackedFiles: [{ path: "new.txt", bytes: 6, text: "hello\n" }],
+        });
+        const lines = result.payload.patch.replace(/\r\n/g, "\n").split("\n");
+        expect(lines).toContain("diff --git a/a.txt b/a.txt");
+        expect(lines).toContain("+two");
+        expect(lines.filter((line) => line.includes("b.txt"))).toEqual([]);
+      },
+      30_000,
+    );
   }
 });

@@ -31,7 +31,9 @@
  * GIT_ALTERNATE_OBJECT_DIRECTORIES, GIT_NAMESPACE, GIT_PREFIX) are dropped
  * from Git's environment: a daemon started from inside a Git hook, or from a
  * shell with GIT_DIR exported, would otherwise send THAT repository's changes
- * as this folder's (measured with real Git, parity round 2). The daemon's own
+ * as this folder's (measured with real Git, parity round 2). On Windows,
+ * which reads environment names case blind, they are dropped in any spelling
+ * (Git_Dir moved a read there too, fix round w4). The daemon's own
  * environment is never edited; Git gets a copy.
  *
  * NEVER WRITES THE INDEX. A porcelain `git diff` refreshes .git/index on its
@@ -229,13 +231,28 @@ const REPOSITORY_OVERRIDES = [
   "GIT_PREFIX",
 ] as const;
 
-/** The environment Git gets: a COPY of the daemon's, with the repository
- * overrides dropped and the three read settings set. */
-function gitEnv(
+const OVERRIDE_NAMES: ReadonlySet<string> = new Set(REPOSITORY_OVERRIDES);
+
+/**
+ * The environment Git gets: a COPY of the daemon's, with the repository
+ * overrides dropped and the three read settings set. Windows reads
+ * environment names case blind, so there a key in ANY spelling whose capitals
+ * are one of the eight is dropped (Git_Dir reached Git there, measured in fix
+ * round w4); elsewhere another spelling is another variable, which Git never
+ * reads, and it passes through. Exported for the native /diff.
+ */
+export function gitReadEnv(
   base: Record<string, string | undefined>,
+  platform: string = process.platform,
 ): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = { ...base };
-  for (const name of REPOSITORY_OVERRIDES) delete env[name];
+  if (platform === "win32") {
+    for (const name of Object.keys(env)) {
+      if (OVERRIDE_NAMES.has(name.toUpperCase())) delete env[name];
+    }
+  } else {
+    for (const name of REPOSITORY_OVERRIDES) delete env[name];
+  }
   env.GIT_OPTIONAL_LOCKS = "0";
   env.GIT_TERMINAL_PROMPT = "0";
   env.LC_ALL = "C";
@@ -574,6 +591,9 @@ export interface CollectChangesInput {
   /** The environment Git inherits (the process's own by default), less the
    * repository overrides; it is copied, never edited. */
   env?: Record<string, string | undefined>;
+  /** The host's platform (process.platform by default): on win32 the
+   * overrides are dropped in any spelling. */
+  platform?: string;
 }
 
 export const TOO_SLOW_MESSAGE =
@@ -746,7 +766,7 @@ async function readChanges(
   takenAt: string,
 ): Promise<ChangesPayload> {
   const { caps } = input;
-  const env = gitEnv(input.env ?? process.env);
+  const env = gitReadEnv(input.env ?? process.env, input.platform);
   const git = async (
     args: readonly string[],
     cwd: string,
