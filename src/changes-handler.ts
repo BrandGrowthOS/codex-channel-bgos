@@ -25,8 +25,11 @@
  *  4. The ack is best effort; a failed ack never stops the work.
  *  5. The work runs under the frame's budget (git-changes.ts): past it the
  *     answer is `too_slow`.
- *  6. A result is ALWAYS posted; a throw answers `read_failed`. Every message
- *     is at most 300 characters with no em or en dash.
+ *  6. A result is ALWAYS posted; a throw answers `read_failed` with the spec's
+ *     sentence, plus `git <subcommand> exited <code>` when a Git command
+ *     failed, and nothing else: Git's own words, and any other error's text,
+ *     can name the owner's folder, so they go to this computer's log only.
+ *     Every message is at most 300 characters with no em or en dash.
  *
  * The owner's per agent switch is NOT read here, or anywhere in this plugin:
  * the backend is the only gate, and it sends no frame while the switch is off.
@@ -34,6 +37,7 @@
 import {
   collectChanges,
   createNodeRunGit,
+  GitCommandError,
   nodeChangesFs,
   readCaps,
   type ChangesCaps,
@@ -183,7 +187,14 @@ export function createChangesHandler(deps: ChangesHandlerDeps) {
         caps: readCaps(frame.payload),
       });
     } catch (error) {
-      return failure("read_failed", `${READ_FAILED_MESSAGE}: ${errorText(error)}`);
+      // The error's own text stays here: it can name the owner's folder.
+      report(`changes_rpc read failed: ${errorText(error)}`);
+      return failure(
+        "read_failed",
+        error instanceof GitCommandError
+          ? `${READ_FAILED_MESSAGE}: ${error.summary}`
+          : READ_FAILED_MESSAGE,
+      );
     }
     if (!result.ok) return failure(result.error.code, result.error.message);
     return result;

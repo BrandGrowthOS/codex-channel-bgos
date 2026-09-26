@@ -19,7 +19,13 @@ import {
   normalizeChangesRpc,
   type ChangesRpcFrame,
 } from "../src/changes-handler.js";
-import type { ChangesCaps, ChangesResultBody } from "../src/git-changes.js";
+import {
+  collectChanges,
+  type ChangesCaps,
+  type ChangesFs,
+  type ChangesResultBody,
+  type RunGit,
+} from "../src/git-changes.js";
 
 const EN_DASH = String.fromCharCode(0x2013);
 const EM_DASH = String.fromCharCode(0x2014);
@@ -303,6 +309,58 @@ describe("createChangesHandler", () => {
     )).toBe(true);
     expect(body.error.message.length).toBeLessThanOrEqual(300);
     expect(body.error.message).not.toMatch(DASHES);
+  });
+
+  it("a Git failure answers read_failed with the command and its exit code only; Git's own words, which can name the owner's folder, stay in the local log", async () => {
+    // A workspace owned by another account: Git's message names the
+    // absolute path, and so the operating system user (spec 9.3 and 10.1
+    // rule 8). The REAL collector throws it here.
+    const stderr =
+      "fatal: detected dubious ownership in repository at 'C:/Users/owner/.codex-bgos/workspace'\n";
+    const runGit: RunGit = async () => ({
+      code: 128,
+      stdout: "",
+      stderr,
+      truncated: false,
+    });
+    const unusedFs: ChangesFs = {
+      lstat: async () => {
+        throw new Error("not read");
+      },
+      readPrefix: async () => new Uint8Array(),
+    };
+    const h = harness({
+      collect: (input) => collectChanges({ ...input, runGit, fs: unusedFs }),
+    });
+    await h.handle(frame());
+    expect(h.api.changesRpcResult.mock.calls[0]![1]).toEqual({
+      ok: false,
+      error: {
+        code: "read_failed",
+        message:
+          "changes could not be read on the agent host: git rev-parse exited 128",
+      },
+    });
+    // Git's own line is kept on this computer, in the daemon's log.
+    expect(h.logs.some((line) => line.includes("dubious ownership"))).toBe(true);
+
+    // Anything else thrown answers the spec's sentence alone.
+    const other = harness({
+      collect: async () => {
+        throw new Error(
+          "EPERM: operation not permitted, open 'C:\\Users\\owner\\notes.txt'",
+        );
+      },
+    });
+    await other.handle(frame());
+    expect(other.api.changesRpcResult.mock.calls[0]![1]).toEqual({
+      ok: false,
+      error: {
+        code: "read_failed",
+        message: "changes could not be read on the agent host",
+      },
+    });
+    expect(other.logs.some((line) => line.includes("EPERM"))).toBe(true);
   });
 
   it("passes the collector's too_slow through, dash free", async () => {

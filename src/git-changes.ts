@@ -425,13 +425,32 @@ function emptyPayload(
   };
 }
 
-function gitFailure(args: readonly string[], run: GitRunResult): Error {
+/**
+ * A Git command that failed. Only `summary` may travel to the backend: the
+ * subcommand and its exit code. Git's own words can name the absolute
+ * repository path (`detected dubious ownership in repository at
+ * 'C:/Users/<name>/...'`), and so the operating system user (spec 9.3 and
+ * 10.1 rule 8), so the first line of Git's stderr rides in the message, for
+ * the daemon's local log only (review round 1, C-R4).
+ */
+export class GitCommandError extends Error {
+  readonly summary: string;
+
+  constructor(summary: string, detail = "") {
+    super(detail ? `${summary}: ${detail}` : summary);
+    this.name = "GitCommandError";
+    this.summary = summary;
+  }
+}
+
+function gitFailure(args: readonly string[], run: GitRunResult): GitCommandError {
   const subcommand = args.find((word, index) =>
     !word.startsWith("-") && args[index - 1] !== "-c",
   );
   const detail = firstLine(run.stderr.trim()).slice(0, 160);
-  return new Error(
-    `git ${subcommand ?? "command"} exited ${String(run.code)}${detail ? `: ${detail}` : ""}`,
+  return new GitCommandError(
+    `git ${subcommand ?? "command"} exited ${String(run.code)}`,
+    detail,
   );
 }
 
@@ -541,7 +560,7 @@ async function readChanges(
   // Kept exactly as printed: a repository at a drive root prints `C:/`, and
   // `C:` without its slash is that drive's CURRENT folder on Windows.
   const root = firstLine(top.stdout);
-  if (!root) throw new Error("git rev-parse printed no folder");
+  if (!root) throw new GitCommandError("git rev-parse printed no folder");
   const folder = folderName(root);
 
   const verify = await git(GIT_VERIFY_HEAD, root, SMALL_OUTPUT_MAX);
