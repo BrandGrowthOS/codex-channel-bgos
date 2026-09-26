@@ -66,7 +66,7 @@ export function readCaps(payload: unknown): ChangesCaps {
     payload !== null && typeof payload === "object"
       ? (payload as Record<string, unknown>)
       : {};
-  const out = { ...DEFAULT_CHANGES_CAPS };
+  const out: ChangesCaps = { ...DEFAULT_CHANGES_CAPS };
   for (const name of Object.keys(DEFAULT_CHANGES_CAPS) as Array<
     keyof ChangesCaps
   >) {
@@ -217,6 +217,7 @@ export function createNodeRunGit(
       };
       signal.addEventListener("abort", onAbort, { once: true });
 
+      const stderrText = () => Buffer.concat(errChunks).toString("utf8");
       child.stdout?.on("data", (chunk: Buffer) => {
         if (truncated) return;
         const room = maxBytes - size;
@@ -226,6 +227,17 @@ export function createNodeRunGit(
           truncated = true;
           kill();
           child.stdout?.destroy();
+          // Settle now, not on "close": on Windows Git's launcher can leave a
+          // grandchild holding the pipes for a while after the kill, and the
+          // read already has everything it will send.
+          settle(() =>
+            resolve({
+              code: null,
+              stdout: Buffer.concat(chunks).toString("utf8"),
+              stderr: stderrText(),
+              truncated: true,
+            }),
+          );
           return;
         }
         chunks.push(chunk);
@@ -242,7 +254,7 @@ export function createNodeRunGit(
           resolve({
             code: truncated ? null : code,
             stdout: Buffer.concat(chunks).toString("utf8"),
-            stderr: Buffer.concat(errChunks).toString("utf8"),
+            stderr: stderrText(),
             truncated,
           }),
         ),
@@ -335,6 +347,11 @@ function folderName(path: string): string {
   const at = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
   const name = at >= 0 ? trimmed.slice(at + 1) : trimmed;
   return Array.from(name).slice(0, FOLDER_MAX).join("");
+}
+
+/** A name Git printed relative to the root, as a path under the root. */
+function underRoot(root: string, name: string): string {
+  return /[\\/]$/.test(root) ? `${root}${name}` : `${root}/${name}`;
 }
 
 function firstLine(text: string): string {
@@ -486,7 +503,9 @@ async function readChanges(
     }
     throw gitFailure(GIT_TOPLEVEL, top);
   }
-  const root = firstLine(top.stdout).replace(/[\\/]+$/, "");
+  // Kept exactly as printed: a repository at a drive root prints `C:/`, and
+  // `C:` without its slash is that drive's CURRENT folder on Windows.
+  const root = firstLine(top.stdout);
   if (!root) throw new Error("git rev-parse printed no folder");
   const folder = folderName(root);
 
@@ -553,7 +572,7 @@ async function readUntracked(
     if (out.length >= caps.maxUntrackedTextFiles) break;
     if (name.length === 0) continue;
     if (signal.aborted) throw new BudgetExpired();
-    out.push(await readOne(`${root}/${name}`, name, caps, fs));
+    out.push(await readOne(underRoot(root, name), name, caps, fs));
   }
   return out;
 }

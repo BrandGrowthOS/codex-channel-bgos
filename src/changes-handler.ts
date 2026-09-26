@@ -15,9 +15,13 @@
  *  2. A frame for an agent this daemon does not run gets NOTHING, not even an
  *     ack: several daemons can share one pairing room, and an answer from the
  *     wrong one would win the race with the wrong folder.
- *  3. The last 256 ids are remembered with their answers: an id still running
- *     is ignored, an answered id gets the same answer again. Never forgotten in
- *     a `finally`, so the backend's re emit can never run Git twice.
+ *  3. The last 256 ids are remembered: an id still running is ignored, an
+ *     answered id gets the same answer again. Never forgotten in a `finally`,
+ *     so the backend's re emit can never run Git twice. The answer ITSELF is
+ *     kept for the newest 8 ids only: one answer can carry a 1 MB patch and 20
+ *     new files, and the backend re emits once, 1.5 s after the frame, and
+ *     waits 20 s at most, so an older id can never be waited on again. It is
+ *     still remembered, and gets nothing.
  *  4. The ack is best effort; a failed ack never stops the work.
  *  5. The work runs under the frame's budget (git-changes.ts): past it the
  *     answer is `too_slow`.
@@ -74,6 +78,8 @@ export const CHANGES_ACK_TIMEOUT_MS = 3_000;
 export const CHANGES_RESULT_DEADLINE_MS = 18_000;
 
 const SEEN_LIMIT = 256;
+/** How many answers are kept whole for a re sent id (see rule 3). */
+const ANSWER_KEEP = 8;
 const MESSAGE_MAX = 300;
 const DASHES = new RegExp(
   `[${String.fromCharCode(0x2013)}${String.fromCharCode(0x2014)}]`,
@@ -120,7 +126,8 @@ function errorText(error: unknown): string {
 
 type Seen =
   | { state: "running" }
-  | { state: "done"; result: ChangesResultBody };
+  /** `result` is null once the answer fell out of the newest ANSWER_KEEP. */
+  | { state: "done"; result: ChangesResultBody | null };
 
 /** Build the non throwing handler for pairing room `changes_rpc` frames. */
 export function createChangesHandler(deps: ChangesHandlerDeps) {
@@ -130,6 +137,7 @@ export function createChangesHandler(deps: ChangesHandlerDeps) {
     deps.collect ??
     ((input) => collectChanges({ ...input, runGit, fs: nodeChangesFs }));
   const seen = new Map<string, Seen>();
+  const kept: string[] = [];
 
   const report = (message: string): void => {
     try {
@@ -145,6 +153,19 @@ export function createChangesHandler(deps: ChangesHandlerDeps) {
       const oldest = seen.keys().next().value as string | undefined;
       if (oldest === undefined) break;
       seen.delete(oldest);
+    }
+  };
+
+  /** Remember an answer, keeping the body of the newest ANSWER_KEEP only. */
+  const rememberAnswer = (rpcId: string, result: ChangesResultBody): void => {
+    remember(rpcId, { state: "done", result });
+    kept.push(rpcId);
+    while (kept.length > ANSWER_KEEP) {
+      const dropped = kept.shift() as string;
+      const entry = seen.get(dropped);
+      if (entry?.state === "done") {
+        seen.set(dropped, { state: "done", result: null });
+      }
     }
   };
 
@@ -198,7 +219,7 @@ export function createChangesHandler(deps: ChangesHandlerDeps) {
       if (!deps.owns(frame.assistantId)) return;
       const known = seen.get(frame.rpcId);
       if (known) {
-        if (known.state === "done") {
+        if (known.state === "done" && known.result !== null) {
           await postResult(frame.rpcId, known.result, receivedAt);
         }
         return;
@@ -216,7 +237,7 @@ export function createChangesHandler(deps: ChangesHandlerDeps) {
       }
 
       const result = await answer(frame);
-      remember(frame.rpcId, { state: "done", result });
+      rememberAnswer(frame.rpcId, result);
       await postResult(frame.rpcId, result, receivedAt);
     } catch (error) {
       report(`changes_rpc handler failed: ${errorText(error)}`);

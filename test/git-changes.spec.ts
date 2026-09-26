@@ -17,6 +17,7 @@
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import {
   mkdirSync,
   mkdtempSync,
@@ -25,9 +26,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
+import { PassThrough } from "node:stream";
 import { basename, dirname, join } from "node:path";
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import {
   collectChanges,
@@ -488,6 +490,36 @@ describe("collectChanges", () => {
     expect(result.payload.numstatTruncated).toBe(false);
   }, 15_000);
 
+  it("a cut read settles at the cap, without waiting for the child to close", async () => {
+    // On Windows, Git's cmd\git.exe is a launcher: a grandchild can keep the
+    // pipes open after the kill, so waiting for "close" could let the budget
+    // turn a good cut read into too_slow. A child that never closes:
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      kill: vi.fn(() => true),
+    });
+    const adapter = createNodeRunGit({
+      spawnImpl: (() => child) as unknown as typeof spawn,
+    });
+    const pending = adapter(PATCH, {
+      cwd: ROOT,
+      env: {},
+      maxBytes: 1_024,
+      signal: new AbortController().signal,
+    });
+    child.stderr.write("warning: something\n");
+    child.stdout.write(Buffer.alloc(4_096, 0x78));
+    const run = await pending;
+    expect(run).toEqual({
+      code: null,
+      stdout: "x".repeat(1_024),
+      stderr: "warning: something\n",
+      truncated: true,
+    });
+    expect(child.kill).toHaveBeenCalled();
+  });
+
   it("never sends more than the cap, even when a read hands back more", async () => {
     // A runGit that ignores maxBytes (a future adapter bug) still cannot push
     // the answer past the frame's cap, which the backend would refuse whole.
@@ -723,6 +755,27 @@ describe("collectChanges", () => {
     });
     expect(onWindows.ok && onWindows.payload.folder).toBe("billing-export");
     expect(JSON.stringify(onWindows)).not.toContain("Users");
+  });
+
+  it("a repository at a drive root keeps its slash, so Git runs in the root and not in the drive's current folder", async () => {
+    const { runGit, calls } = fakeGit(
+      okScript({
+        [key(TOPLEVEL)]: { stdout: "C:/\n" },
+        [key(UNTRACKED)]: { stdout: "notes.md\0" },
+      }),
+    );
+    const { fs, lstatCalls } = memoryFs({
+      "C:/notes.md": { data: Buffer.from("n\n") },
+    });
+    const result = await collectChanges({
+      workdir: "C:\\work",
+      caps: readCaps({}),
+      runGit,
+      fs,
+    });
+    expect(result.ok).toBe(true);
+    expect(calls.slice(1).map((c) => c.cwd)).toEqual(Array(6).fill("C:/"));
+    expect(lstatCalls).toEqual(["C:/notes.md"]);
   });
 
   it("a Git command that fails for another reason is thrown, never dressed up as a state", async () => {

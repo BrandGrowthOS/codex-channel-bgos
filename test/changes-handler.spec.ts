@@ -254,6 +254,28 @@ describe("createChangesHandler", () => {
     expect(h.collect).toHaveBeenCalledTimes(258);
   });
 
+  it("keeps the answer itself for the newest 8 ids only, so 256 remembered ids never hold 256 patches", async () => {
+    // One answer can carry a 1 MB patch and 20 new files. The backend re
+    // emits once, 1.5 s after the frame, and waits 20 s at most, so only the
+    // newest answers can ever be asked for again.
+    const h = harness();
+    for (let i = 1; i <= 10; i += 1) {
+      await h.handle(frame({ rpcId: `rpc-${i}` }));
+    }
+    expect(h.api.changesRpcResult).toHaveBeenCalledTimes(10);
+    // An old id is still remembered (Git never runs twice) but its answer is
+    // gone, and the backend stopped waiting for it long ago: nothing is sent.
+    await h.handle(frame({ rpcId: "rpc-1" }));
+    await h.handle(frame({ rpcId: "rpc-2" }));
+    expect(h.collect).toHaveBeenCalledTimes(10);
+    expect(h.api.changesRpcResult).toHaveBeenCalledTimes(10);
+    // One of the newest 8 is answered again from memory.
+    await h.handle(frame({ rpcId: "rpc-3" }));
+    expect(h.collect).toHaveBeenCalledTimes(10);
+    expect(h.api.changesRpcResult).toHaveBeenCalledTimes(11);
+    expect(h.api.changesRpcResult.mock.calls[10]).toEqual(["rpc-3", OK_BODY]);
+  });
+
   it("a failed ack does not stop the work", async () => {
     const h = harness({
       ack: () => Promise.reject(new Error("Request failed with status code 502")),
