@@ -155,6 +155,8 @@ const GIT_NUMSTAT = [
  * previous file's section, or draw files the numstat never names. Short is
  * Git's default: one `diff --git a/<path> b/<path>` section whose two lines
  * are the old and the new `Subproject commit`.
+ *
+ * The options are in spec 10.1 item 7's own order (fix round w4, F9).
  */
 const GIT_PATCH = [
   "-c",
@@ -165,10 +167,10 @@ const GIT_PATCH = [
   "--no-ext-diff",
   "--no-textconv",
   "--no-color",
-  "--find-renames",
   "--src-prefix=a/",
   "--dst-prefix=b/",
   "--submodule=short",
+  "--find-renames",
   "HEAD",
   "--",
 ] as const;

@@ -79,6 +79,7 @@ const NUMSTAT = [
 // a host with diff.submodule=log or =diff would otherwise write a moved
 // submodule as "Submodule ..." lines with no diff --git header, which the
 // backend's splitter would hang on the previous file (review round 1, C-R3).
+// The options in spec 10.1 item 7's own order (fix round w4, F9).
 const PATCH = [
   "-c",
   "core.quotepath=false",
@@ -89,10 +90,10 @@ const PATCH = [
   "--no-ext-diff",
   "--no-textconv",
   "--no-color",
-  "--find-renames",
   "--src-prefix=a/",
   "--dst-prefix=b/",
   "--submodule=short",
+  "--find-renames",
   "HEAD",
   "--",
 ];
