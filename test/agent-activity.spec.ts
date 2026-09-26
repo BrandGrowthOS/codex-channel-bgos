@@ -876,7 +876,7 @@ describe("the plugin never reads the owner's switch", () => {
     expect(sourceFiles("src").length).toBeGreaterThan(40);
   });
 
-  it("reads the owner's Show the model and effort switch nowhere in src/", () => {
+  it("reads the owner's Show model and effort switch nowhere in src/", () => {
     // P5 stage 7 (C-26, S10). The daemon reports each chat's model and effort
     // ALWAYS, and the app alone decides whether to draw the row: the switch
     // (assistants.show_model_effort) and the derived canShowModelEffort are

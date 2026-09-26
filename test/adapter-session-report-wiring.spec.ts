@@ -21,6 +21,7 @@
  *
  * No em or en dashes anywhere in this file.
  */
+import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,6 +29,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CodexAdapter } from "../src/adapter.js";
 import { BgosApi } from "../src/bgos-api.js";
+import { CodexHost } from "../src/codex-host.js";
 import {
   SESSION_REPORT_RETRY_FIRST_MS,
   SESSION_REPORT_RETRY_MAX_MS,
@@ -865,6 +867,165 @@ describe("Round C: an in process re pair reports every chat again", () => {
     await settle();
     expect(adapter.host.storedSessionChats).not.toHaveBeenCalled();
     expect(sent).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * P5 stage 7, round D (the final review's re pair window): a re pair's sweep
+ * never sends a settings change that is still in flight. Driven with the REAL
+ * host (over a fake app server that holds `thread/settings/update` open) and
+ * the real recover(): the owner answers /model, the change waits on the
+ * runtime, the re pair's sweep comes for the chat, and the runtime then
+ * refuses. Before round D the sweep read the store while it held the change's
+ * value and sent it forced; the refusal restored the store, and under round
+ * C's decision 6 (a rollback is reported only when the runtime moved) nothing
+ * corrected the row, which named a model no turn runs.
+ */
+describe("Round D: a re pair's sweep never sends a change still in flight", () => {
+  const MODELS = ["gpt-6-astra", "gpt-5.5"].map((model, i) => ({
+    model,
+    id: model,
+    displayName: model,
+    description: "",
+    defaultReasoningEffort: "medium",
+    supportedReasoningEfforts: ["low", "medium", "high"].map(
+      (reasoningEffort) => ({ reasoningEffort, description: "" }),
+    ),
+    supportsPersonality: false,
+    serviceTiers: [],
+    isDefault: i === 0,
+  }));
+
+  /** The app server: thread/settings/update waits until the test settles it. */
+  class HeldUpdateServer extends EventEmitter {
+    update = deferred();
+    start = vi.fn(async () => {});
+    close = vi.fn();
+    request = vi.fn(async (method: string, p: any): Promise<any> => {
+      if (method === "model/list") return { data: MODELS };
+      if (method === "thread/resume") {
+        const copy = structuredClone(wire.threadResumeResponse);
+        copy.thread.id = p.threadId;
+        return copy;
+      }
+      if (method === "thread/settings/update") await this.update.promise;
+      return {};
+    });
+  }
+
+  function fixture() {
+    writeFileSync(join(home, "threads.json"), JSON.stringify({ 20: "thread-20" }));
+    // The saved pair: what chat 20 runs before the owner's /model.
+    writeFileSync(
+      join(home, "session-settings.json"),
+      JSON.stringify({ 20: { model: "gpt-5.5", effort: "low" } }),
+    );
+    const server = new HeldUpdateServer();
+    const adapter = Object.create(CodexAdapter.prototype) as any;
+    const sent = vi.fn(async (..._args: unknown[]) => {});
+    const host = new CodexHost({
+      auth: { ok: true, mode: "chatgpt", label: "test" },
+      workdir: home,
+      server: server as any,
+      tools: [],
+      onSessionSettings: (chatId: number, value: SessionReport) =>
+        adapter.noteSessionSettings(chatId, value),
+    } as any);
+    Object.assign(adapter, {
+      started: true,
+      fatalLatched: true,
+      fatalNotified: true,
+      currentToken: "o".repeat(32),
+      host,
+      api: { reportSessionSettings: sent, updateToken: vi.fn() },
+      ws: {
+        updateToken: vi.fn(),
+        disconnect: vi.fn(),
+        connect: vi.fn(async () => {}),
+        triggerBackfill: vi.fn(async () => {}),
+      },
+      meetings: { resume: vi.fn() },
+      heartbeat: { setNetEnabled: vi.fn(), setLastError: vi.fn() },
+      outbound: { replaySpool: vi.fn(async () => {}) },
+      assistantToRoute: new Map([[10, "codex"]]),
+      chatToAssistant: new Map([[20, 10]]),
+      identityReady: true,
+      refreshIdentity: vi.fn(async () => true),
+      startPollLoop: vi.fn(),
+      stopSecretsWatch: vi.fn(),
+    });
+    /** Every model and effort this chat's reports carried, in order. */
+    const models = () =>
+      sent.mock.calls
+        .filter(([, chatId]) => chatId === 20)
+        .map(([, , value]) => {
+          const { model, effort } = value as SessionReport;
+          return `${model}/${effort}`;
+        });
+    return { adapter, host, server, sent, models };
+  }
+
+  it("the runtime refuses the change: the sweep sent nothing for it, and the last value sent is the saved one", async () => {
+    const { adapter, host, server, models } = fixture();
+    // The boot's sweep: the saved pair reaches BGOS.
+    await adapter.reportStoredSessionSettings();
+    await settle();
+    expect(models()).toEqual(["gpt-5.5/low"]);
+    // The owner answers /model; the change waits on the runtime.
+    const change = host.updateSettings(20, {
+      model: "gpt-6-astra",
+      effort: "high",
+    });
+    await vi.waitFor(() =>
+      expect(server.request).toHaveBeenCalledWith(
+        "thread/settings/update",
+        expect.objectContaining({ threadId: "thread-20" }),
+      ),
+    );
+    // The re pair, and its sweep, while the change is in flight.
+    await adapter.recover("n".repeat(32));
+    await settle();
+    expect(host.storedSessionChats()).toContain(20);
+    // The runtime refuses the change outright.
+    server.update.reject(new Error("runtime rejected"));
+    await expect(change).rejects.toThrow("runtime rejected");
+    await settle();
+    expect(models()).not.toContain("gpt-6-astra/high");
+    expect(models().at(-1)).toBe("gpt-5.5/low");
+    host.close();
+  });
+
+  it("CONTROL: the runtime takes the change: its own landing report is what reaches BGOS, once", async () => {
+    const { adapter, host, server, models } = fixture();
+    await adapter.reportStoredSessionSettings();
+    await settle();
+    const change = host.updateSettings(20, {
+      model: "gpt-6-astra",
+      effort: "high",
+    });
+    await vi.waitFor(() =>
+      expect(server.request).toHaveBeenCalledWith(
+        "thread/settings/update",
+        expect.objectContaining({ threadId: "thread-20" }),
+      ),
+    );
+    await adapter.recover("n".repeat(32));
+    await settle();
+    server.update.resolve();
+    await change;
+    await settle();
+    expect(models()).toEqual(["gpt-5.5/low", "gpt-6-astra/high"]);
+    host.close();
+  });
+
+  it("CONTROL: with no change in flight the re pair's sweep sends the stored pair again", async () => {
+    const { adapter, host, models } = fixture();
+    await adapter.reportStoredSessionSettings();
+    await settle();
+    await adapter.recover("n".repeat(32));
+    await vi.waitFor(() => expect(models()).toHaveLength(2));
+    expect(models()).toEqual(["gpt-5.5/low", "gpt-5.5/low"]);
+    host.close();
   });
 });
 

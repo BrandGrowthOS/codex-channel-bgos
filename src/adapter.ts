@@ -2364,6 +2364,10 @@ export class CodexAdapter {
    * AND AFTER AN IN PROCESS RE PAIR (round C, decision 4): recover() forgets
    * what it sent and runs this again once identity is back, because the new
    * pairing's bind cleared every chat's value on BGOS's side.
+   *
+   * NEVER A CHANGE STILL IN FLIGHT (round D): the host answers null for a
+   * chat whose settings change is waiting on the runtime, so this sends
+   * nothing for it; the change's own landing report, or none, decides.
    */
   private async reportStoredSessionSettings(): Promise<void> {
     try {

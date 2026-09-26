@@ -62,6 +62,8 @@ class Server extends EventEmitter {
   onRequest: any;
   rejectUpdate = false;
   applyThenReject = false;
+  /** Held open until the test settles it: a change still in flight. */
+  hold: Promise<unknown> | null = null;
   start = vi.fn(async () => {});
   close = vi.fn();
   request = vi.fn(async (method: string, p: any): Promise<any> => {
@@ -71,6 +73,7 @@ class Server extends EventEmitter {
     if (method === "thread/resume")
       return withThread(wire.threadResumeResponse, p.threadId);
     if (method === "turn/start") return { turn: { id: `turn-${p.threadId}` } };
+    if (method === "thread/settings/update" && this.hold) await this.hold;
     if (method === "thread/settings/update" && this.rejectUpdate)
       throw Error("runtime rejected");
     if (method === "thread/settings/update" && this.applyThenReject) {
@@ -731,6 +734,77 @@ describe("the host's report seam", () => {
       ).rejects.toThrow("runtime rejected");
       await settle();
       expect(seen).toEqual([]);
+    });
+  });
+
+  /**
+   * P5 stage 7, round D (the final review's re pair window): the connect
+   * sweep's source says NOTHING for a chat whose settings change is still in
+   * flight. The store holds the change's value from the moment it is asked
+   * for, before the runtime has taken it; a re pair's sweep that read it then
+   * sent it forced, and a runtime that then refused the change left the row
+   * naming a model no turn runs, with no rollback report to correct it (round
+   * C, decision 6, reports one only when the runtime moved). The change's own
+   * landing report, or no report at all, decides instead.
+   */
+  describe("Round D: the sweep's source says nothing while a change is in flight", () => {
+    /** Start a change and wait until it is waiting on the runtime. */
+    async function changeInFlight() {
+      let settle!: (error?: Error) => void;
+      server.hold = new Promise<void>((resolve, reject) => {
+        settle = (error) => (error ? reject(error) : resolve());
+      });
+      const updates = () =>
+        server.request.mock.calls.filter(
+          ([method]) => method === "thread/settings/update",
+        ).length;
+      const before = updates();
+      const change = host.updateSettings(10, {
+        model: "gpt-6-astra",
+        effort: "high",
+      });
+      await vi.waitFor(() => expect(updates()).toBe(before + 1));
+      return { change, settle };
+    }
+
+    it("null while the change waits on the runtime, and the saved pair again once the runtime refuses it", async () => {
+      build({ 10: "persisted" });
+      await host.updateSettings(10, { model: "gpt-5.5", effort: "low" });
+      const { change, settle } = await changeInFlight();
+      expect(host.storedSessionReport(10)).toBeNull();
+      settle(new Error("runtime rejected"));
+      await expect(change).rejects.toThrow("runtime rejected");
+      expect(host.storedSessionReport(10)).toMatchObject({
+        model: "gpt-5.5",
+        effort: "low",
+        rerouted: false,
+      });
+    });
+
+    it("a change that lands: null while in flight, its own pair once it has landed", async () => {
+      build({ 10: "persisted" });
+      await host.updateSettings(10, { model: "gpt-5.5", effort: "low" });
+      const { change, settle } = await changeInFlight();
+      expect(host.storedSessionReport(10)).toBeNull();
+      settle();
+      await change;
+      expect(host.storedSessionReport(10)).toMatchObject({
+        model: "gpt-6-astra",
+        effort: "high",
+      });
+    });
+
+    it("CONTROL: another chat's stored pair is answered while this chat's change is in flight", async () => {
+      build({ 10: "persisted" });
+      await host.updateSettings(10, { model: "gpt-5.5", effort: "low" });
+      await host.updateSettings(11, { model: "gpt-5.6-sol", effort: "medium" });
+      const { change, settle } = await changeInFlight();
+      expect(host.storedSessionReport(11)).toMatchObject({
+        model: "gpt-5.6-sol",
+        effort: "medium",
+      });
+      settle();
+      await change;
     });
   });
 

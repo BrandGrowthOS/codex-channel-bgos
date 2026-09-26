@@ -70,7 +70,7 @@ export const MISSION_PAUSE = "mission_pause";
  * between turns".
  *
  * The backend reads this token and nothing else to offer the owner's "Show
- * the model and effort" switch; the switch itself is app side and this daemon
+ * model and effort" switch; the switch itself is app side and this daemon
  * never reads it (test/agent-activity.spec.ts). The name is the backend's own
  * `SESSION_MODEL_CONTROL` and is pinned by one hash in both repos
  * (SESSION_SETTINGS_RAIL_SHA256, test/session-rail-contract.spec.ts).

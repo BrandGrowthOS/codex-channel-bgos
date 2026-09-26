@@ -729,6 +729,10 @@ export class CodexHost {
    * back with a report; one it refused outright changed nothing anyone was
    * told. One entry per chat at most: withIdleControl runs one change per
    * chat at a time, and the entry goes when the request settles.
+   *
+   * An entry is also the mark of a change IN FLIGHT, and the connect sweep's
+   * source reads it (round D): storedSessionReport answers nothing for the
+   * chat while the entry is there.
    */
   private readonly runtimeMovedDuringChange = new Map<number, boolean>();
   /**
@@ -1103,8 +1107,19 @@ export class CodexHost {
    * the chat's turn comes, never from a snapshot taken at boot, so a /model
    * that landed mid sweep is what the sweep sends. Null when nothing is
    * stored.
+   *
+   * AND NULL WHILE A SETTINGS CHANGE FOR THE CHAT IS IN FLIGHT (P5 stage 7,
+   * round D). updateSettings stores the change's value BEFORE the runtime
+   * takes it, so a sweep that read the store then (an in process re pair's,
+   * say) sent a value no turn had run yet, forced; when the runtime then
+   * refused the change outright, the store went back and nothing corrected
+   * the row, because a refusal reports a rollback only when the runtime moved
+   * (round C, decision 6). The change's own landing report, or no report at
+   * all, decides instead. The chat stays in storedSessionChats: the sweep asks
+   * again only on its next run.
    */
   storedSessionReport(chatId: number): SessionReport | null {
+    if (this.runtimeMovedDuringChange.has(chatId)) return null;
     return reportFromStored(this.settings.get(chatId));
   }
   /**
