@@ -23,6 +23,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -50,9 +51,15 @@ const TOPLEVEL = ["rev-parse", "--show-toplevel"];
 const VERIFY_HEAD = ["rev-parse", "--verify", "--quiet", "HEAD"];
 const BRANCH = ["symbolic-ref", "--quiet", "--short", "HEAD"];
 const SHORT_HEAD = ["rev-parse", "--short", "HEAD"];
+// -c diff.autoRefreshIndex=false on both diffs: a porcelain `git diff` would
+// otherwise refresh .git/index (taking index.lock) when a tracked file has
+// only a stat change, and GIT_OPTIONAL_LOCKS=0 does not stop that path
+// (review round 1, C-R1).
 const NUMSTAT = [
   "-c",
   "core.quotepath=false",
+  "-c",
+  "diff.autoRefreshIndex=false",
   "diff",
   "--numstat",
   "-z",
@@ -68,6 +75,8 @@ const NUMSTAT = [
 const PATCH = [
   "-c",
   "core.quotepath=false",
+  "-c",
+  "diff.autoRefreshIndex=false",
   "--no-pager",
   "diff",
   "--no-ext-diff",
@@ -429,6 +438,12 @@ describe("collectChanges", () => {
           words.splice(0, words[0] === "-c" ? 2 : 1);
         }
         expect(READS, key(call.args)).toContain(words[0]);
+        // A porcelain diff refreshes the index unless told not to.
+        if (words[0] === "diff") {
+          const at = call.args.indexOf("diff.autoRefreshIndex=false");
+          expect(at, key(call.args)).toBeGreaterThan(0);
+          expect(call.args[at - 1], key(call.args)).toBe("-c");
+        }
       }
     }
 
@@ -818,9 +833,11 @@ describe.skipIf(!gitOnPath)("against a real Git repository", () => {
   let globalConfig = "";
   let env: Record<string, string | undefined> = {};
 
-  /** One repository with one commit, one edit and one new file. The host's
-   * own Git config is isolated: each case writes the setting it is about
-   * into the isolated GLOBAL config, where an owner usually sets it. */
+  /** One repository with one commit, one edit and one new file, and a
+   * tracked file whose content equals HEAD but whose stat moved (see
+   * statOnlyChange). The host's own Git config is isolated: each case writes
+   * the setting it is about into the isolated GLOBAL config, where an owner
+   * usually sets it. */
   beforeAll(() => {
     const home = mkdtempSync(join(tmpdir(), "bgos-changes-home-"));
     made.push(home);
@@ -851,6 +868,7 @@ describe.skipIf(!gitOnPath)("against a real Git repository", () => {
     git("-c", "commit.gpgsign=false", "commit", "-q", "-m", "first");
     writeFileSync(join(repo, "a.txt"), "two\n");
     writeFileSync(join(repo, "new.txt"), "hello\n");
+    statOnlyChange();
   }, 60_000);
 
   afterAll(() => {
@@ -864,29 +882,82 @@ describe.skipIf(!gitOnPath)("against a real Git repository", () => {
       .update(readFileSync(join(repo, ".git", "index")))
       .digest("hex");
 
+  let statMoves = 0;
+  /** Rewrite sub/keep.txt with its own text and move its mtime: the content
+   * still equals HEAD and only the stat moved. That is what a revert to the
+   * HEAD text, a formatter or an editor save of an unchanged file leaves
+   * behind. A porcelain `git diff` then refreshes the index (it takes
+   * index.lock and rewrites .git/index) unless diff.autoRefreshIndex is off,
+   * and GIT_OPTIONAL_LOCKS=0 does not stop it (review round 1, C-R1). Each
+   * call picks a new time, so the index never already holds it. */
+  function statOnlyChange(): void {
+    const file = join(repo, "sub", "keep.txt");
+    writeFileSync(file, "keep\n");
+    statMoves += 1;
+    const at = new Date(Date.UTC(2020, 0, 1) + statMoves * 86_400_000);
+    utimesSync(file, at, at);
+  }
+
+  /** One Git command run directly, with the collector's own environment. */
+  const runDirect = (argv: string[]) =>
+    spawnSync("git", argv, {
+      cwd: repo,
+      env: { ...env, GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" },
+      windowsHide: true,
+    });
+
+  /** The same argv without the `-c diff.autoRefreshIndex=false` pair. */
+  const withoutAutoRefresh = (argv: string[]) => {
+    const at = argv.indexOf("diff.autoRefreshIndex=false");
+    return at < 1 ? [...argv] : [...argv.slice(0, at - 1), ...argv.slice(at + 1)];
+  };
+
   /** The same patch WITHOUT the two prefix flags: the control that proves
    * the host setting really bites on this Git. */
   const controlMinusLine = () => {
-    const run = spawnSync(
-      "git",
-      [
-        "-c",
-        "core.quotepath=false",
-        "--no-pager",
-        "diff",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--no-color",
-        "--find-renames",
-        "HEAD",
-        "--",
-      ],
-      { cwd: repo, env: { ...env, GIT_OPTIONAL_LOCKS: "0" }, windowsHide: true },
+    const run = runDirect(
+      PATCH.filter(
+        (word) => !word.startsWith("--src-prefix=") && !word.startsWith("--dst-prefix="),
+      ),
     );
     return String(run.stdout)
       .split(/\r?\n/)
       .find((line) => line.startsWith("--- "));
   };
+
+  it("a file with only a stat change leaves the index alone, where a plain porcelain diff rewrites it", async () => {
+    writeFileSync(globalConfig, "");
+    // The controls: each diff WITHOUT -c diff.autoRefreshIndex=false, under
+    // the collector's own environment (GIT_OPTIONAL_LOCKS=0 included),
+    // rewrites .git/index on this Git. So the case below can fail.
+    for (const argv of [NUMSTAT, PATCH]) {
+      statOnlyChange();
+      const controlBefore = indexHash();
+      const run = runDirect(withoutAutoRefresh(argv));
+      expect(run.status, key(argv)).toBe(0);
+      expect(indexHash(), `control: ${key(withoutAutoRefresh(argv))}`).not.toBe(
+        controlBefore,
+      );
+    }
+
+    statOnlyChange();
+    const before = indexHash();
+    const result = await collectChanges({
+      workdir: repo,
+      caps: readCaps({}),
+      runGit: createNodeRunGit(),
+      fs: nodeChangesFs,
+      env,
+    });
+    expect(indexHash()).toBe(before);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // A file whose content equals HEAD is nothing to draw: Git gives it no
+    // numstat record and no patch section, so the backend never sees it.
+    expect(result.payload.numstat).toBe("1\t1\ta.txt\0");
+    expect(result.payload.patch).not.toContain("keep.txt");
+    expect(result.payload.untracked).toBe("new.txt\0");
+  }, 30_000);
 
   for (const [label, config, control] of [
     [
@@ -905,6 +976,9 @@ describe.skipIf(!gitOnPath)("against a real Git repository", () => {
     it(`a host with ${label} set still writes a/ and b/, reads from a subfolder, and leaves the index alone`, async () => {
       writeFileSync(globalConfig, config);
       expect(control).toContain(controlMinusLine());
+      // The control may refresh the index; move the stat again so the read
+      // below has a stat only file to leave alone.
+      statOnlyChange();
       const before = indexHash();
       const result = await collectChanges({
         workdir: join(repo, "sub"),

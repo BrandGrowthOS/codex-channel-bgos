@@ -21,9 +21,19 @@
  *   6. ls-files --others --exclude-standard -z   (new files, .gitignore kept)
  * Every command after the first runs in the ROOT the first one printed, so the
  * tracked paths (which `git diff` prints root relative) and the new file names
- * (which `ls-files` would print folder relative) agree. Every one runs with
- * GIT_OPTIONAL_LOCKS=0, so even a read never refreshes the index behind the
- * agent's back. Nothing here stages, stashes, checks out, or asks for status.
+ * (which `ls-files` would print folder relative) agree.
+ *
+ * NEVER WRITES THE INDEX. A porcelain `git diff` refreshes .git/index on its
+ * own (it takes index.lock and rewrites the file) whenever a tracked file has
+ * only a stat change, for example a file reverted to its HEAD text or saved
+ * unchanged: that is Git's diff.autoRefreshIndex, on by default, and
+ * GIT_OPTIONAL_LOCKS=0 does NOT reach it. So both diffs pass
+ * `-c diff.autoRefreshIndex=false`, and a file whose content equals HEAD is
+ * still left out of the numstat and the patch (Git compares the content).
+ * Every command also runs with GIT_OPTIONAL_LOCKS=0, which keeps the other
+ * optional lock takers quiet. Nothing here stages, stashes, checks out, or
+ * asks for status, and an agent's own `git add` or `git commit` never meets
+ * an index.lock this read took.
  *
  * The frame's caps are honoured and never raised (`readCaps`), the reads stop
  * at the byte cap and kill the child (a large diff never fails the whole read
@@ -86,9 +96,12 @@ const GIT_TOPLEVEL = ["rev-parse", "--show-toplevel"] as const;
 const GIT_VERIFY_HEAD = ["rev-parse", "--verify", "--quiet", "HEAD"] as const;
 const GIT_BRANCH = ["symbolic-ref", "--quiet", "--short", "HEAD"] as const;
 const GIT_SHORT_HEAD = ["rev-parse", "--short", "HEAD"] as const;
+/** A porcelain diff that never refreshes the index (see the header). */
+const NO_INDEX_REFRESH = ["-c", "diff.autoRefreshIndex=false"] as const;
 const GIT_NUMSTAT = [
   "-c",
   "core.quotepath=false",
+  ...NO_INDEX_REFRESH,
   "diff",
   "--numstat",
   "-z",
@@ -107,6 +120,7 @@ const GIT_NUMSTAT = [
 const GIT_PATCH = [
   "-c",
   "core.quotepath=false",
+  ...NO_INDEX_REFRESH,
   "--no-pager",
   "diff",
   "--no-ext-diff",
