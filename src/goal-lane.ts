@@ -143,6 +143,18 @@ interface GoalState {
    * restart (review F1).
    */
   keptByStop: boolean;
+  /**
+   * An owner Stop holds this goal and the resume that follows it has not
+   * come yet (review F2). The Stop reads whether the goal was running at
+   * that moment, but the turn it interrupted still ends after it: a goal
+   * that stands down in between (the cap reached at that turn's end, the
+   * runtime's no progress rule, the owner's `/goal pause`) is kept held
+   * through the resume as well. Whatever starts the goal again ends it
+   * (resumeForChat): a resume that gives a running goal back, more turns,
+   * or `/goal resume`. A goal the resume leaves held stays held, so the
+   * hold staying open changes nothing for it.
+   */
+  stopHold: boolean;
 }
 
 /**
@@ -238,6 +250,7 @@ export class GoalLane {
       stopped: false,
       ownerHeld: false,
       keptByStop: false,
+      stopHold: false,
     });
     await this.setObjective(input.chatId, objective);
   }
@@ -277,6 +290,7 @@ export class GoalLane {
       stopped: false,
       ownerHeld: false,
       keptByStop: false,
+      stopHold: false,
     });
     await this.setObjective(input.chatId, objective);
     return missionId;
@@ -314,6 +328,7 @@ export class GoalLane {
     // again. A clear here would mean the owner's condition had to be
     // remembered and retyped by someone.
     state.stopped = true;
+    this.keepIfStopHeld(state);
     await this.holdGoal(state);
     await this.write(state, "stopped", () =>
       this.deps.api.postMissionStopped(state.assistantId, state.missionId, {
@@ -357,6 +372,7 @@ export class GoalLane {
       // turns. It is reported as a stop and NEVER as a failure, because the
       // owner has something to decide and a failed mission asks them nothing.
       state.stopped = true;
+      this.keepIfStopHeld(state);
       await this.write(state, "stopped", () =>
         this.deps.api.postMissionStopped(state.assistantId, state.missionId, {
           kind: "no_progress",
@@ -442,7 +458,10 @@ export class GoalLane {
   ): Promise<ThreadGoal | null> {
     const goal = await this.deps.host.setGoal(chatId, null, { status: "paused" });
     const state = this.byChat.get(chatId);
-    if (state && by === "owner") state.ownerHeld = true;
+    if (state && by === "owner") {
+      state.ownerHeld = true;
+      this.keepIfStopHeld(state);
+    }
     return goal;
   }
 
@@ -455,13 +474,17 @@ export class GoalLane {
    * `/goal pause`. A goal that was not running is marked here, BEFORE the
    * hold, so the resume that follows the Stop leaves it held (noteResumed).
    * The Stop's own hold is not the owner's, so a second Stop before the
-   * resume still finds a running goal running. Throws when the host does,
-   * as pauseForChat does.
+   * resume still finds a running goal running. The hold stays open until
+   * that resume, and a goal that stands down inside it is kept as well
+   * (review F2). Throws when the host does, as pauseForChat does.
    */
   async holdForStop(chatId: number): Promise<boolean> {
     const state = this.byChat.get(chatId);
     const running = state !== undefined && !state.stopped && !state.ownerHeld;
-    if (state) this.keepThroughResume(state, !running);
+    if (state) {
+      state.stopHold = true;
+      this.keepThroughResume(state, !running);
+    }
     await this.pauseForChat(chatId, "stop");
     return running;
   }
@@ -475,6 +498,7 @@ export class GoalLane {
       state.stopped = false;
       state.ownerHeld = false;
       state.keptByStop = false;
+      state.stopHold = false;
     }
     // By chat, with or without state: after a restart the owner's
     // `/goal resume` is the one door that knows nothing but the chat.
@@ -585,6 +609,16 @@ export class GoalLane {
     else this.kept.delete(state.chatId);
   }
 
+  /**
+   * The goal just stood down (its cap, the no progress rule, the owner's
+   * `/goal pause`). While an owner Stop holds it, the resume that follows
+   * that Stop must leave it held too: it had ended before anyone resumed
+   * anything (review F2, D36).
+   */
+  private keepIfStopHeld(state: GoalState): void {
+    if (state.stopHold) this.keepThroughResume(state, true);
+  }
+
   private stateForMission(missionId: number): GoalState | null {
     const chatId = this.chatByMission.get(missionId);
     if (chatId === undefined) return null;
@@ -639,6 +673,7 @@ export class GoalLane {
       stopped: false,
       ownerHeld: false,
       keptByStop: false,
+      stopHold: false,
     };
     this.attach(state);
     return state;

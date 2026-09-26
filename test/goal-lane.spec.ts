@@ -519,6 +519,91 @@ describe("GoalLane", () => {
     });
 
     /**
+     * Review F2: holdForStop reads whether the goal was running at the
+     * moment of the Stop, but the turn the Stop interrupts still ends after
+     * it. When that was the last turn under the cap, its end held the goal
+     * and posted the stop, which turns Keep working off on the server, and
+     * the owner's next message gave the goal back all the same: one turn past
+     * the cap, then a second "Paused at" line. A goal that stands down by
+     * any of its own rules, or that the owner holds, between the Stop and the
+     * resume that follows it is kept held just the same.
+     */
+    describe("a goal that stands down between the Stop and its resume (review F2)", () => {
+      it.each([
+        [
+          "reaches its cap at the end of the turn the Stop interrupted",
+          async (lane: GoalLane) => {
+            await lane.noteTurnFinished(42, { error: "Stopped by you." });
+          },
+        ],
+        [
+          "stops for lack of progress",
+          async (lane: GoalLane) => {
+            await lane.handleGoalUpdate(42, liveGoal({ status: "blocked" }));
+          },
+        ],
+        [
+          "is held by the owner with /goal pause",
+          async (lane: GoalLane) => {
+            await lane.pauseForChat(42);
+          },
+        ],
+      ])("a goal that %s stays held through the resume", async (_why, standDown) => {
+        server.stage("PATCH", "/api/v1/integrations/assistants/7/missions/101/progress", 200, missionBody(101));
+        server.stage("POST", "/api/v1/integrations/assistants/7/missions/101/stopped", 200, missionBody(101));
+        const { lane, host } = makeLane();
+        await armed(lane, 1);
+        // The last turn under the cap is running when the owner presses Stop.
+        lane.noteTurnStarted(42);
+        await expect(lane.holdForStop(42)).resolves.toBe(true);
+
+        await standDown(lane);
+        await resumeAfterStop(lane);
+
+        expect(host.goals.get(42)!.status).toBe("paused");
+        expect(starts(host)).toBe(0);
+        // Still this lane's goal, and the owner's own answer still starts it.
+        expect(lane.owns(42)).toBe(true);
+        await lane.resumeForChat(42);
+        expect(host.goals.get(42)!.status).toBe("active");
+      });
+
+      it("the cap is reached once: no turn past it and no second stop", async () => {
+        server.stage("PATCH", "/api/v1/integrations/assistants/7/missions/101/progress", 200, missionBody(101));
+        server.stage("POST", "/api/v1/integrations/assistants/7/missions/101/stopped", 200, missionBody(101));
+        const { lane, host } = makeLane();
+        await armed(lane, 1);
+        lane.noteTurnStarted(42);
+        await lane.holdForStop(42);
+        await lane.noteTurnFinished(42, { error: "Stopped by you." });
+
+        await resumeAfterStop(lane);
+
+        expect(starts(host)).toBe(0);
+        expect(server.requests.filter((r) => r.url.endsWith("/stopped"))).toHaveLength(1);
+      });
+
+      it("the Stop's hold ends at its resume: a cap reached after it is the ordinary one", async () => {
+        server.stage("PATCH", "/api/v1/integrations/assistants/7/missions/101/progress", 200, missionBody(101));
+        server.stage("POST", "/api/v1/integrations/assistants/7/missions/101/stopped", 200, missionBody(101));
+        const { lane, host } = makeLane();
+        await armed(lane, 1);
+        await expect(lane.holdForStop(42)).resolves.toBe(true);
+        await resumeAfterStop(lane);
+        expect(host.goals.get(42)!.status).toBe("active");
+
+        // Later, with no Stop in sight, the goal reaches its cap.
+        lane.noteTurnStarted(42);
+        await lane.noteTurnFinished(42, { text: "Measured it at 2.4 seconds." });
+        expect(host.goals.get(42)!.status).toBe("paused");
+        // A Pause and Resume from the Mission view behave as they always did.
+        await lane.notePaused(101);
+        await lane.noteResumed(101);
+        expect(host.goals.get(42)!.status).toBe("active");
+      });
+    });
+
+    /**
      * Review F1: the record of a Stop that found the goal NOT running lived
      * in memory only. A daemon restart between the Stop and the owner's next
      * message emptied it, the mission lane's first owner turn resumed the

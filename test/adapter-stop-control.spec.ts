@@ -941,6 +941,8 @@ describe("a Stop resume gives the goal back only if it was running (D36)", () =>
     const { adapter, frame } = fixture();
     let status: "active" | "paused" = "active";
     let pausedReason: string | null = null;
+    // The server turns Keep working off when the goal reports its own stop.
+    let keepWorking = true;
     const snapshot = () => ({
       id: 701,
       assistantId: 10,
@@ -950,7 +952,7 @@ describe("a Stop resume gives the goal back only if it was running (D36)", () =>
       status,
       origin: "derived",
       progress: null,
-      keepWorking: true,
+      keepWorking,
       turnCap: 1,
       pausedReason,
     });
@@ -982,7 +984,10 @@ describe("a Stop resume gives the goal back only if it was running (D36)", () =>
       completeMission: vi.fn(async () => {}),
       createMission: vi.fn(async () => snapshot()),
       patchMissionProgress: vi.fn(async () => snapshot()),
-      postMissionStopped: vi.fn(async () => snapshot()),
+      postMissionStopped: vi.fn(async () => {
+        keepWorking = false;
+        return snapshot();
+      }),
       postVoiceRpcAck: vi.fn(async () => {}),
       postVoiceRpcResult: vi.fn(async () => {}),
     };
@@ -1232,6 +1237,42 @@ describe("a Stop resume gives the goal back only if it was running (D36)", () =>
       expect(f.runtime.status).toBe("active");
       expect(f.adapter.host.runTurn).toHaveBeenCalledTimes(1);
     });
+  });
+
+  /**
+   * Review F2: the Stop lands during the LAST continuation turn under the
+   * cap. The Stop finds the goal running, and the interrupted turn's end
+   * then reaches the cap: the goal is held and the stop posted, which turns
+   * Keep working off. The owner's next message used to give the goal back
+   * anyway, so the runtime ran one turn past the cap under a card whose
+   * switch read off.
+   */
+  it("a Stop during the last turn under the cap: the turn's end reaches the cap, and the owner's message leaves the goal held", async () => {
+    const f = realLanesFixture();
+    await f.armed();
+    const continuation = f.adapter.adoptGoalTurn(20)!;
+    expect(continuation).not.toBeNull();
+    const startsBefore = f.runtime.starts;
+
+    await f.adapter.handleControl(f.frame);
+    expect(f.runtime.status).toBe("paused");
+    await continuation.deliver({
+      replyText: "It measured 2.4 seconds and I started on the",
+      finalAgentMessageText: "It measured 2.4 seconds and I started on the",
+      turnCompleted: false,
+      error: "Stopped by you.",
+      threadId: "thread-20",
+    });
+    expect(f.api.postMissionStopped).toHaveBeenCalledTimes(1);
+
+    await f.ownerWrites();
+
+    expect(f.api.resumeMission).toHaveBeenCalledTimes(1);
+    expect(f.state()).toEqual({ status: "active", pausedReason: null });
+    expect(f.runtime.status).toBe("paused");
+    expect(f.runtime.starts).toBe(startsBefore);
+    expect(f.api.postMissionStopped).toHaveBeenCalledTimes(1);
+    expect(f.adapter.host.runTurn).toHaveBeenCalledTimes(1);
   });
 
   it("a goal held at its cap: the Stop button the same, the goal stays held", async () => {
