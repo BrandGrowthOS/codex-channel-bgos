@@ -1,12 +1,15 @@
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { abortCauseOf, abortWith, type AbortCause } from "../src/abort-cause.js";
 import { CodexAdapter } from "../src/adapter.js";
 import { GoalLane } from "../src/goal-lane.js";
 import { MissionControlLane } from "../src/mission-control.js";
 import { MissionLane } from "../src/mission-lane.js";
+import { StopDiscards } from "../src/stop-discards.js";
 import {
   RESUME_TURN_TEXT,
   STOP_CONFIRMATION_HARD,
@@ -928,7 +931,13 @@ describe("a Stop in a Keep working chat pauses the goal's mission (D35)", () => 
 describe("a Stop resume gives the goal back only if it was running (D36)", () => {
   const OBJECTIVE = "the page loads in under two seconds";
 
-  function realLanesFixture() {
+  /**
+   * `keptFile` is the goal lane's record of a Stop that found the goal NOT
+   * running (review F1). Each process reads it afresh, so `restart()` is a
+   * daemon coming back: new lanes, nothing in memory, the same server and the
+   * same runtime.
+   */
+  function realLanesFixture(keptFile?: string) {
     const { adapter, frame } = fixture();
     let status: "active" | "paused" = "active";
     let pausedReason: string | null = null;
@@ -990,33 +999,41 @@ describe("a Stop resume gives the goal back only if it was running (D36)", () =>
       clearGoal: vi.fn(async () => true),
       hasThread: () => true,
     };
-    const goalLane = new GoalLane({
-      api: api as never,
-      host: goalHost,
-      onSelfWrite: (missionId) => adapter.missionControl.noteSelfWrite(missionId),
-      log: () => {},
-    });
-    // Built with the adapter's own wiring of these options (pinned below).
-    const missionLane = new MissionLane(api as never, {
-      onSelfWrite: (missionId) => adapter.missionControl.noteSelfWrite(missionId),
-      goalOwnsChat: (chatId) => goalLane.owns(chatId),
-      pauseGoalForChat: (chatId) => goalLane.holdForStop(chatId),
-      resumeGoalForMission: (missionId) => goalLane.noteResumed(missionId),
-    });
+    /** One daemon process's lanes, wired into the adapter. */
+    const lanes = (): GoalLane => {
+      const goalLane = new GoalLane({
+        api: api as never,
+        host: goalHost,
+        onSelfWrite: (missionId) => adapter.missionControl.noteSelfWrite(missionId),
+        log: () => {},
+        ...(keptFile ? { keptByStop: new StopDiscards(keptFile) } : {}),
+      });
+      // Built with the adapter's own wiring of these options (pinned below).
+      const missionLane = new MissionLane(api as never, {
+        onSelfWrite: (missionId) => adapter.missionControl.noteSelfWrite(missionId),
+        goalOwnsChat: (chatId) => goalLane.owns(chatId),
+        pauseGoalForChat: (chatId) => goalLane.holdForStop(chatId),
+        resumeGoalForMission: (missionId) => goalLane.noteResumed(missionId),
+      });
+      Object.assign(adapter, {
+        goalLane,
+        missionLane,
+        missionControl: new MissionControlLane({
+          host: { steer: vi.fn(async () => {}) },
+          missionLane,
+          goalLane,
+          noteChat: () => {},
+          chatsForAssistant: () => [20],
+          isOwned: (assistantId) => assistantId === 10,
+          log: () => {},
+        }),
+      });
+      return goalLane;
+    };
+    const goalLane = lanes();
     Object.assign(adapter, {
       ownerId: "owner-1",
       api,
-      goalLane,
-      missionLane,
-      missionControl: new MissionControlLane({
-        host: { steer: vi.fn(async () => {}) },
-        missionLane,
-        goalLane,
-        noteChat: () => {},
-        chatsForAssistant: () => [20],
-        isOwned: (assistantId) => assistantId === 10,
-        log: () => {},
-      }),
       // What /stop needs beyond the Stop button's harness.
       lastInput: new Map(),
       lastNativeOptions: new Map(),
@@ -1081,6 +1098,7 @@ describe("a Stop resume gives the goal back only if it was running (D36)", () =>
       armed,
       stopTyped,
       ownerWrites,
+      restart: lanes,
       state: () => ({ status, pausedReason }),
     };
   }
@@ -1164,6 +1182,58 @@ describe("a Stop resume gives the goal back only if it was running (D36)", () =>
     expect(f.adapter.host.runTurn).toHaveBeenCalledTimes(1);
   });
 
+  /**
+   * Review F1: a daemon restart between the Stop and the owner's next
+   * message. The runtime keeps the goal, held, and the server keeps the
+   * pause; the new process keeps nothing but what is on disk. Its first
+   * owner turn resumes the Stop pause (D12), and the mission_resumed echo
+   * used to take the goal back from its frame and start it.
+   */
+  describe("across a daemon restart between the Stop and the owner's next message (review F1)", () => {
+    let dir: string;
+    const kept = () => join(dir, "goal-kept-by-stop.json");
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), "hoai-goal-kept-"));
+    });
+    afterEach(() => {
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it("a goal held with /goal pause: the message resumes the mission, runs as an ordinary turn, and the goal stays held", async () => {
+      const f = realLanesFixture(kept());
+      await f.armed();
+      await f.goalLane.pauseForChat(20);
+      const startsBefore = f.runtime.starts;
+      await f.stopTyped();
+      expect(f.state()).toEqual({ status: "paused", pausedReason: STOP_PAUSE_REASON });
+
+      f.restart();
+      expect(f.adapter.goalLane.owns(20)).toBe(false);
+      await f.ownerWrites();
+
+      expect(f.api.resumeMission).toHaveBeenCalledTimes(1);
+      expect(f.state()).toEqual({ status: "active", pausedReason: null });
+      expect(f.api.failMission).not.toHaveBeenCalled();
+      expect(f.runtime.status).toBe("paused");
+      expect(f.runtime.starts).toBe(startsBefore);
+      expect(f.adapter.host.runTurn).toHaveBeenCalledTimes(1);
+    });
+
+    it("a goal that WAS running: the Stop button holds it, and after the restart the message still gives it back", async () => {
+      const f = realLanesFixture(kept());
+      await f.armed();
+      await f.adapter.handleControl(f.frame);
+      expect(f.runtime.status).toBe("paused");
+
+      f.restart();
+      await f.ownerWrites();
+
+      expect(f.state()).toEqual({ status: "active", pausedReason: null });
+      expect(f.runtime.status).toBe("active");
+      expect(f.adapter.host.runTurn).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("a goal held at its cap: the Stop button the same, the goal stays held", async () => {
     const f = realLanesFixture();
     await f.armed();
@@ -1206,5 +1276,13 @@ describe("the Stop wiring of the mission lane", () => {
     const construction = source.slice(start, source.indexOf("});", start));
     expect(construction).toMatch(/stopDiscards: new StopDiscards\(\s*join\(/);
     expect(construction).toContain('"stop-discards.json"');
+  });
+
+  it("hands the goal lane its kept file, so a Stop's D36 record outlives a restart (review F1)", () => {
+    const start = source.indexOf("new GoalLane(");
+    expect(start).toBeGreaterThan(0);
+    const construction = source.slice(start, source.indexOf("});", start));
+    expect(construction).toMatch(/keptByStop: new StopDiscards\(\s*join\(/);
+    expect(construction).toContain('"goal-kept-by-stop.json"');
   });
 });

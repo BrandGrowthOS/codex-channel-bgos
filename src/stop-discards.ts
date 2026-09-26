@@ -13,6 +13,10 @@
  * chat that had a Stop pause, and a fresh Stop pause of the same mission
  * takes it out again. Never throws: a file that cannot be read is empty, and
  * a write that fails is logged while the id is still held for this process.
+ *
+ * The goal lane keeps a second file of the same shape, of CHAT ids: the
+ * chats whose goal an owner Stop found held (D36), so a restart before the
+ * owner's next message cannot start it again (review F1).
  */
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
@@ -86,7 +90,7 @@ export class StopDiscards implements StopDiscardStore {
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn(
-        `${LOG} stop discards not saved: ${err instanceof Error ? err.message : String(err)}`,
+        `${LOG} ${this.path} not saved: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }

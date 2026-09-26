@@ -348,6 +348,16 @@ export class CodexAdapter {
       // itself, and an unstamped completion comes back from a backend with no
       // `cleared_by` looking like the owner marking the mission done.
       onSelfWrite: (missionId) => this.missionControl.noteSelfWrite(missionId),
+      // The chats whose goal an owner Stop found held (D36), on disk: a
+      // restart before the owner's next message must not let that
+      // message's resume start the goal again (review F1). The same small
+      // bounded id file as the discards, holding chat ids.
+      keptByStop: new StopDiscards(
+        join(
+          process.env.CODEX_BGOS_HOME ?? join(homedir(), ".codex-bgos"),
+          "goal-kept-by-stop.json",
+        ),
+      ),
       log: (message) => console.warn(`${LOG} ${message}`),
     });
     this.missionControl = new MissionControlLane({

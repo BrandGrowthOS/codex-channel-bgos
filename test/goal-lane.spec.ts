@@ -14,12 +14,17 @@
  * is set. Set first and the first turn of the owner's own goal arrives for a
  * chat nothing is watching, and the whole of it is dropped on the floor.
  */
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BgosApi } from "../src/bgos-api.js";
 import { GoalLane, GOAL_DEFAULT_TURN_CAP, formatGoalSeconds, goalStatusWord } from "../src/goal-lane.js";
 import type { GoalFrameContext } from "../src/goal-lane.js";
 import type { ThreadGoal, ThreadGoalStatus } from "../src/goal-protocol.js";
+import { StopDiscards } from "../src/stop-discards.js";
 import { MockBgosServer } from "./mocks/mock-bgos-server.js";
 
 function makeApi(baseUrl: string) {
@@ -108,13 +113,14 @@ describe("GoalLane", () => {
     return host;
   }
 
-  function makeLane(host = makeHost()) {
+  function makeLane(host = makeHost(), extra: Record<string, unknown> = {}) {
     const selfWrites: number[] = [];
     const lane = new GoalLane({
       api: makeApi(baseUrl),
       host,
       onSelfWrite: (missionId) => selfWrites.push(missionId),
       log: () => {},
+      ...extra,
     });
     // Recorded at the moment the host is asked to set the goal, which is the
     // only place the arm before set rule can be observed.
@@ -510,6 +516,105 @@ describe("GoalLane", () => {
       await expect(lane.holdForStop(42)).resolves.toBe(true);
       await resumeAfterStop(lane);
       expect(host.goals.get(42)!.status).toBe("active");
+    });
+
+    /**
+     * Review F1: the record of a Stop that found the goal NOT running lived
+     * in memory only. A daemon restart between the Stop and the owner's next
+     * message emptied it, the mission lane's first owner turn resumed the
+     * Stop pause (D12), and the mission_resumed echo took the goal back from
+     * its frame and started it: the loop the owner had held with /goal pause
+     * ran again. The record is kept on disk, per chat, and read by the
+     * process that comes back.
+     */
+    describe("across a daemon restart between the Stop and the resume (review F1)", () => {
+      let dir: string;
+      let file: string;
+
+      beforeEach(() => {
+        dir = mkdtempSync(join(tmpdir(), "hoai-goal-kept-"));
+        file = join(dir, "goal-kept-by-stop.json");
+      });
+      afterEach(() => {
+        rmSync(dir, { recursive: true, force: true });
+      });
+
+      /** One daemon process: its own lane, reading the record from disk. */
+      function daemon(host: ReturnType<typeof makeHost>): GoalLane {
+        return makeLane(host, { keptByStop: new StopDiscards(file) }).lane;
+      }
+
+      /** The runtime keeps the goal and its thread; the process keeps nothing. */
+      async function heldThenStopped(): Promise<ReturnType<typeof makeHost>> {
+        const host = makeHost();
+        host.threads.add(42);
+        const before = daemon(host);
+        await armed(before);
+        // What /goal pause calls. It writes nothing to the server, so the
+        // mission's frame still says Keep working after the restart.
+        await before.pauseForChat(42);
+        await expect(before.holdForStop(42)).resolves.toBe(false);
+        return host;
+      }
+
+      it("a goal the owner held with /goal pause stays held after the restart, through both doors", async () => {
+        const host = await heldThenStopped();
+
+        const after = daemon(host);
+        expect(after.owns(42)).toBe(false);
+        await resumeAfterStop(after);
+
+        expect(host.goals.get(42)!.status).toBe("paused");
+        expect(host.goals.get(42)!.objective).toBe(CONDITION);
+        expect(starts(host)).toBe(0);
+      });
+
+      it("the owner's own answers still start it after the restart: /goal resume, and more turns", async () => {
+        const host = await heldThenStopped();
+        const after = daemon(host);
+        await resumeAfterStop(after);
+        expect(starts(host)).toBe(0);
+
+        // /goal resume: the owner starting the loop again, which is theirs.
+        await after.resumeForChat(42);
+        expect(host.goals.get(42)!.status).toBe("active");
+        // And it ends the record: a Pause and Resume from the Mission view,
+        // even in a process after that, is the ordinary one again.
+        await after.notePaused(101, frame);
+        expect(host.goals.get(42)!.status).toBe("paused");
+        await daemon(host).noteResumed(101, frame);
+        expect(host.goals.get(42)!.status).toBe("active");
+
+        // "Give it 10 more turns" after the restart starts it too.
+        const other = await heldThenStopped();
+        const later = daemon(other);
+        await resumeAfterStop(later);
+        await later.noteUpdated({ missionId: 101, keepWorking: true, turnCap: 11 }, frame);
+        expect(other.goals.get(42)!.status).toBe("active");
+      });
+
+      it("a goal that WAS running at the Stop still comes back after the restart", async () => {
+        const host = makeHost();
+        host.threads.add(42);
+        const before = daemon(host);
+        await armed(before);
+        // An earlier Stop kept it, and the owner started it again since.
+        await before.pauseForChat(42);
+        await expect(before.holdForStop(42)).resolves.toBe(false);
+        await before.resumeForChat(42);
+        await expect(before.holdForStop(42)).resolves.toBe(true);
+
+        await resumeAfterStop(daemon(host));
+        expect(host.goals.get(42)!.status).toBe("active");
+      });
+
+      it("a mission closed after the Stop takes the record with it", async () => {
+        const host = await heldThenStopped();
+        expect(new StopDiscards(file).has(42)).toBe(true);
+        const after = daemon(host);
+        await after.noteClosed(101, frame);
+        expect(new StopDiscards(file).has(42)).toBe(false);
+      });
     });
   });
 
