@@ -2,6 +2,13 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { CodexHost, RunTurnCallbacks } from "./codex-host.js";
+import {
+  createFindGit,
+  gitReadEnv,
+  NO_FSMONITOR,
+  NO_INDEX_REFRESH,
+  type FindGit,
+} from "./git-changes.js";
 import { formatGoalSeconds, goalStatusWord, GOAL_DEFAULT_TURN_CAP } from "./goal-lane.js";
 import type { ThreadGoal } from "./goal-protocol.js";
 import type { DispatchArgs } from "./inbound-handler.js";
@@ -75,6 +82,43 @@ export function normalizeNativeCommand(command: {
   return { ...command, name: aliases[name] ?? name };
 }
 const exec = promisify(execFile);
+
+/**
+ * The native /diff's Git command. /diff reads the same folder the Changes
+ * panel reads, so it keeps the collector's rules (git-changes.ts): the
+ * fsmonitor a repository names is off, a porcelain diff never refreshes the
+ * index, and Git runs by the absolute path found on PATH's absolute entries
+ * with Git's read environment (the repository variables dropped,
+ * GIT_OPTIONAL_LOCKS=0). Until fix round w4 (R-3) /diff ran a bare `git`
+ * from the agent's folder, which a git.exe the agent left there answered on
+ * Windows, with none of those rules: a gap there since /diff was written.
+ */
+const NATIVE_DIFF_ARGS = [
+  ...NO_FSMONITOR,
+  ...NO_INDEX_REFRESH,
+  "--no-pager",
+  "diff",
+  "--no-ext-diff",
+  "--no-textconv",
+  "HEAD",
+  "--",
+] as const;
+
+/** How /diff runs Git: execFile, never a shell (tests inject one). */
+export type ExecGit = (
+  file: string,
+  args: readonly string[],
+  options: {
+    cwd: string;
+    env: Record<string, string | undefined>;
+    windowsHide: boolean;
+    timeout: number;
+    maxBuffer: number;
+  },
+) => Promise<{ stdout: string }>;
+
+const execGitFile: ExecGit = (file, args, options) =>
+  exec(file, [...args], options);
 
 export function parseNativeCommand(
   text: string,
@@ -201,6 +245,10 @@ export class NativeCommands {
         pauseForChat(chatId: number): Promise<ThreadGoal | null>;
         resumeForChat(chatId: number): Promise<ThreadGoal | null>;
       };
+      /** /diff's Git lookup, the collector's own by default. */
+      findGit?: FindGit;
+      /** /diff's runner, execFile by default. */
+      execGit?: ExecGit;
     },
   ) {}
 
@@ -494,18 +542,19 @@ export class NativeCommands {
     if (name === "diff") {
       let stdout: string;
       try {
-        ({ stdout } = await exec(
-          "git",
-          [
-            "--no-pager",
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "HEAD",
-            "--",
-          ],
+        // Looked up per /diff, with the environment Git itself gets; no Git
+        // on an absolute PATH entry runs nothing and reads as not loaded.
+        const env = gitReadEnv(process.env);
+        const git = await (this.deps.findGit ?? createFindGit())(env).catch(
+          () => null,
+        );
+        if (!git) throw new Error("git was not found on an absolute PATH entry");
+        ({ stdout } = await (this.deps.execGit ?? execGitFile)(
+          git,
+          NATIVE_DIFF_ARGS,
           {
             cwd: host.workdir,
+            env,
             windowsHide: true,
             timeout: 15_000,
             maxBuffer: 512_000,
