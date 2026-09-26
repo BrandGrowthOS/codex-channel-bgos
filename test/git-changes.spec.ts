@@ -2503,7 +2503,7 @@ describe.skipIf(!gitOnPath)("against a real Git repository", () => {
   // Fix round w5, W4-N1: in a partial clone a read that needs a blob the
   // clone never downloaded fetches it from the promisor remote, which runs
   // programs the repository's config names and can hang on the network.
-  it("a partial clone's missing blob is never fetched by a read: no read starts a fetch from the promisor remote (fix round w5, W4-N1)", async () => {
+  it("a partial clone's missing blob is never fetched by a read on a Git that knows GIT_NO_LAZY_FETCH: no read starts a fetch from the promisor remote (fix round w5, W4-N1)", async () => {
     writeFileSync(globalConfig, "");
     // The controls: numstat and the patch, each run directly on a fresh clone
     // under the read environment WITHOUT the variable, start a fetch on this

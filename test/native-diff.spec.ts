@@ -575,7 +575,7 @@ describe.skipIf(!gitOnPath)("/diff against a real Git repository (fix round w4, 
     return { clone, marker, missing };
   }
 
-  it("a partial clone's missing blob is never fetched by /diff (fix round w5, W4-N1)", async () => {
+  it("a partial clone's missing blob is never fetched by /diff on a Git that knows GIT_NO_LAZY_FETCH (fix round w5, W4-N1)", async () => {
     // The control: the same diff under the read environment WITHOUT the
     // variable starts a fetch on this Git (the program ran, the blobs came).
     const control = partialClone();
