@@ -54,6 +54,12 @@
  * up on PATH's ABSOLUTE entries only, once per read, and spawned by that path;
  * no Git there reads as `git_missing`, and nothing is started.
  *
+ * `git_missing` ONLY WHILE THE FOLDER IS THERE. Node reports a spawn into a
+ * working folder that does not exist as ENOENT, the code a missing Git gives,
+ * so an ENOENT is Git missing only when the folder still is (an lstat that
+ * finds something other than a regular file). A folder removed while the
+ * daemon ran is a failed read, never "Git is not installed" (parity round 2).
+ *
  * The frame's caps are honoured and never raised (`readCaps`), the reads stop
  * at the byte cap and kill the child (a large diff never fails the whole read
  * the way a `maxBuffer` would), and the whole collection runs under the
@@ -635,6 +641,15 @@ function isMissingGit(error: unknown): boolean {
   );
 }
 
+/** The working folder is there: something that is not a regular file. */
+async function folderExists(fs: ChangesFs, path: string): Promise<boolean> {
+  try {
+    return !(await fs.lstat(path)).isFile();
+  } catch {
+    return false;
+  }
+}
+
 function wholeBytes(size: unknown): number {
   return typeof size === "number" && Number.isSafeInteger(size) && size >= 0
     ? size
@@ -645,7 +660,8 @@ function wholeBytes(size: unknown): number {
  * Collect the uncommitted changes of `workdir`. Answers the result body the
  * backend settles with: `ok: true` with the payload for every state, or
  * `ok: false` with `too_slow` when the budget ran out. Anything else a read
- * could not survive is THROWN, and the handler answers `read_failed`.
+ * could not survive (a working folder that is gone included) is THROWN, and
+ * the handler answers `read_failed`.
  */
 export async function collectChanges(
   input: CollectChangesInput,
@@ -715,6 +731,12 @@ async function readChanges(
     top = await git(GIT_TOPLEVEL, input.workdir, SMALL_OUTPUT_MAX);
   } catch (error) {
     if (isMissingGit(error)) {
+      // Node reports a spawn whose working folder does not exist as ENOENT
+      // too, so ENOENT means Git is missing only while the folder is there
+      // (parity round 2). A folder that is gone is a failed read.
+      if (!(await folderExists(input.fs, input.workdir))) {
+        throw new Error("the working folder is not there");
+      }
       return emptyPayload("git_missing", folderName(input.workdir), takenAt);
     }
     throw error;

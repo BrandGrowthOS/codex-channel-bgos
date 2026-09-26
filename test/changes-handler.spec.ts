@@ -8,7 +8,8 @@
  * ack. A frame with an rpcId this daemon owns is always answered exactly
  * once per id: a re sent id is answered from memory, never run twice.
  */
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
@@ -489,6 +490,46 @@ describe("createChangesHandler", () => {
     });
     expect(other.logs.some((line) => line.includes("EPERM"))).toBe(true);
   });
+
+  it("a working folder that is gone answers read_failed through the real collector, never git_missing (parity round 2)", async () => {
+    // The handler's own default collector: the real Git runner and the real
+    // file system. Node reports a spawn into a missing folder as ENOENT, the
+    // same code as a missing Git, so only the folder check tells them apart.
+    const base = mkdtempSync(join(tmpdir(), "bgos-changes-gone-"));
+    try {
+      const api = {
+        changesRpcAck: vi.fn(async () => ({})),
+        changesRpcResult: vi.fn(async (_rpcId: string, _body: ChangesResultBody) => ({})),
+      };
+      const logs: string[] = [];
+      const handle = createChangesHandler({
+        api,
+        workdir: join(base, "gone"),
+        owns: () => true,
+        log: (message: string) => logs.push(message),
+        schedule: () => {},
+      } as Parameters<typeof createChangesHandler>[0]);
+      await handle(frame());
+      expect(api.changesRpcResult.mock.calls).toEqual([
+        [
+          "rpc-1",
+          {
+            ok: false,
+            error: {
+              code: "read_failed",
+              message: "changes could not be read on the agent host",
+            },
+          },
+        ],
+      ]);
+      // Why, on this computer only.
+      expect(logs).toContain(
+        "changes_rpc read failed: the working folder is not there",
+      );
+    } finally {
+      rmSync(base, { recursive: true, force: true, maxRetries: 3 });
+    }
+  }, 30_000);
 
   it("passes the collector's too_slow through, dash free", async () => {
     const h = harness({

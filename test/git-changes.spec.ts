@@ -171,6 +171,8 @@ interface MemFile {
   data?: Uint8Array;
   size?: number;
   symlink?: boolean;
+  /** A folder (parity round 2): lstat says it is not a file. */
+  dir?: boolean;
   /** The file id lstat reports; 0 is a host that reports none. Default: one
    * per name. */
   ino?: number;
@@ -198,13 +200,17 @@ function memoryFs(files: Record<string, MemFile>) {
   };
   /** What an open of the name reaches now. */
   const opened = (path: string, file: MemFile) =>
-    file.open ?? { data: file.data, ino: inoOf(path), isFile: file.symlink !== true };
+    file.open ?? {
+      data: file.data,
+      ino: inoOf(path),
+      isFile: file.symlink !== true && file.dir !== true,
+    };
   const fs = {
     async lstat(path: string) {
       lstatCalls.push(path);
       const file = at(path);
       return {
-        isFile: () => file.symlink !== true,
+        isFile: () => file.symlink !== true && file.dir !== true,
         size: file.size ?? file.data?.length ?? 0,
         ino: inoOf(path),
         dev: 7,
@@ -351,7 +357,9 @@ describe("collectChanges", () => {
       workdir: WORKDIR,
       caps: readCaps({}),
       runGit,
-      fs: memoryFs({}).fs,
+      // The working folder is there (parity round 2: ENOENT is Git missing
+      // only while it is).
+      fs: memoryFs({ [WORKDIR]: { dir: true } }).fs,
       now: FIXED_NOW,
     });
     expect(result.ok).toBe(true);
@@ -371,6 +379,54 @@ describe("collectChanges", () => {
     });
     expect(viaAdapter.ok && viaAdapter.payload.state).toBe("git_missing");
   });
+
+  // Parity round 2 (lane D's collector): node reports a spawn whose working
+  // folder does not exist as ENOENT, the same code as a missing Git. An agent
+  // whose folder was removed while the daemon ran must not tell the owner
+  // that Git is not installed.
+  it("a working folder that is gone, or is a file, is a failed read, never Git missing", async () => {
+    const missing = Object.assign(new Error("spawn git ENOENT"), {
+      code: "ENOENT",
+    });
+    for (const [label, files] of [
+      ["gone", {}],
+      ["a file", { [WORKDIR]: { data: Buffer.from("not a folder\n") } }],
+    ] as Array<[string, Record<string, MemFile>]>) {
+      const { runGit, calls } = fakeGit({ [key(TOPLEVEL)]: missing });
+      const { fs, lstatCalls } = memoryFs(files);
+      await expect(
+        collectChanges({
+          workdir: WORKDIR,
+          caps: readCaps({}),
+          runGit,
+          fs,
+          now: FIXED_NOW,
+        }),
+        label,
+      ).rejects.toThrow("the working folder is not there");
+      expect(calls.map((c) => c.args), label).toEqual([TOPLEVEL]);
+      expect(lstatCalls, label).toEqual([WORKDIR]);
+    }
+  });
+
+  it("real Git: a working folder that is gone is a failed read, never Git missing", async () => {
+    // No skip: with Git on PATH or not, a folder that is not there must
+    // never read as "Git missing". The real spawn into a missing folder is
+    // what says ENOENT here.
+    const base = mkdtempSync(join(tmpdir(), "bgos-changes-gone-"));
+    try {
+      await expect(
+        collectChanges({
+          workdir: join(base, "gone"),
+          caps: readCaps({}),
+          runGit: createNodeRunGit(),
+          fs: nodeChangesFs,
+        }),
+      ).rejects.toThrow("the working folder is not there");
+    } finally {
+      rmSync(base, { recursive: true, force: true, maxRetries: 3 });
+    }
+  }, 30_000);
 
   it("no first commit answers no_commits", async () => {
     const { runGit, calls } = fakeGit({
@@ -712,7 +768,8 @@ describe("collectChanges", () => {
       workdir: WORKDIR,
       caps: readCaps({}),
       runGit,
-      fs: okFs().fs,
+      // The working folder is there (parity round 2).
+      fs: memoryFs({ [WORKDIR]: { dir: true } }).fs,
       now: FIXED_NOW,
     });
     expect(result).toEqual({
