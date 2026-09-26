@@ -24,7 +24,9 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   SESSION_REPORT_FIELDS,
+  SESSION_REPORT_PATTERNS,
   normalizeTier,
+  reportRetraction,
   reportBody,
   reportFromReroute,
   reportFromStored,
@@ -326,5 +328,70 @@ describe("the key and the body", () => {
     expect(Math.abs(Date.parse(report.reportedAt) - Date.now())).toBeLessThan(
       5_000,
     );
+  });
+});
+
+/**
+ * P5 stage 7, Phase B, decision 4: THE RAIL CAN RETRACT. A report whose model
+ * is null tells BGOS this daemon holds nothing for the chat, so the backend
+ * clears the stored value instead of drawing the last host's forever. It is
+ * sent on /new with nothing stored, and when the daemon first binds a chat it
+ * holds nothing for.
+ */
+describe("Phase B: the retraction", () => {
+  it("is the five keys with a null model, never a guess", () => {
+    expect(reportRetraction(AT)).toEqual({
+      model: null,
+      effort: null,
+      serviceTier: null,
+      rerouted: false,
+      reportedAt: AT_ISO,
+    });
+  });
+
+  it("has its own key, distinct from every real report", () => {
+    const retraction = reportRetraction(AT);
+    const real = reportFromStored({ model: "gpt-5.5" }, AT)!;
+    expect(reportKey(retraction)).not.toBe(reportKey(real));
+    expect(reportKey({ ...retraction, reportedAt: "2026-09-26T10:00:00.000Z" })).toBe(
+      reportKey(retraction),
+    );
+  });
+
+  it("goes out as the same five fields in the rail's order, model null", () => {
+    const body = reportBody(reportRetraction(AT));
+    expect(Object.keys(body)).toEqual([...SESSION_REPORT_FIELDS]);
+    expect(body.model).toBeNull();
+  });
+});
+
+/**
+ * P5 stage 7, Phase B, decision 9: the value patterns are part of the cross
+ * repo pin, so the builders must use ONE exported set of them, the set the
+ * pin rebuilds its string from.
+ */
+describe("Phase B: the patterns the builders use are the ones the pin hashes", () => {
+  it("exports the three patterns, in the rail's field order", () => {
+    expect(Object.keys(SESSION_REPORT_PATTERNS)).toEqual([
+      "model",
+      "effort",
+      "serviceTier",
+    ]);
+    expect(SESSION_REPORT_PATTERNS.model.source).toBe("^[\\w./:-]{1,160}$");
+    expect(SESSION_REPORT_PATTERNS.effort.source).toBe("^[a-z]{1,20}$");
+    expect(SESSION_REPORT_PATTERNS.serviceTier.source).toBe("^[\\w-]{1,50}$");
+  });
+
+  it("the builders obey exactly those patterns at their edges", () => {
+    const model160 = "m".repeat(160);
+    expect(reportFromThreadSettings({ model: model160 }, AT)?.model).toBe(model160);
+    expect(reportFromThreadSettings({ model: `${model160}m` }, AT)).toBeNull();
+    expect(
+      reportFromThreadSettings({ model: "gpt-5.5", effort: "a".repeat(21) }, AT)?.effort,
+    ).toBeNull();
+    expect(
+      reportFromThreadSettings({ model: "gpt-5.5", serviceTier: "t".repeat(51) }, AT)
+        ?.serviceTier,
+    ).toBeNull();
   });
 });

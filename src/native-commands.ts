@@ -687,7 +687,14 @@ export class NativeCommands {
       return;
     }
     const current = await host.sessionSettings(args.chatId);
+    // What this chat RUNS, from the same source the model and effort report
+    // uses: the stored pair, then the runtime's own last value (P5 stage 7,
+    // Phase B, decision 10). Never `current`'s catalog guess, so the row
+    // under the message box and the question its tap opens never name two
+    // different models. Null when nothing is known yet: then the question
+    // names no current at all. Read only by the two questions that show it.
     if (name === "model") {
+      const shown = host.currentSessionReport(args.chatId);
       const models = await host.listModels();
       const words = text ? text.split(/\s+/) : [];
       if (words.length > 2)
@@ -698,7 +705,9 @@ export class NativeCommands {
         words[0] ||
         (await this.choose(
           context,
-          `Choose a model · current: ${safe(current.model)}`,
+          shown?.model
+            ? `Choose a model · current: ${safe(shown.model)}`
+            : "Choose a model",
           models.map((m) => ({ label: m.displayName, value: m.model })),
         ));
       if (!id) return;
@@ -713,7 +722,12 @@ export class NativeCommands {
           ? model.defaultReasoningEffort
           : await this.choose(
               context,
-              `Reasoning level · ${model.displayName}`,
+              // The running effort, named only for the running model: another
+              // model's efforts are not the chat's.
+              shown?.effort &&
+                (shown.model === model.model || shown.model === model.id)
+                ? `Reasoning level · ${model.displayName} · current: ${safe(shown.effort)}`
+                : `Reasoning level · ${model.displayName}`,
               model.supportedReasoningEfforts.map((e) => ({
                 label: e.reasoningEffort,
                 value: e.reasoningEffort,
@@ -734,11 +748,14 @@ export class NativeCommands {
     const models = await host.listModels();
     const model = models.find((m) => m.model === current.model);
     if (name === "effort") {
+      const shown = host.currentSessionReport(args.chatId);
       const effort =
         text ||
         (await this.choose(
           context,
-          `Reasoning level · current: ${safe(current.effort)}`,
+          shown?.effort
+            ? `Reasoning level · current: ${safe(shown.effort)}`
+            : "Reasoning level",
           (model?.supportedReasoningEfforts ?? []).map((e) => ({
             label: e.reasoningEffort,
             value: e.reasoningEffort,

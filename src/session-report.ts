@@ -29,9 +29,16 @@
  */
 import type { SessionSettings } from "./session-settings.js";
 
-/** One report, exactly the body the rail stores (all five keys, always). */
+/**
+ * One report, exactly the body the rail stores (all five keys, always).
+ *
+ * A null `model` is a RETRACTION (P5 stage 7, Phase B, decision 4): this
+ * daemon holds nothing for the chat, so the backend clears the stored value
+ * rather than keep drawing what another host, or an older thread, reported.
+ * Every other field of a retraction is null or false.
+ */
 export interface SessionReport {
-  model: string;
+  model: string | null;
   effort: string | null;
   serviceTier: string | null;
   rerouted: boolean;
@@ -55,23 +62,69 @@ export const SESSION_REPORT_FIELDS = Object.freeze([
  * THE CROSS REPO PIN (P5 stage 7, spec section 6; Ares, 15:10). The sha256 of
  * the rail's canonical shape
  *
- *   session_model_control;PATCH;integrations/assistants/{assistantId}/chats/{chatId}/session-settings;model,effort,serviceTier,rerouted,reportedAt
+ *   session_model_control;PATCH;integrations/assistants/{assistantId}/chats/{chatId}/session-settings;model,effort,serviceTier,rerouted,reportedAt;model=^[\w./:-]{1,160}$,effort=^[a-z]{1,20}$,serviceTier=^[\w-]{1,50}$
  *
  * the capability token this daemon declares, the method and path
- * `BgosApi.reportSessionSettings` sends, and the keys of the body the adapter
- * sends, in order. BGOS carries the SAME constant
- * (`backend/src/session-settings/session-settings-rail.ts`); each side
- * rebuilds the string from its OWN source values in a test
- * (test/session-rail-contract.spec.ts here) and compares the hash, so a one
- * sided change that also updates its own word for word pin turns the hash
- * red. Move it only with the other repo's PR.
+ * `BgosApi.reportSessionSettings` sends, the keys of the body the adapter
+ * sends, in order, and (Phase B, decision 9) the `.source` of each value
+ * pattern below, the ones the builders really test a value against. BGOS
+ * carries the SAME constant
+ * (`backend/src/session-settings/session-settings-rail.ts`) and rebuilds the
+ * patterns from its report DTO's own `@Matches`; each side rebuilds the string
+ * from its OWN source values in a test (test/session-rail-contract.spec.ts
+ * here) and compares the hash, so a one sided change that also updates its
+ * own word for word pin turns the hash red, a tightened backend pattern
+ * included (every report would 400, swallowed, and the row would freeze).
+ * Move it only with the other repo's PR: a change to BOTH of BGOS's
+ * constants in one BGOS PR is not caught here, and that pairing is held by
+ * convention, beyond the pin.
  */
 export const SESSION_SETTINGS_RAIL_SHA256 =
-  "d0976f00e57f0d5d051cf5ce92e4d1b140cad9f1c86becda0a4fbcb37f4a2a30";
+  "92cc7d97e3b501b5399d90d96eff255d8727d670364d57c5502ed2c81a145675";
 
 const MODEL = /^[\w./:-]{1,160}$/;
 const EFFORT = /^[a-z]{1,20}$/;
 const TIER = /^[\w-]{1,50}$/;
+
+/**
+ * The value patterns, in the rail's field order: the ones every builder below
+ * tests a value against, and the ones the cross repo pin hashes. Equal to the
+ * store's own `clean()` and to the backend DTO's `@Matches`.
+ */
+export const SESSION_REPORT_PATTERNS = Object.freeze({
+  model: MODEL,
+  effort: EFFORT,
+  serviceTier: TIER,
+});
+
+/**
+ * THE RETRY OF A FAILED REPORT (Phase B, decision 3). A report is idempotent
+ * (the backend's last write wins and an unchanged value writes nothing), so a
+ * send that never got an answer, a timeout, a 5xx, a 408 or a 429 is safe to
+ * send again; a refusal (any other 4xx: an older backend's 404, a 400, a 403)
+ * is permanent and is not. Per chat, holding only the chat's LATEST value,
+ * after a backoff that doubles from the first delay and stops growing at the
+ * cap.
+ */
+export const SESSION_REPORT_RETRY_FIRST_MS = 2_000;
+export const SESSION_REPORT_RETRY_MAX_MS = 300_000;
+
+/** The wait before retry number `attempt` (0 is the first). */
+export function sessionReportRetryDelayMs(attempt: number): number {
+  const n = Number.isSafeInteger(attempt) && attempt > 0 ? attempt : 0;
+  return Math.min(
+    SESSION_REPORT_RETRY_FIRST_MS * 2 ** Math.min(n, 30),
+    SESSION_REPORT_RETRY_MAX_MS,
+  );
+}
+
+/** Is this failed send worth sending again? See the constants above. */
+export function sessionReportRetryable(error: unknown): boolean {
+  const status = (error as { response?: { status?: unknown } } | null)
+    ?.response?.status;
+  if (typeof status !== "number") return true;
+  return status >= 500 || status === 408 || status === 429;
+}
 
 type Wire = Record<string, unknown>;
 
@@ -191,6 +244,22 @@ export function reportFromReroute(
     true,
     at,
   );
+}
+
+/**
+ * THE RETRACTION (Phase B, decision 4): "this daemon holds nothing for this
+ * chat". Sent on /new with nothing stored, and when the daemon first binds a
+ * chat it holds nothing for (no stored pair, no thread), so a value another
+ * host or an older thread reported stops being drawn as what runs.
+ */
+export function reportRetraction(at: Date = new Date()): SessionReport {
+  return {
+    model: null,
+    effort: null,
+    serviceTier: null,
+    rerouted: false,
+    reportedAt: at.toISOString(),
+  };
 }
 
 /**

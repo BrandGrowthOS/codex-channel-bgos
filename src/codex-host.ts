@@ -58,6 +58,7 @@ import {
   reportFromStored,
   reportFromThreadResponse,
   reportFromThreadSettings,
+  reportRetraction,
   type SessionReport,
 } from "./session-report.js";
 
@@ -116,14 +117,22 @@ export interface CodexHostOptions {
   /**
    * What a chat is REALLY running changed, or was learned (P5 stage 7, C-26).
    * One listener, the adapter's, which dedupes, orders and sends it. Fired
-   * from five places (S11): (a) every successful `updateSettings`; (b) the
-   * runtime's `thread/settings/updated`; (c) the runtime's `model/rerouted`,
-   * flagged; (d) the `thread/start` and `thread/resume` responses inside
-   * `ensureThread`; (e) the next `turn/started` in a chat whose last report
-   * was a reroute, unflagged again. (b), (c) and (e) sit ABOVE the turn guard,
-   * beside markers and goals, because the runtime says these things between
-   * turns as often as inside one. A thread that maps to no chat (a detached
-   * or ephemeral run) reports nothing.
+   * from five places (S11): (a) every successful `updateSettings`, and (P5
+   * stage 7, Phase B, decision 5) the value a failed one ROLLS BACK to; (b)
+   * the runtime's `thread/settings/updated`; (c) the runtime's
+   * `model/rerouted`, flagged; (d) the `thread/start` and `thread/resume`
+   * responses inside `ensureThread`; (e) the end of the first turn after a
+   * reroute that COMPLETES with no reroute of its own, unflagged again
+   * (Phase B, decision 2: never at `turn/started`, when nobody knows yet
+   * whether that turn reroutes too). (b), (c) and (e) sit ABOVE the turn
+   * guard, beside markers and goals, because the runtime says these things
+   * between turns as often as inside one. A thread that maps to no chat (a
+   * detached or ephemeral run) reports nothing.
+   *
+   * And a RETRACTION (Phase B, decision 4, `model: null`) on /new with
+   * nothing stored and when the adapter first binds a chat this host holds
+   * nothing for (`noteChatBound`), so a value another host or an older
+   * thread reported is cleared rather than drawn as what runs.
    *
    * S12, store first: a chat with a STORED model reports the store, because
    * `run()` re-asserts it as `turn/start` overrides on every turn, so it is
@@ -708,8 +717,18 @@ export class CodexHost {
    * turn after a reroute can report it again, unflagged (S14).
    */
   private readonly lastRuntimeReport = new Map<number, SessionReport>();
-  /** Chats whose last report was a reroute, cleared at their next turn. */
+  /**
+   * Chats whose last report was a reroute, cleared only when a turn
+   * COMPLETES with no reroute of its own (Phase B, decision 2).
+   */
   private readonly reroutedChats = new Set<number>();
+  /**
+   * Threads that said `model/rerouted` since their last `turn/completed`.
+   * Turns on one thread run one after another, so "since the last
+   * completion" is "in the turn now ending", whichever of `turn/started` and
+   * `model/rerouted` the runtime sends first.
+   */
+  private readonly reroutedSinceCompletion = new Set<string>();
   constructor(private opts: CodexHostOptions) {
     this.authMode = opts.auth.mode;
     this.workdir = resolve(
@@ -806,6 +825,31 @@ export class CodexHost {
     const threadId = this.map[String(chatId)];
     if (threadId) this.rememberThread(chatId, threadId);
     resetChat(this.threadsFile, this.map, chatId);
+    // The old thread's runtime value and its reroute are not this chat's any
+    // more (P5 stage 7, Phase B, decision 4). With a stored pair nothing
+    // changes (the store survives /new and runs on the next thread); with
+    // nothing stored this host now holds nothing, so it RETRACTS the value:
+    // the next thread's own is reported when that thread starts.
+    this.lastRuntimeReport.delete(chatId);
+    this.reroutedChats.delete(chatId);
+    if (threadId) this.reroutedSinceCompletion.delete(threadId);
+    if (!reportFromStored(this.settings.get(chatId)))
+      this.fireSessionReport(chatId, reportRetraction());
+  }
+  /**
+   * The adapter bound this chat to its agent for the first time in this
+   * process (P5 stage 7, Phase B, decision 4). A chat this host holds
+   * NOTHING for (no stored pair, no thread, nothing reported here yet) may
+   * still carry a value another host reported (a re-pair to a new machine, a
+   * reset CODEX_BGOS_HOME), so it is retracted. The backend's no op makes a
+   * retraction free for a chat that never had one.
+   */
+  noteChatBound(chatId: number): void {
+    if (!Number.isSafeInteger(chatId) || chatId <= 0) return;
+    if (reportFromStored(this.settings.get(chatId))) return;
+    if (this.map[String(chatId)]) return;
+    if (this.lastSessionReport.has(chatId)) return;
+    this.fireSessionReport(chatId, reportRetraction());
   }
   isBusy(chatId: number): boolean {
     return this.queues.has(chatId) || this.active.has(this.map[String(chatId)]);
@@ -1000,28 +1044,63 @@ export class CodexHost {
           });
       } catch (error) {
         this.settings.set(chatId, saved);
+        // THE ROLLBACK IS REPORTED (P5 stage 7, Phase B, decision 5). The
+        // runtime may have APPLIED the change before the request failed (a
+        // timeout), and said so with thread/settings/updated, which was
+        // reported store first while the store held `next`. So the value
+        // restored is reported too: the stored pair when there is one (it is
+        // re-asserted on the next turn), else what the runtime last said it
+        // runs. A change it refused outright re-reports a value already
+        // sent, which the adapter's dedupe makes free.
+        this.fireSessionReport(
+          chatId,
+          reportFromStored(saved) ?? this.lastRuntimeReport.get(chatId) ?? null,
+        );
         throw error;
       }
       // (a) Only once it LANDED: stored and, when the chat has a thread,
-      // taken by the runtime. A refused or rolled back change says nothing.
+      // taken by the runtime.
       this.fireSessionReport(chatId, reportFromStored(next));
       return next;
     });
   }
   /**
-   * Every chat whose store holds a model, as the report that store makes.
-   * The adapter reports these at connect (S15): a chat with nothing stored
-   * has a value only the runtime knows, learned the next time its thread is
-   * started or resumed (S16).
+   * Every chat whose store holds a model: the chats the adapter reports at
+   * connect (S15). A chat with nothing stored has a value only the runtime
+   * knows, learned the next time its thread is started or resumed (S16).
    */
-  storedSessionReports(): Array<[number, SessionReport]> {
-    const out: Array<[number, SessionReport]> = [];
+  storedSessionChats(): number[] {
+    const out: number[] = [];
     for (const [chatId, value] of this.settings.entries()) {
       if (!Number.isSafeInteger(chatId) || chatId <= 0) continue;
-      const report = reportFromStored(value);
-      if (report) out.push([chatId, report]);
+      if (reportFromStored(value)) out.push(chatId);
     }
     return out;
+  }
+  /**
+   * One chat's stored pair as a report, built from the store as it is NOW
+   * (P5 stage 7, Phase B, decision 1): the connect sweep asks for it when
+   * the chat's turn comes, never from a snapshot taken at boot, so a /model
+   * that landed mid sweep is what the sweep sends. Null when nothing is
+   * stored.
+   */
+  storedSessionReport(chatId: number): SessionReport | null {
+    return reportFromStored(this.settings.get(chatId));
+  }
+  /**
+   * What this chat runs, as far as this host knows it, from the SAME source
+   * the report uses (P5 stage 7, Phase B, decision 10): the stored pair
+   * first, then the runtime's own last value, and never
+   * `sessionSettings()`'s catalog guess. The /model question's "current"
+   * reads this, so the row under the message box and the card its tap opens
+   * never name two different models. Null when nothing is known yet.
+   */
+  currentSessionReport(chatId: number): SessionReport | null {
+    return (
+      reportFromStored(this.settings.get(chatId)) ??
+      this.lastRuntimeReport.get(chatId) ??
+      null
+    );
   }
   private withIdleControl<T>(
     chatId: number,
@@ -1756,13 +1835,14 @@ export class CodexHost {
     if (goalSignal) this.routeGoal(goalSignal.threadId, goalSignal.goal);
     // What the chat is really running: above the guard for the same reason.
     // `thread/settings/updated` answers a change made between turns, and a
-    // reroute's clearing belongs to the NEXT turn's start.
+    // reroute's clearing belongs to the END of a turn that ran clean
+    // (Phase B, decision 2), which may be a continuation turn nobody holds.
     if (method === "thread/settings/updated")
       this.routeThreadSettings(String(params.threadId ?? ""), params);
     if (method === "model/rerouted")
       this.routeReroute(String(params.threadId ?? ""), params);
-    if (method === "turn/started")
-      this.clearReroute(String(params.threadId ?? ""));
+    if (method === "turn/completed")
+      this.settleReroute(String(params.threadId ?? ""), params.turn?.status);
     // And the continuation turn itself, which nobody here asked for.
     if (method === "turn/started")
       this.adoptTurn(String(params.threadId ?? ""));
@@ -2356,10 +2436,16 @@ export class CodexHost {
    * (c) `model/rerouted {threadId, turnId, fromModel, toModel, reason}`: the
    * model that RAN, flagged (S14). Reported whatever is stored, because the
    * store is what was ASKED for and this is what the runtime did instead.
+   * The thread is marked, so the end of this turn does not clear the flag.
    */
   private routeReroute(threadId: string, params: RpcObject): void {
     const chatId = this.chatForThread(threadId);
     if (chatId === null) return;
+    this.reroutedSinceCompletion.add(threadId);
+    if (this.reroutedSinceCompletion.size > 500) {
+      const oldest = this.reroutedSinceCompletion.values().next().value;
+      if (oldest !== undefined) this.reroutedSinceCompletion.delete(oldest);
+    }
     this.fireSessionReport(
       chatId,
       reportFromReroute(params, this.lastSessionReport.get(chatId) ?? null),
@@ -2367,14 +2453,22 @@ export class CodexHost {
   }
 
   /**
-   * (e) The next turn in a rerouted chat starts on the stored pair again
-   * (`run()` re-asserts it on every `turn/start`), or on the runtime's own
-   * last value when nothing is stored, so the flag comes off. A turn in a
-   * chat that was never rerouted reports nothing.
+   * (e) A turn ENDED (P5 stage 7, Phase B, decision 2). The flag comes off
+   * only when a turn COMPLETES with no reroute of its own: only then did a
+   * turn provably run the stored pair (`run()` re-asserts it on every
+   * `turn/start`), or the runtime's own last value when nothing is stored.
+   * Never at `turn/started`, which comes before anyone knows whether that
+   * turn reroutes too: a chat whose model the runtime reroutes on every
+   * turn would draw the stored model for a turn that ran on another one,
+   * then flip back, two writes and two sidebar refetches per turn. An
+   * interrupted or failed turn proves nothing and leaves the flag. A turn in
+   * a chat that was never rerouted reports nothing.
    */
-  private clearReroute(threadId: string): void {
+  private settleReroute(threadId: string, status: unknown): void {
+    const sawReroute = this.reroutedSinceCompletion.delete(threadId);
     const chatId = this.chatForThread(threadId);
-    if (chatId === null || !this.reroutedChats.has(chatId)) return;
+    if (chatId === null || sawReroute || status !== "completed") return;
+    if (!this.reroutedChats.has(chatId)) return;
     const runtime = this.lastRuntimeReport.get(chatId);
     this.fireSessionReport(
       chatId,

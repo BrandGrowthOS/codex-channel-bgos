@@ -61,6 +61,7 @@ function withThread(response: any, id: string): any {
 class Server extends EventEmitter {
   onRequest: any;
   rejectUpdate = false;
+  applyThenReject = false;
   start = vi.fn(async () => {});
   close = vi.fn();
   request = vi.fn(async (method: string, p: any): Promise<any> => {
@@ -72,6 +73,19 @@ class Server extends EventEmitter {
     if (method === "turn/start") return { turn: { id: `turn-${p.threadId}` } };
     if (method === "thread/settings/update" && this.rejectUpdate)
       throw Error("runtime rejected");
+    if (method === "thread/settings/update" && this.applyThenReject) {
+      // The runtime APPLIED the change and said so, then the request itself
+      // failed (a timeout, say): the reviewer's rollback case.
+      this.note("thread/settings/updated", {
+        threadId: p.threadId,
+        threadSettings: {
+          ...structuredClone(wire.threadSettingsUpdated.threadSettings),
+          model: p.model,
+          effort: p.effort,
+        },
+      });
+      throw Error("request timed out");
+    }
     return {};
   });
   note(method: string, params: any) {
@@ -358,7 +372,14 @@ describe("the host's report seam", () => {
       ]);
     });
 
-    it("the next turn/started reports the last runtime pair again, unflagged", async () => {
+    /**
+     * P5 stage 7, Phase B, decision 2: the flag comes off ONLY when a turn
+     * COMPLETES with no reroute in it, never at turn/started. At turn/started
+     * nobody knows yet whether this turn reroutes too; clearing there drew
+     * the stored model for the length of a turn that ran on the reroute
+     * target, then flipped back: two writes and two refetches per turn.
+     */
+    it("Phase B: the next turn/started reports NOTHING, the flag stays", async () => {
       build({ 10: "persisted" });
       server.note("thread/settings/updated", settingsUpdated("persisted"));
       server.note("model/rerouted", rerouted("persisted"));
@@ -367,24 +388,91 @@ describe("the host's report seam", () => {
         threadId: "persisted",
         turn: { id: "turn-next" },
       });
+      await settle();
+      expect(seen).toHaveLength(2);
+      expect(values()[1]![1]).toMatchObject({ rerouted: true });
+    });
+
+    it("Phase B: a turn that COMPLETES with no reroute clears it, reporting the last runtime pair unflagged", async () => {
+      build({ 10: "persisted" });
+      server.note("thread/settings/updated", settingsUpdated("persisted"));
+      // The rerouted turn itself: its completion proves nothing.
+      server.note("turn/started", { threadId: "persisted", turn: { id: "a" } });
+      server.note("model/rerouted", rerouted("persisted"));
+      server.finish("persisted");
+      await vi.waitFor(() => expect(seen).toHaveLength(2));
+      await settle();
+      expect(seen).toHaveLength(2);
+      // The next turn runs clean to the end: now the flag comes off.
+      server.note("turn/started", { threadId: "persisted", turn: { id: "b" } });
+      await settle();
+      expect(seen).toHaveLength(2);
+      server.finish("persisted");
       await vi.waitFor(() => expect(seen).toHaveLength(3));
       expect(values()[2]).toEqual([
         10,
         { model: "gpt-5.6-sol", effort: "medium", serviceTier: null, rerouted: false },
       ]);
-      // A second turn with no reroute between reports nothing more.
-      server.note("turn/started", {
-        threadId: "persisted",
-        turn: { id: "turn-after" },
-      });
+      // A further clean turn reports nothing more.
+      server.note("turn/started", { threadId: "persisted", turn: { id: "c" } });
+      server.finish("persisted");
       await settle();
       expect(seen).toHaveLength(3);
     });
 
-    it("for a chat with a stored model the next turn reports the STORE", async () => {
+    it("Phase B: a reroute on two turns running never shows the stored pair between them (one change, no flicker)", async () => {
+      build({ 10: "persisted" });
+      await host.updateSettings(10, { model: "gpt-6-astra", effort: "high" });
+      await settle();
+      // The stored pair has been reported (after the resume's own answer).
+      expect(values().at(-1)).toEqual([
+        10,
+        { model: "gpt-6-astra", effort: "high", serviceTier: null, rerouted: false },
+      ]);
+      seen = [];
+      for (const id of ["a", "b"]) {
+        server.note("turn/started", { threadId: "persisted", turn: { id } });
+        server.note("model/rerouted", rerouted("persisted"));
+        server.finish("persisted");
+        await settle();
+      }
+      const keys = seen.map(([, r]) => JSON.stringify([r.model, r.effort, r.rerouted]));
+      // Every report after the first reroute is the reroute: the stored pair
+      // never comes back between the two rerouted turns.
+      const first = keys.findIndex((k) => k.includes("true"));
+      expect(first).toBeGreaterThan(-1);
+      expect(keys.slice(first).every((k) => k.includes("true"))).toBe(true);
+      // So across both rerouted turns the adapter's dedupe leaves ONE value
+      // to send: the reroute. No flicker back to the stored pair between.
+      const changes = keys.filter((k, i) => i === 0 || k !== keys[i - 1]);
+      expect(changes).toEqual([JSON.stringify(["gpt-5.5", "high", true])]);
+    });
+
+    it("Phase B: an interrupted or failed turn proves nothing and keeps the flag", async () => {
+      build({ 10: "persisted" });
+      server.note("thread/settings/updated", settingsUpdated("persisted"));
+      server.note("model/rerouted", rerouted("persisted"));
+      server.note("turn/completed", {
+        threadId: "persisted",
+        turn: { id: "a", status: "completed" },
+      });
+      await vi.waitFor(() => expect(seen).toHaveLength(2));
+      for (const status of ["interrupted", "failed"]) {
+        server.note("turn/started", { threadId: "persisted", turn: { id: status } });
+        server.note("turn/completed", {
+          threadId: "persisted",
+          turn: { id: status, status },
+        });
+      }
+      await settle();
+      expect(seen).toHaveLength(2);
+    });
+
+    it("for a chat with a stored model the clean turn reports the STORE", async () => {
       build({ 10: "persisted" });
       await host.updateSettings(10, { model: "gpt-6-astra", effort: "high" });
       server.note("model/rerouted", rerouted("persisted"));
+      server.finish("persisted");
       await vi.waitFor(() =>
         expect(values().some(([, v]) => (v as any).rerouted)).toBe(true),
       );
@@ -393,6 +481,9 @@ describe("the host's report seam", () => {
         threadId: "persisted",
         turn: { id: "turn-next" },
       });
+      await settle();
+      expect(seen.length).toBe(before);
+      server.finish("persisted");
       await vi.waitFor(() => expect(seen.length).toBe(before + 1));
       expect(values().at(-1)).toEqual([
         10,
@@ -400,7 +491,7 @@ describe("the host's report seam", () => {
       ]);
     });
 
-    it("a turn/started in a chat that was never rerouted reports nothing", async () => {
+    it("a turn in a chat that was never rerouted reports nothing, start or end", async () => {
       build({ 10: "persisted" });
       server.note("thread/settings/updated", settingsUpdated("persisted"));
       await vi.waitFor(() => expect(seen).toHaveLength(1));
@@ -409,6 +500,7 @@ describe("the host's report seam", () => {
         threadId: "persisted",
         turn: { id: "turn-plain" },
       });
+      server.finish("persisted");
       await settle();
       expect(seen).toEqual([]);
     });
@@ -426,18 +518,10 @@ describe("the host's report seam", () => {
   });
 
   describe("the connect sweep's source", () => {
-    it("lists a report for every stored chat with a model, and only those", async () => {
+    it("lists every stored chat with a model, and only those", async () => {
       await host.updateSettings(10, { model: "gpt-5.5", effort: "low" });
       await host.updateSettings(11, { model: "gpt-5.6-sol", effort: "medium" });
-      const reports = host.storedSessionReports();
-      expect(
-        reports
-          .map(([chatId, { reportedAt: _at, ...rest }]) => [chatId, rest])
-          .sort(),
-      ).toEqual([
-        [10, { model: "gpt-5.5", effort: "low", serviceTier: null, rerouted: false }],
-        [11, { model: "gpt-5.6-sol", effort: "medium", serviceTier: null, rerouted: false }],
-      ]);
+      expect(host.storedSessionChats().sort()).toEqual([10, 11]);
     });
 
     it("skips a stored chat with no model", () => {
@@ -446,7 +530,165 @@ describe("the host's report seam", () => {
         JSON.stringify({ 12: { mode: "plan" }, 13: { model: "gpt-5.5" } }),
       );
       build();
-      expect(host.storedSessionReports().map(([chatId]) => chatId)).toEqual([13]);
+      expect(host.storedSessionChats()).toEqual([13]);
+    });
+
+    /**
+     * P5 stage 7, Phase B, decision 1: the sweep builds each chat's report at
+     * SEND time, so the host answers from the store as it is when asked, not
+     * a snapshot taken at boot.
+     */
+    it("Phase B: one chat's report is built from the store as it is WHEN ASKED", async () => {
+      await host.updateSettings(10, { model: "gpt-5.5", effort: "low" });
+      const { reportedAt: _a, ...before } = host.storedSessionReport(10)!;
+      expect(before).toEqual({
+        model: "gpt-5.5",
+        effort: "low",
+        serviceTier: null,
+        rerouted: false,
+      });
+      await host.updateSettings(10, { model: "gpt-6-astra", effort: "high" });
+      expect(host.storedSessionReport(10)).toMatchObject({
+        model: "gpt-6-astra",
+        effort: "high",
+      });
+      expect(host.storedSessionReport(99)).toBeNull();
+    });
+  });
+
+  /**
+   * P5 stage 7, Phase B, decision 4: THE RAIL CAN RETRACT. A value the daemon
+   * no longer holds must not outlive it on the row: /new with nothing stored,
+   * and the first bind of a chat this daemon holds nothing for, each send a
+   * report with a null model, which clears the stored value.
+   */
+  describe("Phase B: the retraction", () => {
+    const retraction = [
+      10,
+      { model: null, effort: null, serviceTier: null, rerouted: false },
+    ];
+
+    it("/new with nothing stored retracts", async () => {
+      build({ 10: "persisted" });
+      host.resetChat(10);
+      await vi.waitFor(() => expect(seen).toHaveLength(1));
+      expect(values()).toEqual([retraction]);
+    });
+
+    it("/new with a stored pair retracts nothing: the store survives and runs on the new thread", async () => {
+      build({ 10: "persisted" });
+      await host.updateSettings(10, { model: "gpt-5.5", effort: "low" });
+      await settle();
+      seen = [];
+      host.resetChat(10);
+      await settle();
+      expect(seen).toEqual([]);
+    });
+
+    it("/new forgets the old thread's runtime value and its reroute", async () => {
+      build({ 10: "persisted" });
+      server.note("thread/settings/updated", settingsUpdated("persisted"));
+      server.note("model/rerouted", rerouted("persisted"));
+      await vi.waitFor(() => expect(seen).toHaveLength(2));
+      host.resetChat(10);
+      await vi.waitFor(() => expect(seen).toHaveLength(3));
+      expect(values()[2]).toEqual(retraction);
+      // The old thread's value is not this chat's any more.
+      expect(host.currentSessionReport(10)).toBeNull();
+    });
+
+    it("binding a chat it holds nothing for (no store, no thread) retracts", async () => {
+      host.noteChatBound(10);
+      await vi.waitFor(() => expect(seen).toHaveLength(1));
+      expect(values()).toEqual([retraction]);
+    });
+
+    it("binding a chat it DOES hold something for retracts nothing", async () => {
+      build({ 10: "persisted" });
+      await host.updateSettings(11, { model: "gpt-5.5" });
+      await settle();
+      seen = [];
+      host.noteChatBound(10); // it has a thread
+      host.noteChatBound(11); // it has a stored pair
+      await settle();
+      expect(seen).toEqual([]);
+      // The positive: a daemon whose home lost chat 10's thread holds nothing
+      // for it, so the same bind DOES retract.
+      build({});
+      host.noteChatBound(10);
+      await vi.waitFor(() => expect(seen).toHaveLength(1));
+      expect(values()).toEqual([retraction]);
+    });
+  });
+
+  /**
+   * P5 stage 7, Phase B, decision 5: a rollback after a change the runtime
+   * APPLIED (it said so with thread/settings/updated, then the request
+   * failed) reports the value restored, so the row follows the rollback.
+   */
+  describe("Phase B: a rollback is reported", () => {
+    it("reports the restored stored pair after an applied then failed change", async () => {
+      build({ 10: "persisted" });
+      await host.updateSettings(10, { model: "gpt-5.5", effort: "low" });
+      await settle();
+      seen = [];
+      server.applyThenReject = true;
+      await expect(
+        host.updateSettings(10, { model: "gpt-6-astra", effort: "high" }),
+      ).rejects.toThrow("timed out");
+      await settle();
+      // The runtime's echo was reported first (the store held the new pair
+      // at that moment); the rollback then restores and REPORTS the old one.
+      expect(values().map(([, v]) => (v as any).model)).toContain("gpt-6-astra");
+      expect(values().at(-1)).toEqual([
+        10,
+        { model: "gpt-5.5", effort: "low", serviceTier: null, rerouted: false },
+      ]);
+    });
+
+    it("with nothing stored before, reports what the runtime last said it runs", async () => {
+      build({ 10: "persisted" });
+      server.applyThenReject = true;
+      await expect(
+        host.updateSettings(10, { model: "gpt-6-astra", effort: "high" }),
+      ).rejects.toThrow("timed out");
+      await settle();
+      // Nothing stored re-asserts anything, so the thread runs what the
+      // runtime applied, and that is what the row says.
+      expect(values().at(-1)).toEqual([
+        10,
+        { model: "gpt-6-astra", effort: "high", serviceTier: null, rerouted: false },
+      ]);
+      expect(host.currentSessionReport(10)).toMatchObject({
+        model: "gpt-6-astra",
+        effort: "high",
+      });
+    });
+  });
+
+  /**
+   * P5 stage 7, Phase B, decision 10: the ONE answer to "what does this chat
+   * run", the store first and the runtime's own value second, for the /model
+   * question's "current" as for the report.
+   */
+  describe("Phase B: the current value, from the report's own source", () => {
+    it("the store first, the runtime second, nothing else", async () => {
+      build({ 10: "persisted" });
+      expect(host.currentSessionReport(10)).toBeNull();
+      server.note("thread/settings/updated", settingsUpdated("persisted"));
+      await settle();
+      expect(host.currentSessionReport(10)).toMatchObject({
+        model: "gpt-5.6-sol",
+        effort: "medium",
+        rerouted: false,
+      });
+      await host.updateSettings(10, { model: "gpt-5.5", effort: "low" });
+      expect(host.currentSessionReport(10)).toMatchObject({
+        model: "gpt-5.5",
+        effort: "low",
+      });
+      // Never the catalog's guess: a chat nobody has learned anything about.
+      expect(host.currentSessionReport(42)).toBeNull();
     });
   });
 });
