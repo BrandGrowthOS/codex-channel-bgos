@@ -24,6 +24,15 @@
  * tracked paths (which `git diff` prints root relative) and the new file names
  * (which `ls-files` would print folder relative) agree.
  *
+ * THE FOLDER IT IS GIVEN, NOTHING ELSE. The variables that point Git at
+ * another repository or index whatever folder it runs in (GIT_DIR,
+ * GIT_WORK_TREE, GIT_INDEX_FILE, GIT_COMMON_DIR, GIT_OBJECT_DIRECTORY,
+ * GIT_ALTERNATE_OBJECT_DIRECTORIES, GIT_NAMESPACE, GIT_PREFIX) are dropped
+ * from Git's environment: a daemon started from inside a Git hook, or from a
+ * shell with GIT_DIR exported, would otherwise send THAT repository's changes
+ * as this folder's (measured with real Git, parity round 2). The daemon's own
+ * environment is never edited; Git gets a copy.
+ *
  * NEVER WRITES THE INDEX. A porcelain `git diff` refreshes .git/index on its
  * own (it takes index.lock and rewrites the file) whenever a tracked file has
  * only a stat change, for example a file reverted to its HEAD text or saved
@@ -158,6 +167,32 @@ const GIT_PATCH = [
   "--",
 ] as const;
 const GIT_UNTRACKED = ["ls-files", "--others", "--exclude-standard", "-z"] as const;
+
+/** Variables that make Git read another repository or index, whatever
+ * folder it runs in (see the header). */
+const REPOSITORY_OVERRIDES = [
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_INDEX_FILE",
+  "GIT_COMMON_DIR",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_NAMESPACE",
+  "GIT_PREFIX",
+] as const;
+
+/** The environment Git gets: a COPY of the daemon's, with the repository
+ * overrides dropped and the three read settings set. */
+function gitEnv(
+  base: Record<string, string | undefined>,
+): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = { ...base };
+  for (const name of REPOSITORY_OVERRIDES) delete env[name];
+  env.GIT_OPTIONAL_LOCKS = "0";
+  env.GIT_TERMINAL_PROMPT = "0";
+  env.LC_ALL = "C";
+  return env;
+}
 
 /** The cap on the small reads (the root, the branch, the head). */
 const SMALL_OUTPUT_MAX = 65_536;
@@ -488,7 +523,8 @@ export interface CollectChangesInput {
   runGit: RunGit;
   fs: ChangesFs;
   now?: () => number;
-  /** The environment Git inherits (the process's own by default). */
+  /** The environment Git inherits (the process's own by default), less the
+   * repository overrides; it is copied, never edited. */
   env?: Record<string, string | undefined>;
 }
 
@@ -652,12 +688,7 @@ async function readChanges(
   takenAt: string,
 ): Promise<ChangesPayload> {
   const { caps } = input;
-  const env = {
-    ...(input.env ?? process.env),
-    GIT_OPTIONAL_LOCKS: "0",
-    GIT_TERMINAL_PROMPT: "0",
-    LC_ALL: "C",
-  };
+  const env = gitEnv(input.env ?? process.env);
   const git = async (
     args: readonly string[],
     cwd: string,

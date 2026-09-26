@@ -463,6 +463,48 @@ describe("collectChanges", () => {
     });
   });
 
+  // Parity round 2 (lane D's collector): a daemon started from inside a Git
+  // hook, or from a shell with GIT_DIR exported, would otherwise read THAT
+  // repository or index whatever folder the read runs in.
+  it("drops every variable that points Git at another repository or index, passes the rest through, and leaves the daemon's own environment alone", async () => {
+    const daemonEnv: Record<string, string | undefined> = {
+      PATH: "/usr/local/bin:/usr/bin",
+      GIT_CONFIG_GLOBAL: "/home/owner/.gitconfig",
+      GIT_DIR: "/home/owner/other/.git",
+      GIT_WORK_TREE: "/home/owner/other",
+      GIT_INDEX_FILE: "/home/owner/other/.git/index",
+      GIT_COMMON_DIR: "/home/owner/other/.git",
+      GIT_OBJECT_DIRECTORY: "/home/owner/other/.git/objects",
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: "/home/owner/shared/objects",
+      GIT_NAMESPACE: "elsewhere",
+      GIT_PREFIX: "services/",
+    };
+    const given = { ...daemonEnv };
+    const { runGit, calls } = fakeGit(okScript());
+    const result = await collectChanges({
+      workdir: WORKDIR,
+      caps: readCaps({}),
+      runGit,
+      fs: okFs().fs,
+      now: FIXED_NOW,
+      env: daemonEnv,
+    });
+    expect(result.ok && result.payload.state).toBe("ok");
+    expect(calls).toHaveLength(7);
+    for (const call of calls) {
+      expect(call.env, key(call.args)).toEqual({
+        PATH: "/usr/local/bin:/usr/bin",
+        GIT_CONFIG_GLOBAL: "/home/owner/.gitconfig",
+        GIT_OPTIONAL_LOCKS: "0",
+        GIT_TERMINAL_PROMPT: "0",
+        LC_ALL: "C",
+      });
+    }
+    expect(daemonEnv, "the daemon's own environment is left as it was").toEqual(
+      given,
+    );
+  });
+
   it("a detached HEAD answers branch null and keeps the short head", async () => {
     const { runGit } = fakeGit(okScript({ [key(BRANCH)]: { code: 1 } }));
     const result = await collectChanges({
@@ -1564,4 +1606,86 @@ describe.skipIf(!gitOnPath)("against a real Git repository", () => {
       untrackedFiles: [],
     });
   }, 30_000);
+
+  /** A second repository, elsewhere: its own branch, its own commit and its
+   * own index, holding only b.txt. Built once, on first use. */
+  let elsewhere = "";
+  function elsewhereRepo(): string {
+    if (elsewhere) return elsewhere;
+    const dir = mkdtempSync(join(tmpdir(), "bgos-changes-elsewhere-"));
+    made.push(dir);
+    const git = (...args: string[]) => {
+      const run = spawnSync("git", args, { cwd: dir, env, windowsHide: true });
+      if (run.status !== 0) {
+        throw new Error(`setup git ${args.join(" ")}: ${String(run.stderr)}`);
+      }
+    };
+    git("-c", "init.defaultBranch=elsewhere", "init", "-q");
+    writeFileSync(join(dir, "b.txt"), "bee\n");
+    git("add", "b.txt");
+    git("-c", "commit.gpgsign=false", "commit", "-q", "-m", "elsewhere");
+    elsewhere = dir;
+    return elsewhere;
+  }
+
+  // Parity round 2 (lane D's collector): GIT_DIR, GIT_INDEX_FILE and the
+  // other repository variables, when the daemon's own environment carries
+  // them, point every Git read at that repository or index, whatever folder
+  // the read runs in.
+  for (const variable of ["GIT_DIR", "GIT_INDEX_FILE"] as const) {
+    it(`a daemon started with ${variable} naming another repository still reads the folder it is given (parity round 2)`, async () => {
+      writeFileSync(globalConfig, "");
+      const other = elsewhereRepo();
+      const daemonEnv: Record<string, string | undefined> = {
+        ...env,
+        [variable]:
+          variable === "GIT_DIR"
+            ? join(other, ".git")
+            : join(other, ".git", "index"),
+      };
+      const tracked = (runEnv: Record<string, string | undefined>) =>
+        String(
+          spawnSync("git", ["ls-files"], {
+            cwd: repo,
+            env: runEnv,
+            windowsHide: true,
+          }).stdout,
+        )
+          .split(/\r?\n/)
+          .filter((line) => line.length > 0);
+      // The control: on this Git the variable really moves a read. ls-files
+      // in this repository lists the OTHER repository's index with it, and
+      // this one's without it, so the case below can fail.
+      expect(tracked(env), "control: without the variable").toEqual([
+        "a.txt",
+        "sub/keep.txt",
+      ]);
+      expect(tracked(daemonEnv), `control: with ${variable}`).toEqual(["b.txt"]);
+
+      const head = String(runDirect(["rev-parse", "--short", "HEAD"]).stdout).trim();
+      expect(head).toMatch(/^[0-9a-f]{4,40}$/);
+      const result = await collectChanges({
+        workdir: repo,
+        caps: readCaps({}),
+        runGit: createNodeRunGit(),
+        fs: nodeChangesFs,
+        env: daemonEnv,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.payload).toMatchObject({
+        state: "ok",
+        folder: basename(repo),
+        branch: "main",
+        head,
+        numstat: "1\t1\ta.txt\0",
+        untracked: "new.txt\0",
+        untrackedFiles: [{ path: "new.txt", bytes: 6, text: "hello\n" }],
+      });
+      const lines = result.payload.patch.replace(/\r\n/g, "\n").split("\n");
+      expect(lines).toContain("diff --git a/a.txt b/a.txt");
+      expect(lines).toContain("+two");
+      expect(lines.filter((line) => line.includes("b.txt"))).toEqual([]);
+    }, 30_000);
+  }
 });
