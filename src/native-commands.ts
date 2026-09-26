@@ -103,7 +103,9 @@ const exec = promisify(execFile);
  * found must meet the floor first, through the cache the panel uses. And it
  * stays inside the agent's folder (W4-N4): the top level Git prints must be
  * that folder or one above it, as real paths, or no diff runs. Until then a
- * core.worktree the agent set posted another folder's files as its diff.
+ * core.worktree the agent set posted another folder's files as its diff. A
+ * clean filter the repository names still runs on this diff, as on the
+ * panel's: an accepted limit, whose reasons are in git-changes.ts.
  */
 const NATIVE_TOPLEVEL_ARGS = [...NO_FSMONITOR, "rev-parse", "--show-toplevel"] as const;
 

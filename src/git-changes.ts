@@ -13,7 +13,8 @@
  * A mask here would also make the backend's "N lines hidden" count wrong.
  *
  * READ ONLY. Seven commands, in order, and nothing else (each after
- * `-c core.fsmonitor=false`, see below):
+ * `-c core.fsmonitor=false`, see below), after one `git version` per Git
+ * path (see GIT 2.36 OR LATER):
  *   1. rev-parse --show-toplevel   (in the working folder; prints the root)
  *   2. rev-parse --verify --quiet HEAD   (a first commit exists?)
  *   3. symbolic-ref --quiet --short HEAD, then rev-parse --short HEAD
@@ -75,8 +76,7 @@
  * built in daemon form alike (the program form is the one measured). The
  * diffs already pass --no-ext-diff and --no-textconv, which keep out an
  * external diff and a textconv program. A clean filter the repository names
- * still runs on both diffs: no flag here stops it (measured, and left open
- * in the fix round's record).
+ * still runs: see ACCEPTED LIMIT below.
  *
  * GIT 2.36 OR LATER, OR NOTHING. Before Git 2.36, core.fsmonitor=false is
  * read as the path of a program to run, so the flag above would itself name
@@ -88,6 +88,21 @@
  * read, so a Git updated in place is seen without restarting the daemon.
  * `git version` reads no index and no repository config (a fsmonitor the
  * repository names did not run for it, measured in fix round w5).
+ *
+ * ACCEPTED LIMIT: A CLEAN FILTER THE REPOSITORY NAMES STILL RUNS. With
+ * filter.<name>.clean in the repository's own config and a matching
+ * attribute, both diffs run that program on the working file with every flag
+ * above in place; ls-files does not (measured, fix round w4). It runs as the
+ * owner each time the panel reads, outside the agent's own approval prompts,
+ * and that is what this limit accepts (decided in fix round w5): the filter
+ * needs the repository's LOCAL config, which no clone carries, and the
+ * daemon runs as the same user with the same reach as the agent. Unlike the fsmonitor there is no universal off switch: a filter's
+ * name is the repository's free choice, so no one `-c` names it; and reading
+ * attributes from an empty tree (attr.tree) needs Git 2.40 and does not cover
+ * .git/info/attributes. So a read turns off the fsmonitor, an external diff,
+ * a textconv program and a fetch from a promisor remote, and does NOT turn
+ * off a clean filter the repository names (nor, by the same route in Git,
+ * its long running filter.<name>.process form, which was not measured).
  *
  * GIT BY ITS ABSOLUTE PATH. `spawn("git", { cwd })` on Windows looks in the
  * child's working folder BEFORE PATH (libuv's search_path, which uv_spawn
