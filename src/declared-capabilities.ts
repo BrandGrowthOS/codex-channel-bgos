@@ -59,7 +59,7 @@ export const MISSION_PAUSE = "mission_pause";
 
 /**
  * `stop_pauses_mission`, spelled by the contract file shared with BGOS and the
- * Claude plugin (P6 stage 3, C-32). Declared from 0.15.0.
+ * Claude plugin (P6 stage 3, C-32). Declared from 0.16.0.
  *
  * An owner Stop, the app's Stop button or `/stop`, PAUSES the chat's open
  * mission with the reason "Stopped by you" instead of failing it, and the
@@ -72,7 +72,7 @@ export { STOP_PAUSES_MISSION };
 
 /**
  * `sessions_library`, spelled by the same contract file (P6 stage 3, C-32).
- * Declared from 0.15.0.
+ * Declared from 0.16.0.
  *
  * This daemon answers list_sessions, resume_session and rename_session on
  * the control lane: the threads THIS HOAI chat has used (the set /resume
