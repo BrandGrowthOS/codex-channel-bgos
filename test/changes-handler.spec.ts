@@ -452,7 +452,9 @@ describe("createChangesHandler", () => {
       lstat: async () => {
         throw new Error("not read");
       },
-      readPrefix: async () => new Uint8Array(),
+      readAtMost: async () => {
+        throw new Error("not read");
+      },
     };
     const h = harness({
       collect: (input) => collectChanges({ ...input, runGit, fs: unusedFs }),

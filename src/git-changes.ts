@@ -193,10 +193,26 @@ export type RunGit = (
   options: GitRunOptions,
 ) => Promise<GitRunResult>;
 
+/** What the untracked step reads of a file: its kind, size and identity. */
+export interface ChangesStat {
+  isFile(): boolean;
+  size: number;
+  dev?: number;
+  ino?: number;
+}
+
 export interface ChangesFs {
-  lstat(path: string): Promise<{ isFile(): boolean; size: number }>;
-  /** At most `limit` bytes from the start of the file. */
-  readPrefix(path: string, limit: number): Promise<Uint8Array>;
+  lstat(path: string): Promise<ChangesStat>;
+  /**
+   * Opens `path` ONCE (never through a symlink, where the host can refuse
+   * one) and reads at most `maxBytes` from the start. `stat` is the OPEN
+   * file's, so a name swapped after an lstat shows. Nothing is read from
+   * anything that is not a regular file.
+   */
+  readAtMost(
+    path: string,
+    maxBytes: number,
+  ): Promise<{ stat: ChangesStat; data: Uint8Array }>;
 }
 
 /** Finds the Git to run: an absolute path, or null when no PATH entry holds one. */
@@ -394,27 +410,40 @@ function spawnGit(
   });
 }
 
-/** The real file system: `lstat`, and a bounded read that never loads more. */
+/**
+ * O_NOFOLLOW refuses a symlink at the open, and O_NONBLOCK keeps a FIFO put
+ * in a file's place from blocking the open (and a thread of the pool with
+ * it). Windows has neither (both are undefined in fs.constants there); the
+ * file id check in readOne is what catches a swapped name on that host.
+ */
+const OPEN_FLAGS =
+  fsConstants.O_RDONLY |
+  (fsConstants.O_NOFOLLOW ?? 0) |
+  (fsConstants.O_NONBLOCK ?? 0);
+
+/** The real file system: `lstat`, and one bounded read that never loads more. */
 export const nodeChangesFs: ChangesFs = {
   lstat: (path) => fsLstat(path),
-  async readPrefix(path, limit) {
-    const handle = await fsOpen(path, "r");
+  async readAtMost(path, maxBytes) {
+    const handle = await fsOpen(path, OPEN_FLAGS);
     try {
-      const buffer = Buffer.alloc(limit);
+      const stat = await handle.stat();
+      if (!stat.isFile()) return { stat, data: new Uint8Array(0) };
+      const buffer = Buffer.alloc(Math.max(0, maxBytes));
       let filled = 0;
-      while (filled < limit) {
+      while (filled < buffer.length) {
         const { bytesRead } = await handle.read(
           buffer,
           filled,
-          limit - filled,
+          buffer.length - filled,
           filled,
         );
         if (bytesRead === 0) break;
         filled += bytesRead;
       }
-      return buffer.subarray(0, filled);
+      return { stat, data: buffer.subarray(0, filled) };
     } finally {
-      await handle.close();
+      await handle.close().catch(() => {});
     }
   },
 };
@@ -719,6 +748,12 @@ async function readChanges(
  * in its first 8,000 bytes makes it binary), a larger one is named by its
  * size only, and a symlink or anything else is binary. The text after the
  * last NUL is a name the list's cap cut, and is never read.
+ *
+ * The read is ONE handle and at most the text cap and one byte, and it must
+ * still be the regular file the lstat saw (parity round, D-R3): a file that
+ * grew past the cap since the lstat is its size only, and a name that is no
+ * longer that file (swapped for a link, another file or a device) is its
+ * name and the lstat's size, never read.
  */
 async function readUntracked(
   root: string,
@@ -739,13 +774,24 @@ async function readUntracked(
   return out;
 }
 
+/**
+ * The same file, as far as the host can tell: the file ids match. A host that
+ * reports no id (0 or none) cannot tell, and the kind check and the bounded
+ * read still hold.
+ */
+function sameFile(a: ChangesStat, b: ChangesStat): boolean {
+  const known = (s: ChangesStat) => typeof s.ino === "number" && s.ino > 0;
+  if (!known(a) || !known(b)) return true;
+  return a.ino === b.ino && a.dev === b.dev;
+}
+
 async function readOne(
   full: string,
   name: string,
   caps: ChangesCaps,
   fs: ChangesFs,
 ): Promise<UntrackedFileEntry> {
-  let stat: { isFile(): boolean; size: number };
+  let stat: ChangesStat;
   try {
     stat = await fs.lstat(full);
   } catch {
@@ -755,15 +801,23 @@ async function readOne(
   const size = wholeBytes(stat.size);
   if (!stat.isFile()) return { path: name, bytes: size, binary: true };
   if (size > caps.maxUntrackedTextBytes) return { path: name, bytes: size };
-  let data: Uint8Array;
+  let opened: { stat: ChangesStat; data: Uint8Array };
   try {
-    data = await fs.readPrefix(full, caps.maxUntrackedTextBytes + 1);
+    opened = await fs.readAtMost(full, caps.maxUntrackedTextBytes + 1);
   } catch {
     return { path: name, bytes: size };
   }
+  // Swapped since the lstat: no longer a regular file, or another file.
+  if (!opened.stat.isFile() || !sameFile(stat, opened.stat)) {
+    return { path: name, bytes: size };
+  }
+  const data = opened.data;
   if (data.length > caps.maxUntrackedTextBytes) {
-    // It grew past the cap since the lstat.
-    return { path: name, bytes: Math.max(size, data.length) };
+    // It grew past the cap since the lstat: its size now, never its text.
+    return {
+      path: name,
+      bytes: Math.max(wholeBytes(opened.stat.size), data.length),
+    };
   }
   const bytes = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
   if (bytes.subarray(0, BINARY_SNIFF_BYTES).includes(0)) {
