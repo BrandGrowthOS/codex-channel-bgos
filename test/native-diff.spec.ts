@@ -49,6 +49,14 @@ const DIFF = [
 /** Where Git for Windows puts its launcher, written out. */
 const GIT_EXE = "C:\\Program Files\\Git\\cmd\\git.exe";
 
+/** The top level, read before the diff (fix round w5, W4-N4), written out. */
+const TOPLEVEL = ["-c", "core.fsmonitor=false", "rev-parse", "--show-toplevel"];
+
+/** What /diff says when the top level is not the agent's folder or a folder
+ * above it (fix round w5, W4-N4). */
+const OUTSIDE =
+  "This agent's repository keeps its working files outside the agent's folder, so its diff is not shown.";
+
 /** `git version`, read before anything else (fix round w5, W4-N3). */
 const VERSION = ["version"];
 const HOST_VERSION = "git version 2.55.0.windows.3\n";
@@ -127,11 +135,14 @@ describe("/diff (fix round w4, R-3)", () => {
       },
       execGit: async (file: string, args: readonly string[], options: Run["options"]) => {
         runs.push({ file, args: [...args], options });
+        const argv = args.join(" ");
         return {
           stdout:
-            args.join(" ") === "version"
+            argv === "version"
               ? HOST_VERSION
-              : "diff --git a/a.txt b/a.txt\n-one\n+two\n",
+              : argv === TOPLEVEL.join(" ")
+                ? `${workdir.replace(/\\/g, "/")}\n`
+                : "diff --git a/a.txt b/a.txt\n-one\n+two\n",
         };
       },
       gitVersions: new Map(),
@@ -140,13 +151,16 @@ describe("/diff (fix round w4, R-3)", () => {
     expect(runs.map((run) => run.file), "the absolute path, never a bare git").toEqual([
       GIT_EXE,
       GIT_EXE,
+      GIT_EXE,
     ]);
-    // Its version first (fix round w5, W4-N3), in the same folder and
-    // environment, then the diff.
-    expect(runs.map((run) => run.args)).toEqual([VERSION, DIFF]);
-    expect(runs[0]!.options.cwd).toBe(workdir);
-    expect(runs[0]!.options.env).toBe(runs[1]!.options.env);
-    runs.shift();
+    // Its version first (fix round w5, W4-N3), then the top level (W4-N4),
+    // in the same folder and environment, then the diff.
+    expect(runs.map((run) => run.args)).toEqual([VERSION, TOPLEVEL, DIFF]);
+    for (const run of runs.slice(0, 2)) {
+      expect(run.options.cwd).toBe(workdir);
+      expect(run.options.env).toBe(runs[2]!.options.env);
+    }
+    runs.splice(0, 2);
     expect(runs[0]!.options).toMatchObject({
       cwd: workdir,
       windowsHide: true,
@@ -247,8 +261,14 @@ describe("/diff and the Git floor (fix round w5, W4-N3)", () => {
         findGit: async () => GIT_EXE,
         execGit: async (_file: string, args: readonly string[]) => {
           runs.push([...args]);
+          const argv = args.join(" ");
           return {
-            stdout: args.join(" ") === "version" ? HOST_VERSION : "diff --git a/a.txt b/a.txt\n",
+            stdout:
+              argv === "version"
+                ? HOST_VERSION
+                : argv === TOPLEVEL.join(" ")
+                  ? `${workdir}\n`
+                  : "diff --git a/a.txt b/a.txt\n",
           };
         },
         gitVersions,
@@ -256,7 +276,70 @@ describe("/diff and the Git floor (fix round w5, W4-N3)", () => {
       await r.diff();
       expect(r.said()).toEqual(["```diff\ndiff --git a/a.txt b/a.txt\n\n```"]);
     }
-    expect(runs).toEqual([VERSION, DIFF, DIFF]);
+    expect(runs).toEqual([VERSION, TOPLEVEL, DIFF, TOPLEVEL, DIFF]);
+  });
+});
+
+describe("/diff stays inside the agent's folder (fix round w5, W4-N4)", () => {
+  it("a top level that is not the agent's folder or a folder above it: /diff says so and runs no diff", async () => {
+    const parent = scratch("bgos-native-diff-");
+    const workdir = join(parent, "agent-folder");
+    const inside = join(workdir, "inside");
+    // A folder whose name is the start of the agent's folder's name.
+    const sameStart = join(parent, "agent");
+    for (const dir of [workdir, inside, sameStart]) mkdirSync(dir);
+    expect(workdir.startsWith(sameStart), "the agent's folder's name starts with it").toBe(true);
+    for (const [label, top] of [
+      ["another folder", scratch("bgos-native-diff-elsewhere-")],
+      ["a folder inside the agent's folder", inside],
+      ["a name that only starts the same", sameStart],
+    ] as Array<[string, string]>) {
+      const runs: string[][] = [];
+      const r = router(workdir, {
+        findGit: async () => GIT_EXE,
+        execGit: async (_file: string, args: readonly string[]) => {
+          runs.push([...args]);
+          const argv = args.join(" ");
+          return {
+            stdout:
+              argv === "version"
+                ? HOST_VERSION
+                : argv === TOPLEVEL.join(" ")
+                  ? `${top.replace(/\\/g, "/")}\n`
+                  : "diff --git a/a.txt b/a.txt\n+the owner's other text\n",
+          };
+        },
+        gitVersions: new Map(),
+      });
+      await r.diff();
+      expect(r.said(), label).toEqual([OUTSIDE]);
+      expect(runs, `${label}: no diff`).toEqual([VERSION, TOPLEVEL]);
+    }
+  });
+
+  it("the agent's folder, or a folder above it, reads as before", async () => {
+    const above = scratch("bgos-native-diff-above-");
+    const workdir = join(above, "agent");
+    mkdirSync(workdir);
+    for (const top of [workdir, above]) {
+      const r = router(workdir, {
+        findGit: async () => GIT_EXE,
+        execGit: async (_file: string, args: readonly string[]) => {
+          const argv = args.join(" ");
+          return {
+            stdout:
+              argv === "version"
+                ? HOST_VERSION
+                : argv === TOPLEVEL.join(" ")
+                  ? `${top.replace(/\\/g, "/")}\n`
+                  : "diff --git a/a.txt b/a.txt\n",
+          };
+        },
+        gitVersions: new Map(),
+      });
+      await r.diff();
+      expect(r.said(), top).toEqual(["```diff\ndiff --git a/a.txt b/a.txt\n\n```"]);
+    }
   });
 });
 
@@ -512,6 +595,35 @@ describe.skipIf(!gitOnPath)("/diff against a real Git repository (fix round w4, 
     // Without the blob Git cannot diff: the existing "could not be loaded".
     expect(r.said()).toEqual([NOT_LOADED]);
   }, 60_000);
+
+  it("a repository whose core.worktree names another folder: /diff posts nothing from there (fix round w5, W4-N4)", async () => {
+    const repo = repoWithEdit("bgos-native-diff-worktree-");
+    // The owner's other folder, with a file of the same name.
+    const other = scratch("bgos-native-diff-worktree-other-");
+    writeFileSync(join(other, "a.txt"), "the owner's other text\n");
+    // The control: without the setting /diff posts the agent's own edit.
+    const before = router(repo);
+    await before.diff();
+    expect(lines(before.said())).toContain("+two");
+    const set = spawnSync("git", ["config", "core.worktree", other.replace(/\\/g, "/")], {
+      cwd: repo,
+      env: setupEnv,
+      windowsHide: true,
+    });
+    expect(set.status).toBe(0);
+    // And on this Git the setting makes the same diff read the other folder.
+    const control = spawnSync("git", DIFF, { cwd: repo, env: readEnv(), windowsHide: true });
+    expect(control.status).toBe(0);
+    expect(
+      lines([String(control.stdout)]),
+      "control: the diff reads the other folder",
+    ).toContain("+the owner's other text");
+
+    const r = router(repo);
+    await r.diff();
+    // The message is what /diff posted, so a red run shows it.
+    expect(r.said(), r.said().join("\n")).toEqual([OUTSIDE]);
+  }, 30_000);
 
   const variables =
     process.platform === "win32" ? ["GIT_DIR", "Git_Dir"] : ["GIT_DIR"];

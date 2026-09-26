@@ -450,6 +450,9 @@ describe("createChangesHandler", () => {
       truncated: false,
     });
     const unusedFs: ChangesFs = {
+      realpath: async () => {
+        throw new Error("not read");
+      },
       lstat: async () => {
         throw new Error("not read");
       },

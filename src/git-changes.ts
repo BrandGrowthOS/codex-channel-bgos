@@ -25,6 +25,16 @@
  * tracked paths (which `git diff` prints root relative) and the new file names
  * (which `ls-files` would print folder relative) agree.
  *
+ * INSIDE THE AGENT'S FOLDER. The repository's own config (which the agent
+ * writes) can move its top level to any folder: with core.worktree naming
+ * the owner's other project, rev-parse printed that folder and every later
+ * read ran there, sending the other project's branch, files and changes as
+ * this agent's (measured, fix round w5, W4-N4). So the root Git prints must
+ * be the working folder or one of the folders above it, compared as REAL
+ * paths (links resolved, the host's own separators); anything else throws
+ * before any other Git command runs or any file is read, and the answer is
+ * read_failed. A repository above the working folder is read whole, as before.
+ *
  * THE FOLDER IT IS GIVEN, NOTHING ELSE. The variables that point Git at
  * another repository or index whatever folder it runs in (GIT_DIR,
  * GIT_WORK_TREE, GIT_INDEX_FILE, GIT_COMMON_DIR, GIT_OBJECT_DIRECTORY,
@@ -109,6 +119,7 @@ import {
   access as fsAccess,
   lstat as fsLstat,
   open as fsOpen,
+  realpath as fsRealpath,
   stat as fsStat,
 } from "node:fs/promises";
 
@@ -400,6 +411,9 @@ export interface ChangesFileHandle {
 }
 
 export interface ChangesFs {
+  /** The path with every link resolved, in the host's own form: the top
+   * level check compares these (fix round w5, W4-N4). */
+  realpath(path: string): Promise<string>;
   lstat(path: string): Promise<ChangesStat>;
   /**
    * Opens `path` ONCE (never through a symlink, where the host can refuse
@@ -649,6 +663,7 @@ const OPEN_FLAGS =
  * size asked for, so it never loads more.
  */
 export const nodeChangesFs: ChangesFs = {
+  realpath: (path) => fsRealpath(path),
   lstat: (path) => fsLstat(path),
   async open(path) {
     const handle = await fsOpen(path, OPEN_FLAGS);
@@ -724,6 +739,35 @@ export interface CollectChangesInput {
 
 export const TOO_SLOW_MESSAGE =
   "the changes took too long to read on the agent host";
+
+/** Why a read whose top level is outside the working folder failed: for the
+ * daemon's local log (read_failed carries the spec's sentence alone), and it
+ * names neither folder. */
+const TOP_LEVEL_OUTSIDE =
+  "the repository's top level is outside the working folder";
+
+/**
+ * Whether the top level Git printed is the working folder or one of the
+ * folders above it (fix round w5, W4-N4). Both are compared as REAL paths
+ * (`realpath`, links resolved), with the host's separators: on Windows a
+ * slash and a backslash alike, elsewhere a slash only. A folder whose name
+ * only starts the same (`billing` above `billing-export`) is not above it.
+ * Exported for the native /diff; a throw of `realpath` is thrown as it is.
+ */
+export async function topLevelHolds(
+  top: string,
+  workdir: string,
+  realpath: (path: string) => Promise<string>,
+  platform: string = process.platform,
+): Promise<boolean> {
+  const win = platform === "win32";
+  const sep = win ? "\\" : "/";
+  const form = (path: string) => (win ? path.replace(/\//g, sep) : path);
+  const root = form(await realpath(top));
+  const folder = form(await realpath(workdir));
+  if (folder === root) return true;
+  return folder.startsWith(root.endsWith(sep) ? root : root + sep);
+}
 
 class BudgetExpired extends Error {
   constructor() {
@@ -951,6 +995,14 @@ async function readChanges(
   // `C:` without its slash is that drive's CURRENT folder on Windows.
   const root = firstLine(top.stdout);
   if (!root) throw new GitCommandError("git rev-parse printed no folder");
+  // Inside the agent's folder, or nothing else is read (see the header).
+  const holds = await topLevelHolds(
+    root,
+    input.workdir,
+    (path) => input.fs.realpath(path),
+    input.platform,
+  );
+  if (!holds) throw new Error(TOP_LEVEL_OUTSIDE);
   const folder = folderName(root);
 
   const verify = await git(GIT_VERIFY_HEAD, root, SMALL_OUTPUT_MAX);

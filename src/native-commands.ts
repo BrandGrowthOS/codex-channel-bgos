@@ -8,8 +8,10 @@ import {
   GIT_FLOOR_MESSAGE,
   gitReadEnv,
   GitTooOldError,
+  nodeChangesFs,
   NO_FSMONITOR,
   NO_INDEX_REFRESH,
+  topLevelHolds,
   type FindGit,
   type GitVersionCache,
 } from "./git-changes.js";
@@ -98,8 +100,15 @@ const exec = promisify(execFile);
  * Windows, with none of those rules: a gap there since /diff was written.
  * Since fix round w5 it also never fetches (GIT_NO_LAZY_FETCH, in Git's read
  * environment) and reads nothing with a Git below 2.36 (W4-N3): the Git
- * found must meet the floor first, through the cache the panel uses.
+ * found must meet the floor first, through the cache the panel uses. And it
+ * stays inside the agent's folder (W4-N4): the top level Git prints must be
+ * that folder or one above it, as real paths, or no diff runs. Until then a
+ * core.worktree the agent set posted another folder's files as its diff.
  */
+const NATIVE_TOPLEVEL_ARGS = [...NO_FSMONITOR, "rev-parse", "--show-toplevel"] as const;
+
+/** The top level is outside the agent's folder (fix round w5, W4-N4). */
+class TopLevelOutside extends Error {}
 const NATIVE_DIFF_ARGS = [
   ...NO_FSMONITOR,
   ...NO_INDEX_REFRESH,
@@ -582,11 +591,21 @@ export class NativeCommands {
           },
           this.deps.gitVersions,
         );
+        // Inside the agent's folder, or no diff (fix round w5, W4-N4).
+        const top =
+          (await execGit(git, NATIVE_TOPLEVEL_ARGS, options)).stdout.split(/\r?\n/)[0] ?? "";
+        if (!top) throw new Error("git rev-parse printed no folder");
+        if (!(await topLevelHolds(top, host.workdir, nodeChangesFs.realpath)))
+          throw new TopLevelOutside();
         ({ stdout } = await execGit(git, NATIVE_DIFF_ARGS, options));
       } catch (error) {
         if (error instanceof GitTooOldError)
           throw new Error(
             `${GIT_FLOOR_MESSAGE}. Update Git on this computer, then retry.`,
+          );
+        if (error instanceof TopLevelOutside)
+          throw new Error(
+            "This agent's repository keeps its working files outside the agent's folder, so its diff is not shown.",
           );
         const detail = String((error as { stderr?: string }).stderr ?? "");
         if (/not a git repository/i.test(detail))

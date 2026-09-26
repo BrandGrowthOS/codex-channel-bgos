@@ -25,6 +25,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   symlinkSync,
@@ -216,8 +217,18 @@ interface MemFile {
   open?: { data: Uint8Array; ino: number; isFile: boolean };
 }
 
-function memoryFs(files: Record<string, MemFile>) {
+/**
+ * `real` maps a path to what the host's realpath answers for it (fix round
+ * w5, W4-N4): another path (a link resolved), or null for a path that is not
+ * there. Any other path is its own real path.
+ */
+function memoryFs(
+  files: Record<string, MemFile>,
+  real: Record<string, string | null> = {},
+) {
   const lstatCalls: string[] = [];
+  /** Every realpath asked for, in order (fix round w5, W4-N4). */
+  const realpathCalls: string[] = [];
   /** The files whose BYTES were read, by any route. */
   const readCalls: string[] = [];
   /** The maxBytes of each byte read. */
@@ -254,6 +265,15 @@ function memoryFs(files: Record<string, MemFile>) {
     dev: 7,
   });
   const fs = {
+    async realpath(path: string) {
+      realpathCalls.push(path);
+      if (!(path in real)) return path;
+      const to = real[path];
+      if (to === null || to === undefined) {
+        throw Object.assign(new Error(`ENOENT ${path}`), { code: "ENOENT" });
+      }
+      return to;
+    },
     async lstat(path: string) {
       lstatCalls.push(path);
       const file = at(path);
@@ -303,7 +323,7 @@ function memoryFs(files: Record<string, MemFile>) {
       return handle.data.subarray(0, limit);
     },
   } as unknown as ChangesFs;
-  return { fs, lstatCalls, readCalls, askedFor, events, trapCalls };
+  return { fs, lstatCalls, readCalls, askedFor, events, trapCalls, realpathCalls };
 }
 
 const PATCH_TEXT =
@@ -1413,6 +1433,8 @@ describe("collectChanges", () => {
       const reads: string[] = [];
       let seenIno = 0;
       const fs = {
+        // The real one (fix round w5, W4-N4: the top level check).
+        realpath: (path: string) => nodeChangesFs.realpath(path),
         async lstat(path: string) {
           const seen = await real.lstat(path);
           if (path.endsWith("/swapped.txt") && seenIno === 0) {
@@ -1649,6 +1671,9 @@ describe("collectChanges", () => {
     );
     const onWindows = await collectChanges({
       workdir: "C:\\Users\\owner\\billing-export",
+      // A Windows host, whose paths these are (fix round w5, W4-N4: the top
+      // level check reads separators as the host does).
+      platform: "win32",
       caps: readCaps({}),
       runGit: drive.runGit,
       fs: memoryFs({
@@ -1671,13 +1696,187 @@ describe("collectChanges", () => {
     });
     const result = await collectChanges({
       workdir: "C:\\work",
+      // A Windows host, whose paths these are (fix round w5, W4-N4).
+      platform: "win32",
       caps: readCaps({}),
       runGit,
       fs,
-    });
+    } as Parameters<typeof collectChanges>[0]);
     expect(result.ok).toBe(true);
     expect(calls.slice(1).map((c) => c.cwd)).toEqual(Array(6).fill("C:/"));
     expect(lstatCalls).toEqual(["C:/notes.md"]);
+  });
+
+  // Fix round w5, W4-N4: the repository's own config can move its top level
+  // (core.worktree) to another folder, and every read after the first runs
+  // in the top level Git printed. The read stays inside the agent's folder:
+  // the top level must be the working folder or one of the folders above
+  // it, compared as real paths, or nothing else is read.
+  it("a top level that is not the working folder or a folder above it is a failed read, and nothing else is read (fix round w5, W4-N4)", async () => {
+    const refused: Array<{
+      label: string;
+      platform: string;
+      workdir: string;
+      top: string;
+      real?: Record<string, string | null>;
+    }> = [
+      { label: "another folder", platform: "linux", workdir: WORKDIR, top: "/home/owner/elsewhere" },
+      {
+        label: "a folder inside the working folder",
+        platform: "linux",
+        workdir: WORKDIR,
+        top: `${WORKDIR}/deeper`,
+      },
+      {
+        label: "a name that only starts the same",
+        platform: "linux",
+        workdir: "/home/owner/billing-export-2/services",
+        top: "/home/owner/billing-export",
+      },
+      {
+        label: "Windows, another folder",
+        platform: "win32",
+        workdir: "C:\\Users\\owner\\billing-export",
+        top: "C:/Users/owner/elsewhere",
+      },
+      {
+        label: "Windows, a name that only starts the same",
+        platform: "win32",
+        workdir: "C:\\Users\\owner\\billing-export",
+        top: "C:/Users/owner/billing",
+      },
+      {
+        label: "a working folder that is a link to a folder outside the top level",
+        platform: "linux",
+        workdir: "/home/owner/billing-export/link",
+        top: ROOT,
+        real: { "/home/owner/billing-export/link": "/srv/elsewhere/project" },
+      },
+      {
+        label: "a top level that realpath cannot find",
+        platform: "linux",
+        workdir: WORKDIR,
+        top: "/gone/repository",
+        real: { "/gone/repository": null },
+      },
+    ];
+    for (const { label, platform, workdir, top, real } of refused) {
+      const { runGit, calls } = fakeGit(
+        okScript({ [key(TOPLEVEL)]: { stdout: `${top}\n` } }),
+      );
+      const { fs, lstatCalls, readCalls, events } = memoryFs(
+        { [`${top}/notes/todo.md`]: { data: TODO } },
+        real,
+      );
+      const outcome = await collectChanges({
+        workdir,
+        platform,
+        caps: readCaps({}),
+        runGit,
+        fs,
+        now: FIXED_NOW,
+      }).then(
+        (answer) => answer,
+        (error: unknown) => error,
+      );
+      expect(outcome, `${label}: ${JSON.stringify(outcome)}`).toBeInstanceOf(Error);
+      expect(calls.map((c) => c.args), `${label}: the top level only`).toEqual([TOPLEVEL]);
+      expect([...lstatCalls, ...readCalls, ...events], `${label}: no file`).toEqual([]);
+    }
+  });
+
+  it("a top level that is the working folder or a folder above it, as real paths, reads as before (fix round w5, W4-N4)", async () => {
+    const allowed: Array<{
+      label: string;
+      platform: string;
+      workdir: string;
+      top: string;
+      real?: Record<string, string | null>;
+    }> = [
+      { label: "the working folder", platform: "linux", workdir: ROOT, top: ROOT },
+      { label: "a folder above it", platform: "linux", workdir: WORKDIR, top: ROOT },
+      { label: "a root above it", platform: "linux", workdir: "/work", top: "/" },
+      {
+        label: "Windows, Git's forward slashes",
+        platform: "win32",
+        workdir: "C:\\Users\\owner\\billing-export\\services",
+        top: "C:/Users/owner/billing-export",
+      },
+      { label: "Windows, a drive root", platform: "win32", workdir: "C:\\work", top: "C:/" },
+      {
+        label: "a working folder that is a link into the top level",
+        platform: "linux",
+        workdir: "/home/owner/link",
+        top: ROOT,
+        real: { "/home/owner/link": WORKDIR },
+      },
+      {
+        label: "a top level Git printed through a link",
+        platform: "linux",
+        workdir: WORKDIR,
+        top: "/home/owner/checkout",
+        real: { "/home/owner/checkout": ROOT },
+      },
+    ];
+    for (const { label, platform, workdir, top, real } of allowed) {
+      const { runGit, calls } = fakeGit(
+        okScript({ [key(TOPLEVEL)]: { stdout: `${top}\n` } }),
+      );
+      const { fs, realpathCalls } = memoryFs({}, real);
+      const result = await collectChanges({
+        workdir,
+        platform,
+        caps: readCaps({}),
+        runGit,
+        fs,
+        now: FIXED_NOW,
+      });
+      expect(result.ok && result.payload.state, label).toBe("ok");
+      expect(calls, label).toHaveLength(7);
+      expect(realpathCalls, `${label}: both, as real paths`).toEqual([top, workdir]);
+    }
+  });
+
+  it("a top level outside the working folder answers read_failed with the spec's sentence alone (fix round w5, W4-N4)", async () => {
+    const { runGit } = fakeGit(
+      okScript({ [key(TOPLEVEL)]: { stdout: "/home/owner/elsewhere\n" } }),
+    );
+    const api = {
+      changesRpcAck: vi.fn(async () => ({})),
+      changesRpcResult: vi.fn(async (_rpcId: string, _body: ChangesResultBody) => ({})),
+    };
+    const logs: string[] = [];
+    const handle = createChangesHandler({
+      api,
+      workdir: WORKDIR,
+      owns: () => true,
+      collect: (input: { workdir: string; caps: ReturnType<typeof readCaps> }) =>
+        collectChanges({ ...input, platform: "linux", runGit, fs: memoryFs({}).fs }),
+      log: (message: string) => logs.push(message),
+      schedule: () => {},
+    } as Parameters<typeof createChangesHandler>[0]);
+    await handle({
+      rpcId: "rpc-outside",
+      op: "diff",
+      assistantId: "10",
+      payload: { scope: "uncommitted" },
+    });
+    expect(api.changesRpcResult.mock.calls).toEqual([
+      [
+        "rpc-outside",
+        {
+          ok: false,
+          error: {
+            code: "read_failed",
+            message: "changes could not be read on the agent host",
+          },
+        },
+      ],
+    ]);
+    // Why, on this computer only, and without either folder's name.
+    expect(logs).toEqual([
+      "changes_rpc read failed: the repository's top level is outside the working folder",
+    ]);
   });
 
   it("a Git command that fails for another reason is thrown, never dressed up as a state", async () => {
@@ -2341,6 +2540,87 @@ describe.skipIf(!gitOnPath)("against a real Git repository", () => {
       summary: "git diff exited 128",
     });
   }, 60_000);
+
+  // Fix round w5, W4-N4: core.worktree in the repository's own config (which
+  // the agent writes) moves its top level to another folder, and every read
+  // after the first runs in the top level Git printed.
+  it("a repository whose core.worktree names another folder is a failed read, and nothing is read there (fix round w5, W4-N4)", async () => {
+    writeFileSync(globalConfig, "");
+    const setup = (cwd: string, ...args: string[]) => {
+      const run = spawnSync("git", args, { cwd, env, windowsHide: true });
+      if (run.status !== 0) {
+        throw new Error(`setup git ${args.join(" ")}: ${String(run.stderr)}`);
+      }
+    };
+    const agent = mkdtempSync(join(tmpdir(), "bgos-changes-worktree-agent-"));
+    made.push(agent);
+    setup(agent, "-c", "init.defaultBranch=main", "init", "-q");
+    writeFileSync(join(agent, "a.txt"), "one\n");
+    setup(agent, "add", "a.txt");
+    setup(agent, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "agent");
+    writeFileSync(join(agent, "a.txt"), "two\n");
+    // The owner's other project: its own repository, with its own change.
+    const other = mkdtempSync(join(tmpdir(), "bgos-changes-worktree-other-"));
+    made.push(other);
+    setup(other, "-c", "init.defaultBranch=elsewhere", "init", "-q");
+    writeFileSync(join(other, "b.txt"), "bee\n");
+    setup(other, "add", "b.txt");
+    setup(other, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "other");
+    writeFileSync(join(other, "b.txt"), "the owner's other text\n");
+
+    /** The collector over the real runner and file system, recording every
+     * Git read it asks for and every file it touches. */
+    const read = async () => {
+      const real = createNodeRunGit();
+      const argvs: string[][] = [];
+      const touched: string[] = [];
+      const outcome = await collectChanges({
+        workdir: agent,
+        caps: readCaps({}),
+        runGit: (args, options) => {
+          argvs.push([...args]);
+          return real(args, options);
+        },
+        fs: {
+          realpath: (path: string) => nodeChangesFs.realpath(path),
+          lstat: (path: string) => {
+            touched.push(path);
+            return nodeChangesFs.lstat(path);
+          },
+          open: (path: string) => {
+            touched.push(path);
+            return nodeChangesFs.open(path);
+          },
+        } as ChangesFs,
+        env,
+      }).then(
+        (answer) => answer,
+        (error: unknown) => error,
+      );
+      return { outcome, argvs, touched };
+    };
+
+    // The control: without the setting the collector reads the agent's folder.
+    const control = await read();
+    expect(control.outcome).toMatchObject({
+      ok: true,
+      payload: { state: "ok", folder: basename(agent), branch: "main", numstat: "1\t1\ta.txt\0" },
+    });
+    setup(agent, "config", "core.worktree", other.replace(/\\/g, "/"));
+    // And on this Git the setting moves the top level to the other folder.
+    const printed = String(runDirect(TOPLEVEL, agent).stdout).trim();
+    expect(realpathSync.native(printed), "control: the top level moved").toBe(
+      realpathSync.native(other),
+    );
+
+    const subject = await read();
+    expect(subject.outcome, JSON.stringify(subject.outcome)).toBeInstanceOf(Error);
+    expect((subject.outcome as Error).message).toBe(
+      "the repository's top level is outside the working folder",
+    );
+    expect(subject.argvs, "the top level only").toEqual([TOPLEVEL]);
+    expect(subject.touched, "no file").toEqual([]);
+  }, 30_000);
 
   /** A second repository, elsewhere: its own branch, its own commit and its
    * own index, holding only b.txt. Built once, on first use. */
