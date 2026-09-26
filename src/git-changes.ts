@@ -12,9 +12,27 @@
  * before any client sees the answer (backend/src/changes-panel/changes-view.ts).
  * A mask here would also make the backend's "N lines hidden" count wrong.
  *
- * READ ONLY. Seven commands, in order, and nothing else (each after
- * `-c core.fsmonitor=false`, see below), after one `git version` per Git
- * path (see GIT 2.36 OR LATER):
+ * WHAT THE READ DEFENDS, AND WHAT IT DOES NOT (the threat model, fix round
+ * w6). It defends the owner against untrusted repository CONTENT, meaning
+ * what a clone carries (a git binary planted in the folder, attributes,
+ * files), and against Git WRITING the repository (the index refresh, locks).
+ * It does NOT defend against the agent itself: the agent runs as the same
+ * user, with the same reach, on the same machine, can already run any
+ * program and read any file there, and the answer goes only to the owner,
+ * who owns that machine. So a setting only the agent's own local config or
+ * its .git file can make (core.worktree, a gitfile or GIT_DIR pointing
+ * elsewhere, a clean filter, the programs a promisor remote names) can
+ * mislead the agent's own panel. The checks that exist for those (the top
+ * level check, GIT_NO_LAZY_FETCH, the Git floor) are defence in depth, and
+ * each rule below says exactly what it covers. The Git directory and the
+ * common directory are NOT checked, on purpose: an agent that runs in a Git
+ * worktree keeps its common directory outside its folder. (A GIT_DIR in the
+ * daemon's own environment is dropped, see NO REPOSITORY VARIABLE below; the
+ * gitdir line of a .git file is not checked.)
+ *
+ * READ ONLY GIT COMMANDS. Seven commands, in order, and no other Git command
+ * (each after `-c core.fsmonitor=false`, see below), after one `git version`
+ * per Git path (see GIT 2.36 OR LATER):
  *   1. rev-parse --show-toplevel   (in the working folder; prints the root)
  *   2. rev-parse --verify --quiet HEAD   (a first commit exists?)
  *   3. symbolic-ref --quiet --short HEAD, then rev-parse --short HEAD
@@ -24,9 +42,11 @@
  *   6. ls-files --others --exclude-standard -z   (new files, .gitignore kept)
  * Every command after the first runs in the ROOT the first one printed, so the
  * tracked paths (which `git diff` prints root relative) and the new file names
- * (which `ls-files` would print folder relative) agree.
+ * (which `ls-files` would print folder relative) agree. What these commands
+ * can still start, and what turns it off, is said rule by rule below.
  *
- * INSIDE THE AGENT'S FOLDER. The repository's own config (which the agent
+ * THE TOP LEVEL IS THE WORKING FOLDER OR A FOLDER ABOVE IT (defence in depth,
+ * see the threat model). The repository's own config (which the agent
  * writes) can move its top level to any folder: with core.worktree naming
  * the owner's other project, rev-parse printed that folder and every later
  * read ran there, sending the other project's branch, files and changes as
@@ -35,17 +55,25 @@
  * paths (links resolved, the host's own separators); anything else throws
  * before any other Git command runs or any file is read, and the answer is
  * read_failed. A repository above the working folder is read whole, as before.
+ * This covers the top level alone, as that rev-parse printed it. The Git
+ * directory and the common directory are not checked (on purpose, see the
+ * threat model), so a gitfile in the folder whose gitdir names another
+ * repository would still read that repository's HEAD and index against this
+ * folder's files (reasoned from Git's rules, not measured). A core.worktree
+ * rewritten between the rev-parse and the later reads is not covered either
+ * (not measured).
  *
- * THE FOLDER IT IS GIVEN, NOTHING ELSE. The variables that point Git at
- * another repository or index whatever folder it runs in (GIT_DIR,
- * GIT_WORK_TREE, GIT_INDEX_FILE, GIT_COMMON_DIR, GIT_OBJECT_DIRECTORY,
- * GIT_ALTERNATE_OBJECT_DIRECTORIES, GIT_NAMESPACE, GIT_PREFIX) are dropped
- * from Git's environment: a daemon started from inside a Git hook, or from a
- * shell with GIT_DIR exported, would otherwise send THAT repository's changes
- * as this folder's (measured with real Git, parity round 2). On Windows,
- * which reads environment names case blind, they are dropped in any spelling
- * (Git_Dir moved a read there too, fix round w4). The daemon's own
- * environment is never edited; Git gets a copy.
+ * NO REPOSITORY VARIABLE FROM THE DAEMON'S ENVIRONMENT. The variables that
+ * point Git at another repository or index whatever folder it runs in
+ * (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_COMMON_DIR,
+ * GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES, GIT_NAMESPACE,
+ * GIT_PREFIX) are dropped from Git's environment: a daemon started from
+ * inside a Git hook, or from a shell with GIT_DIR exported, would otherwise
+ * send THAT repository's changes as this folder's (measured with real Git,
+ * parity round 2). On Windows, which reads environment names case blind,
+ * they are dropped in any spelling (Git_Dir moved a read there too, fix
+ * round w4). The daemon's own environment is never edited; Git gets a copy.
+ * This covers the environment the daemon inherited, nothing in the folder.
  *
  * NEVER WRITES THE INDEX. A porcelain `git diff` refreshes .git/index on its
  * own (it takes index.lock and rewrites the file) whenever a tracked file has
@@ -59,16 +87,20 @@
  * asks for status, and an agent's own `git add` or `git commit` never meets
  * an index.lock this read took.
  *
- * NEVER FETCHES. In a partial clone (one made with --filter), a diff that
- * needs a blob the clone never downloaded fetches it from the promisor remote
- * on demand: that runs the programs the repository's config names for the
+ * NO LAZY FETCH, ON A GIT THAT KNOWS GIT_NO_LAZY_FETCH (defence in depth: a
+ * promisor remote and its programs are named in the repository's local
+ * config). In a partial clone (one made with --filter), a diff that needs a
+ * blob the clone never downloaded fetches it from the promisor remote on
+ * demand: that runs the programs the repository's config names for the
  * remote (its upload-pack, its ssh command) and can hang on the network.
- * Every command runs with GIT_NO_LAZY_FETCH=1, so such a read fails instead:
- * both diffs exit 128 and the answer is read_failed (measured with a file://
- * promisor on Git 2.55.0.windows.3, fix round w5, W4-N1). That holds on a Git
- * that knows the variable: Ubuntu's build of 2.43.0 did too, Git's release
- * notes first name the switch in 2.45.0, and an older Git without it ignores
- * the variable and can still fetch.
+ * Every command runs with GIT_NO_LAZY_FETCH=1, so on a Git that honours it
+ * such a read fails instead: both diffs exit 128 and the answer is
+ * read_failed (measured with a file:// promisor on Git 2.55.0.windows.3, fix
+ * round w5, W4-N1). Git's release notes first name the switch in 2.45.0
+ * (`git --no-lazy-fetch`, which Git's documentation calls the same as the
+ * variable), and Ubuntu's build of 2.43.0 honours the variable too
+ * (measured). A Git from the 2.36 floor that does not know the variable
+ * ignores it and can still fetch lazily in a partial clone: a documented gap.
  *
  * RUNS NO PROGRAM THE REPOSITORY NAMES FOR ITS FSMONITOR. core.fsmonitor in
  * the repository's own config (which the agent writes) names a program Git
@@ -78,43 +110,52 @@
  * which Git documents as the fsmonitor off, in its program form and its
  * built in daemon form alike (the program form is the one measured). The
  * diffs already pass --no-ext-diff and --no-textconv, which keep out an
- * external diff and a textconv program. A clean filter the repository names
- * still runs: see ACCEPTED LIMIT below.
+ * external diff and a textconv program. core.fsmonitor is config, which no
+ * clone carries, so turning it off is defence in depth too. A clean filter
+ * the repository names still runs: see ACCEPTED LIMIT below.
  *
- * GIT 2.36 OR LATER, OR NOTHING. Before Git 2.36, core.fsmonitor=false is
- * read as the path of a program to run, so the flag above would itself name
- * a program. So `git version` is read first, once per Git path for the
- * daemon's life (the panel and /diff share the answer), and a Git below 2.36,
- * or one whose version cannot be read, runs no other command: the read is
- * read_failed with the plain words GIT_FLOOR_MESSAGE (fix round w5, W4-N3).
+ * GIT 2.36 OR LATER, OR NOTHING (defence in depth: it covers this file's own
+ * flag, nothing else). Git reads core.fsmonitor=false as the fsmonitor off
+ * from 2.36; before that it is read as the path of a program to run, so the
+ * flag above would itself name a program. So `git version` is read first,
+ * once per Git path for the daemon's life (the panel and /diff share the
+ * answer), and a Git below 2.36, or one whose version cannot be read, runs
+ * no other command: the read is read_failed with the plain words
+ * GIT_FLOOR_MESSAGE (fix round w5, W4-N3).
  * Only an accepted Git is remembered: a refusal is read again at the next
  * read, so a Git updated in place is seen without restarting the daemon.
  * `git version` reads no index and no repository config (a fsmonitor the
- * repository names did not run for it, measured in fix round w5).
+ * repository names did not run for it, measured in fix round w5). The floor
+ * stays 2.36: 2.45, the first release whose notes name the switch, would
+ * refuse Ubuntu 24.04's Git 2.43, which honours the variable (measured).
  *
  * ACCEPTED LIMIT: A CLEAN FILTER THE REPOSITORY NAMES STILL RUNS. With
  * filter.<name>.clean in the repository's own config and a matching
  * attribute, both diffs run that program on the working file with every flag
  * above in place; ls-files does not (measured, fix round w4). It runs as the
  * owner each time the panel reads, outside the agent's own approval prompts,
- * and that is what this limit accepts (decided in fix round w5): the filter
- * needs the repository's LOCAL config, which no clone carries, and the
- * daemon runs as the same user with the same reach as the agent. Unlike the fsmonitor there is no universal off switch: a filter's
- * name is the repository's free choice, so no one `-c` names it; and reading
- * attributes from an empty tree (attr.tree) needs Git 2.40 and does not cover
- * .git/info/attributes. So a read turns off the fsmonitor, an external diff,
- * a textconv program and a fetch from a promisor remote, and does NOT turn
- * off a clean filter the repository names (nor, by the same route in Git,
- * its long running filter.<name>.process form, which was not measured).
+ * and that is what this limit accepts (decided in fix round w5, and the
+ * threat model's case): the filter needs the repository's LOCAL config,
+ * which no clone carries, and the daemon runs as the same user with the same
+ * reach as the agent. Unlike the fsmonitor there is no universal off switch:
+ * a filter's name is the repository's free choice, so no one `-c` names it;
+ * and reading attributes from another tree (an empty one) needs
+ * --attr-source, from Git 2.41.0, or attr.tree, from Git 2.43.0, both above
+ * the floor, and neither covers .git/info/attributes. So a read turns off
+ * the fsmonitor, an external diff and a textconv program, and on a Git that
+ * knows GIT_NO_LAZY_FETCH a lazy fetch from a promisor remote, and does NOT
+ * turn off a clean filter the repository names (nor, by the same route in
+ * Git, its long running filter.<name>.process form, which was not measured).
  *
- * GIT BY ITS ABSOLUTE PATH. `spawn("git", { cwd })` on Windows looks in the
- * child's working folder BEFORE PATH (libuv's search_path, which uv_spawn
- * hands the child's cwd), and a relative PATH entry does the same on any
- * host. The agent writes that folder, so a git.exe it left there would run as
- * the owner, outside the agent's own approvals, each time the owner opened the
- * panel (measured on this plugin's node, parity round D-R2). So Git is looked
- * up on PATH's ABSOLUTE entries only, once per read, and spawned by that path;
- * no Git there reads as `git_missing`, and nothing is started.
+ * GIT BY ITS ABSOLUTE PATH (content: the planted git binary of the threat
+ * model). `spawn("git", { cwd })` on Windows looks in the child's working
+ * folder BEFORE PATH (libuv's search_path, which uv_spawn hands the child's
+ * cwd), and a relative PATH entry does the same on any host. A clone can
+ * carry a git.exe into that folder, and it would run as the owner each time
+ * the owner opened the panel (measured on this plugin's node, parity round
+ * D-R2). So Git is looked up on PATH's ABSOLUTE entries only, once per read,
+ * and spawned by that path; no Git there reads as `git_missing`, and nothing
+ * is started.
  *
  * `git_missing` ONLY WHILE THE FOLDER IS THERE. Node reports a spawn into a
  * working folder that does not exist as ENOENT, the code a missing Git gives,
@@ -294,6 +335,8 @@ const OVERRIDE_NAMES: ReadonlySet<string> = new Set(REPOSITORY_OVERRIDES);
  * programs the repository's config names for that remote and can hang on the
  * network (measured, fix round w5, W4-N1). The variable, not the
  * `--no-lazy-fetch` flag, which an older Git refuses as an unknown option.
+ * It turns lazy fetching off only on a Git that knows it (see the header's
+ * NO LAZY FETCH rule for which ones).
  */
 export function gitReadEnv(
   base: Record<string, string | undefined>,
@@ -1013,7 +1056,8 @@ async function readChanges(
   // `C:` without its slash is that drive's CURRENT folder on Windows.
   const root = firstLine(top.stdout);
   if (!root) throw new GitCommandError("git rev-parse printed no folder");
-  // Inside the agent's folder, or nothing else is read (see the header).
+  // The top level is the working folder or above it, or nothing else is read
+  // (see the header; the Git directory is not checked, on purpose).
   const holds = await topLevelHolds(
     root,
     input.workdir,

@@ -91,21 +91,28 @@ const exec = promisify(execFile);
 
 /**
  * The native /diff's Git command. /diff reads the same folder the Changes
- * panel reads, so it keeps the collector's rules (git-changes.ts): the
- * fsmonitor a repository names is off, a porcelain diff never refreshes the
- * index, and Git runs by the absolute path found on PATH's absolute entries
- * with Git's read environment (the repository variables dropped,
- * GIT_OPTIONAL_LOCKS=0). Until fix round w4 (R-3) /diff ran a bare `git`
- * from the agent's folder, which a git.exe the agent left there answered on
- * Windows, with none of those rules: a gap there since /diff was written.
- * Since fix round w5 it also never fetches (GIT_NO_LAZY_FETCH, in Git's read
- * environment) and reads nothing with a Git below 2.36 (W4-N3): the Git
- * found must meet the floor first, through the cache the panel uses. And it
- * stays inside the agent's folder (W4-N4): the top level Git prints must be
- * that folder or one above it, as real paths, or no diff runs. Until then a
- * core.worktree the agent set posted another folder's files as its diff. A
- * clean filter the repository names still runs on this diff, as on the
- * panel's: an accepted limit, whose reasons are in git-changes.ts.
+ * panel reads, so it keeps the collector's rules and its threat model
+ * (git-changes.ts): the fsmonitor a repository names is off, a porcelain
+ * diff never refreshes the index, and Git runs by the absolute path found on
+ * PATH's absolute entries with Git's read environment (the repository
+ * variables dropped, GIT_OPTIONAL_LOCKS=0). Until fix round w4 (R-3) /diff
+ * ran a bare `git` from the agent's folder, which a git.exe in that folder
+ * (one a clone can carry) answered on Windows, with none of those rules: a
+ * gap there since /diff was written. Since fix round w5 its Git also runs
+ * with GIT_NO_LAZY_FETCH=1 (in Git's read environment), which turns lazy
+ * fetching from a promisor remote off on a Git that knows the variable; a
+ * Git from 2.36 that does not know it can still fetch lazily, the gap the
+ * collector's header documents. With a Git below 2.36, or one whose version
+ * cannot be read, it runs nothing after `git version` (W4-N3): the Git found
+ * must meet the floor first, through the cache the panel uses. And its top
+ * level must be the agent's folder or one above it, as real paths, or no
+ * diff runs (W4-N4): until then a core.worktree the agent set posted another
+ * folder's files as its diff. That check covers the top level alone; the
+ * Git directory and the common directory are not checked, on purpose. The
+ * floor, the variable and the top level check are defence in depth against
+ * the agent's own config, as the collector's header explains. A clean
+ * filter the repository names still runs on this diff, as on the panel's:
+ * an accepted limit, whose reasons are in git-changes.ts.
  */
 const NATIVE_TOPLEVEL_ARGS = [...NO_FSMONITOR, "rev-parse", "--show-toplevel"] as const;
 
@@ -593,7 +600,8 @@ export class NativeCommands {
           },
           this.deps.gitVersions,
         );
-        // Inside the agent's folder, or no diff (fix round w5, W4-N4).
+        // The top level is the agent's folder or above it, or no diff (fix
+        // round w5, W4-N4; the Git directory is not checked, on purpose).
         const top =
           (await execGit(git, NATIVE_TOPLEVEL_ARGS, options)).stdout.split(/\r?\n/)[0] ?? "";
         if (!top) throw new Error("git rev-parse printed no folder");
