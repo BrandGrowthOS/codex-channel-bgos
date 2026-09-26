@@ -467,7 +467,7 @@ describe("an owner Stop pauses the mission, never fails it (P6 stage 3)", () => 
     expect(adapter.missionLane.beginTurn).toHaveBeenCalledTimes(1);
   });
 
-  it("end to end: the Stop button in a goal chat holds the goal, THEN pauses the mission, and the Resume turn puts both back", async () => {
+  it("end to end: the Stop button in a goal chat holds the goal BEFORE the interrupt, THEN pauses the mission, and the Resume turn puts both back", async () => {
     const order: string[] = [];
     let reads = 0;
     const mission = (status: "active" | "paused", pausedReason: string | null) => ({
@@ -506,6 +506,7 @@ describe("an owner Stop pauses the mission, never fails it (P6 stage 3)", () => 
     };
     const goalLane = {
       owns: (chatId: number) => chatId === 20,
+      missionFor: (chatId: number) => (chatId === 20 ? 701 : null),
       // The Stop's own hold: true, the goal was running (D36).
       holdForStop: vi.fn(async (chatId: number) => {
         order.push(`goal held ${chatId}`);
@@ -538,7 +539,11 @@ describe("an owner Stop pauses the mission, never fails it (P6 stage 3)", () => 
         new Promise((resolve) => {
           callbacks.signal.addEventListener(
             "abort",
-            () => resolve({ error: "Turn interrupted", replyText: "", turnCompleted: false }),
+            () => {
+              // The host's own abort listener sends turn/interrupt here.
+              order.push("interrupt");
+              resolve({ error: "Turn interrupted", replyText: "", turnCompleted: false });
+            },
             { once: true },
           );
           started();
@@ -556,7 +561,11 @@ describe("an owner Stop pauses the mission, never fails it (P6 stage 3)", () => 
     await adapter.handleControl(frame);
     await turn;
 
+    // The goal is held BEFORE the interrupt (review F3); the unwind then
+    // pauses the mission as D10 says, holding the goal again on its way.
     expect(order).toEqual([
+      "goal held 20",
+      "interrupt",
       "stamp 701",
       "goal held 20",
       `PATCH pause 701 "${STOP_PAUSE_REASON}"`,
@@ -578,6 +587,8 @@ describe("an owner Stop pauses the mission, never fails it (P6 stage 3)", () => 
     await adapter.executeAndReply(10, 20, RESUME_TURN_TEXT, reply, owner);
 
     expect(order).toEqual([
+      "goal held 20",
+      "interrupt",
       "stamp 701",
       "goal held 20",
       `PATCH pause 701 "${STOP_PAUSE_REASON}"`,
@@ -679,16 +690,38 @@ describe("a Stop in a Keep working chat pauses the goal's mission (D35)", () => 
     expect(dispatch.adapter.missionLane.stoppedGoalByOwner).not.toHaveBeenCalled();
   });
 
-  it("a Stop that aborts a turn the owner asked for leaves the pause to that turn's unwind (D10)", async () => {
-    const { adapter, frame } = fixture(false, true);
+  it("a Stop that aborts a turn the owner asked for leaves the pause to that turn's unwind (D10), and holds the goal BEFORE the abort (review F3)", async () => {
+    const { adapter, controller, frame } = fixture(false, true);
     keepWorking(adapter, []);
+    const abortedAtHold: boolean[] = [];
+    adapter.missionLane.holdGoalBeforeInterrupt = vi.fn(async () => {
+      abortedAtHold.push(controller.signal.aborted);
+    });
     await adapter.handleControl(frame);
+    expect(adapter.missionLane.holdGoalBeforeInterrupt).toHaveBeenCalledWith(20, 701);
+    expect(abortedAtHold).toEqual([false]);
+    expect(abortCauseOf(controller.signal)).toBe("owner_stop");
     expect(adapter.missionLane.stoppedGoalByOwner).not.toHaveBeenCalled();
 
     const dispatch = dispatchFixture();
     keepWorking(dispatch.adapter, []);
+    const [running] = [...dispatch.adapter.turnControllers.get(20)!] as AbortController[];
+    const typedAtHold: boolean[] = [];
+    dispatch.adapter.missionLane.holdGoalBeforeInterrupt = vi.fn(async () => {
+      typedAtHold.push(running!.signal.aborted);
+    });
     await dispatch.adapter.codexDispatch(dispatch.args("stop"));
+    expect(dispatch.adapter.missionLane.holdGoalBeforeInterrupt).toHaveBeenCalledWith(20, 701);
+    expect(typedAtHold).toEqual([false]);
+    expect(abortCauseOf(running!.signal)).toBe("owner_stop");
     expect(dispatch.adapter.missionLane.stoppedGoalByOwner).not.toHaveBeenCalled();
+  });
+
+  it("a Stop with no goal holding the chat holds nothing before the abort", async () => {
+    const { adapter, frame } = fixture(false, true);
+    adapter.missionLane.holdGoalBeforeInterrupt = vi.fn(async () => {});
+    await adapter.handleControl(frame);
+    expect(adapter.missionLane.holdGoalBeforeInterrupt).not.toHaveBeenCalled();
   });
 
   it("/new in a Keep working chat pauses nothing", async () => {
@@ -992,12 +1025,14 @@ describe("a Stop resume gives the goal back only if it was running (D36)", () =>
       postVoiceRpcResult: vi.fn(async () => {}),
     };
     // The runtime's own goal for chat 20, as the app server keeps it.
-    const runtime = { status: "none" as string, starts: 0 };
+    // `log` is the order the runtime saw goal changes and interrupts in.
+    const runtime = { status: "none" as string, starts: 0, log: [] as string[] };
     const goalHost = {
       setGoal: vi.fn(
         async (_chatId: number, _objective: string | null, opts: { status?: string } = {}) => {
           runtime.status = opts.status ?? (runtime.status === "none" ? "active" : runtime.status);
           if (opts.status === "active") runtime.starts += 1;
+          runtime.log.push(`goal ${runtime.status}`);
           return null;
         },
       ),
@@ -1238,6 +1273,71 @@ describe("a Stop resume gives the goal back only if it was running (D36)", () =>
       expect(f.adapter.host.runTurn).toHaveBeenCalledTimes(1);
     });
   });
+
+  /**
+   * Review F3: the owner's own turn is running in a Keep working chat when
+   * they press Stop. Aborting that turn sends the runtime's interrupt at
+   * once (the host's abort listener), and the unwind held the goal only
+   * after its read of the chat's mission, so the goal stayed active across
+   * that round trip and the runtime could start a continuation turn after
+   * the interrupt. The goal is held first now, through both doors.
+   */
+  it.each([
+    ["the Stop button", (f: Fixture) => f.adapter.handleControl(f.frame)],
+    ["/stop", (f: Fixture) => f.stopTyped()],
+  ])(
+    "%s during a turn the owner asked for, in a Keep working chat: the goal is held BEFORE the interrupt, and the owner's next message gives it back",
+    async (_door, stop) => {
+      const f = realLanesFixture();
+      await f.armed();
+      let started!: () => void;
+      const running = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const answer = f.adapter.host.runTurn;
+      f.adapter.host.runTurn = vi.fn(
+        (_chatId: number, _input: unknown, callbacks: { signal: AbortSignal }) =>
+          new Promise((resolve) => {
+            callbacks.signal.addEventListener(
+              "abort",
+              () => {
+                // The host's own abort listener sends turn/interrupt here.
+                f.runtime.log.push("interrupt");
+                resolve({ error: "Stopped by you.", replyText: "", turnCompleted: false });
+              },
+              { once: true },
+            );
+            started();
+          }),
+      );
+      const reply = {
+        sendTyping: vi.fn(async () => {}),
+        finalizeTurn: vi.fn(async () => {}),
+        sendText: vi.fn(async () => {}),
+      };
+      const turn = f.adapter.executeAndReply(10, 20, "Ship the strip", reply, {
+        userId: "owner-1",
+        senderType: "user",
+        messageId: 4,
+      });
+      await running;
+      f.runtime.log.length = 0;
+
+      await stop(f);
+      await turn;
+
+      expect(f.runtime.log.indexOf("goal paused")).toBeGreaterThanOrEqual(0);
+      expect(f.runtime.log.indexOf("goal paused")).toBeLessThan(f.runtime.log.indexOf("interrupt"));
+      expect(f.state()).toEqual({ status: "paused", pausedReason: STOP_PAUSE_REASON });
+      expect(f.api.failMission).not.toHaveBeenCalled();
+
+      // The goal was running, so the owner's next message gives it back.
+      f.adapter.host.runTurn = answer;
+      await f.ownerWrites();
+      expect(f.state()).toEqual({ status: "active", pausedReason: null });
+      expect(f.runtime.status).toBe("active");
+    },
+  );
 
   /**
    * Review F2: the Stop lands during the LAST continuation turn under the

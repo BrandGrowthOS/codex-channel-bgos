@@ -807,6 +807,10 @@ export class CodexAdapter {
         // BEFORE the abort: an owner turn racing the unwind waits for the
         // pause, so a quick Resume ends active (P6 stage 3, D11).
         if (command.name === "stop") this.missionLane.noteStopRequested(chatId);
+        // A turn the owner asked for in a Keep working chat: the abort sends
+        // the interrupt at once, so the goal is held first (review F3).
+        if (command.name === "stop")
+          await this.holdGoalBeforeOwnerTurnStop(chatId, active);
         // /stop is the owner's Stop and pauses the chat's open mission; /new
         // ends the plan's mission, with its own words.
         for (const controller of active ?? [])
@@ -1266,8 +1270,9 @@ export class CodexAdapter {
    * result is not posted as a reply or an error.
    *
    * Null when there is nothing for this path to do: a turn the owner asked
-   * for was aborted (its own unwind pauses the mission), or no goal this
-   * daemon armed holds the chat (a Stop between turns pauses nothing).
+   * for was aborted (its own unwind pauses the mission, and
+   * holdGoalBeforeOwnerTurnStop held the goal before that abort), or no goal
+   * this daemon armed holds the chat (a Stop between turns pauses nothing).
    */
   private stopKeepWorking(
     chatId: number,
@@ -1280,6 +1285,27 @@ export class CodexAdapter {
     const missionId = this.goalLane.missionFor(chatId);
     if (missionId === null) return null;
     return this.missionLane.stoppedGoalByOwner({ chatId, assistantId, missionId });
+  }
+
+  /**
+   * An owner Stop about to abort a turn the owner asked for, in a chat Keep
+   * working holds (review F3, D35). The abort's listener sends the runtime's
+   * interrupt at once, and that turn's unwind reaches the goal only after its
+   * read of the chat's mission, so without this the goal stayed active across
+   * that round trip and the runtime could start a continuation turn after
+   * the interrupt, which the host adopts and nothing stops. The goal is held
+   * here, awaited, BEFORE the abort; the pause stays with the unwind (D10).
+   * Nothing to do with no such turn running, or with no goal holding the
+   * chat.
+   */
+  private async holdGoalBeforeOwnerTurnStop(
+    chatId: number,
+    active: Set<AbortController> | undefined,
+  ): Promise<void> {
+    if (!active?.size) return;
+    const missionId = this.goalLane.missionFor(chatId);
+    if (missionId === null) return;
+    await this.missionLane.holdGoalBeforeInterrupt(chatId, missionId);
   }
 
   /**
@@ -1583,11 +1609,16 @@ export class CodexAdapter {
           throw new Error("No chat to stop.");
         const active = this.turnControllers.get(chatId);
         const stoppedControl = this.nativeCommands.cancel(chatId);
-        const stoppedTurn = !!active?.size;
         this.generations.set(chatId, (this.generations.get(chatId) ?? 0) + 1);
         // BEFORE the abort: an owner turn racing the unwind waits for the
         // pause, so a quick Resume ends active (P6 stage 3, D11).
         this.missionLane.noteStopRequested(chatId);
+        // A turn the owner asked for in a Keep working chat: the abort below
+        // sends the interrupt at once, so the goal is held first (review F3).
+        await this.holdGoalBeforeOwnerTurnStop(chatId, active);
+        // Read after that hold: a turn that ended while it was taken has
+        // nothing to unwind, and the Keep working path below pauses instead.
+        const stoppedTurn = !!active?.size;
         // The owner's Stop: the unwind pauses the chat's open mission with
         // "Stopped by you" instead of failing it.
         for (const controller of active ?? []) abortWith(controller, "owner_stop");

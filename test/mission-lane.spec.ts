@@ -2347,4 +2347,74 @@ describe("MissionLane: an owner Stop pauses, never fails (P6 stage 3)", () => {
     expect(order.at(-1)).toBe("goal given back 701");
     expect(hits(/\/resume$/)).toHaveLength(0);
   });
+
+  /**
+   * Review F3: a Stop that aborts a turn the owner asked for, in a chat Keep
+   * working holds. The abort sends the interrupt at once, so the adapter has
+   * the goal held BEFORE it, here; the pause stays with the turn's unwind
+   * (D10). Recorded as a Stop hold not yet confirmed, as a failed pause is,
+   * so an unwind that pauses nothing never leaves the goal held for good.
+   */
+  it("holds the goal before the abort, and when the unwind pauses nothing the owner's next turn gives it back (review F3)", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const order: string[] = [];
+    const target = keepWorkingLane(order);
+    await checkChat(target);
+    const turn = startTurn(target, { assistantId: 7, chatId: 42, prompt: "Ship the strip" });
+    target.noteStopRequested(42);
+
+    await target.holdGoalBeforeInterrupt(42, 701);
+    expect(order).toEqual([`goal held 42 @${server.requests.length}`]);
+
+    // The unwind's read of the chat fails, so it pauses nothing.
+    server.stage("GET", "/api/v1/integrations/assistants/7/missions/active", 500, {
+      message: "temporarily unavailable",
+    });
+    await target.stoppedByOwner({ chatId: 42, turnToken: turn.turnToken, assistantId: 7 });
+    expect(hits(/\/pause$/)).toHaveLength(0);
+
+    // The owner's next turn: the mission is still active, and the goal the
+    // Stop held before the interrupt comes back, once.
+    stageActive(snapshot(701, "active", { keepWorking: true }));
+    await target.noteOwnerTurn(42, 7);
+    expect(order.at(-1)).toBe("goal given back 701");
+    const reads = hits(/\/missions\/active$/).length;
+    await target.noteOwnerTurn(42, 7);
+    expect(hits(/\/missions\/active$/)).toHaveLength(reads);
+    expect(order.filter((line) => line === "goal given back 701")).toHaveLength(1);
+  });
+
+  it("a resume of the mission ends that record: an owner's Resume from the Mission view is never followed by a second give back (review F3)", async () => {
+    const order: string[] = [];
+    const target = keepWorkingLane(order);
+    await checkChat(target);
+    const turn = startTurn(target, { assistantId: 7, chatId: 42, prompt: "Ship the strip" });
+    target.noteStopRequested(42);
+    await target.holdGoalBeforeInterrupt(42, 701);
+    stageActive(snapshot(701, "active", { keepWorking: true }));
+    stagePause(701);
+    await target.stoppedByOwner({ chatId: 42, turnToken: turn.turnToken, assistantId: 7 });
+    expect(hits(/\/missions\/701\/pause$/)).toHaveLength(1);
+
+    // The owner resumes it from the Mission view (the goal lane gives the
+    // goal back from that frame on its own), then writes.
+    target.noteResumed(701);
+    stageActive(snapshot(701, "active", { keepWorking: true }));
+    await target.noteOwnerTurn(42, 7);
+
+    expect(hits(/\/resume$/)).toHaveLength(0);
+    expect(order.filter((line) => line.startsWith("goal given back"))).toEqual([]);
+  });
+
+  it("holds nothing in a chat no goal holds", async () => {
+    const held: number[] = [];
+    const target = lane({
+      pauseGoalForChat: async (chatId) => {
+        held.push(chatId);
+      },
+    });
+    await target.holdGoalBeforeInterrupt(42, 701);
+    expect(held).toEqual([]);
+    expect(server.requests).toHaveLength(0);
+  });
 });

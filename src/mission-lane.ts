@@ -210,6 +210,13 @@ export class MissionLane {
 
   /** The owner resumed it. Writing may continue, starting with what was held. */
   noteResumed(missionId: number): void {
+    // A resume answers every Stop hold on this mission that was never
+    // confirmed (review F3): the goal lane gives the goal back from that
+    // resume itself, or keeps it held (D36), so the owner's next turn must
+    // not give it back a second time over whatever the owner did since.
+    for (const [chatId, unconfirmed] of this.stopUnconfirmedByChat) {
+      if (unconfirmed.missionId === missionId) this.stopUnconfirmedByChat.delete(chatId);
+    }
     if (!this.pausedMissions.delete(missionId)) return;
     for (const [chatId, state] of this.turnByChat) {
       if (state.missionId !== missionId || state.pendingSnapshot === null) continue;
@@ -369,6 +376,37 @@ export class MissionLane {
       }
     })();
     return { held, settled };
+  }
+
+  /**
+   * An owner Stop is about to abort a turn the owner asked for, in a chat
+   * Keep working holds (review F3, D35). The abort sends the runtime's
+   * interrupt at once, and that turn's unwind holds the goal only after its
+   * flush and its read of the chat's mission, so the native goal stayed
+   * active across that round trip and the runtime could start a
+   * continuation turn after the interrupt, which nothing then stopped. The
+   * adapter awaits this BEFORE the abort. The pause itself stays with the
+   * unwind (D10), which holds the goal again on its way, a no op.
+   *
+   * Recorded as a Stop hold not yet confirmed, as a failed pause is (review
+   * F2): an unwind that pauses nothing (its read failed, the turn was
+   * replaced) must not leave the goal held for good, so the owner's next
+   * turn gives it back if the mission is still active. A resume of the
+   * mission ends the record. Never throws.
+   */
+  async holdGoalBeforeInterrupt(chatId: number, missionId: number): Promise<void> {
+    if (!this.goalOwnsChat(chatId)) return;
+    try {
+      await this.pauseGoalForChat(chatId);
+    } catch (err) {
+      // The unwind tries again, after the interrupt, as it always did.
+      // eslint-disable-next-line no-console
+      console.warn(
+        `${LOG} goal hold before the interrupt failed chat=` + chatId + " err=" + errorText(err),
+      );
+      return;
+    }
+    this.stopUnconfirmedByChat.set(chatId, { missionId, goalHeld: true });
   }
 
   /**
