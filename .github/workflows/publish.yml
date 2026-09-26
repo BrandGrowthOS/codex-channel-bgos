@@ -88,10 +88,23 @@ jobs:
           # to that older version. The HOAI app steers only daemons at 0.15.0
           # or later, so until it is promoted Send now on a Codex agent is a
           # plain send.
+          # 0.16.0: adds no hold of its own either. It reports each chat's
+          # model and effort to HOAI and declares session_model_control, and
+          # an older backend answers the new report route with a 404 the
+          # daemon swallows and stores the token without reading it (P5
+          # stage 7, the model and effort row, stacked on 0.15.0). It is held
+          # only because it carries the holds of the releases before it,
+          # 0.14.0's and 0.15.0's included, so it is promoted only after
+          # 0.15.0 is on latest, never before or in the same step: npm
+          # dist-tag add points latest at whichever version ran last, so
+          # promoting an older version after 0.16.0 moves latest back to that
+          # older version. The HOAI app offers the model and effort row only
+          # to a daemon that declares session_model_control, so until it is
+          # promoted no Codex agent shows the row.
           # 0.13.0 is P2 stage 5's release, which merges first and brings its
           # own line here; merge order #12, #14, #15, P2 stage 5 (0.13.0),
-          # then 0.14.0, then 0.15.0.
-          HELD_FROM_LATEST="0.10.1 0.11.0 0.12.0 0.14.0 0.15.0"
+          # then 0.14.0, then 0.15.0, then 0.16.0.
+          HELD_FROM_LATEST="0.10.1 0.11.0 0.12.0 0.14.0 0.15.0 0.16.0"
           DIST_TAG=latest
           for held in $HELD_FROM_LATEST; do
             if [ "$CURRENT" = "$held" ]; then
@@ -135,6 +148,10 @@ jobs:
           if [ "$VERSION" = "0.15.0" ]; then
             echo "::warning::0.15.0 needs no backend of its own. It is promoted only after 0.14.0 is on latest, never before or in the same step. Until then the HOAI app keeps Send now on a Codex agent a plain send, because it steers only daemons at 0.15.0 or later."
             echo "::warning::npm points latest at whichever version was promoted last: promoting an older version after 0.15.0 moves latest back to that older version."
+          fi
+          if [ "$VERSION" = "0.16.0" ]; then
+            echo "::warning::0.16.0 needs no backend of its own. It is promoted only after 0.15.0 is on latest, never before or in the same step. Until then no Codex agent offers the model and effort row, because the HOAI app offers it only to a daemon that declares session_model_control."
+            echo "::warning::npm points latest at whichever version was promoted last: promoting an older version after 0.16.0 moves latest back to that older version."
           fi
           echo "Only once that reason is met, remove $VERSION from HELD_FROM_LATEST"
           echo "in this workflow and its HELD-FROM-LATEST line in src/interactions.ts,"
