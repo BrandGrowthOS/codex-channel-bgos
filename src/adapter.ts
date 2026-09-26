@@ -72,6 +72,7 @@ import type { BrowserRelayCredentials } from "./browser-mcp.js";
 import { HOAI_TOOLS, HoaiTools, type ToolContext } from "./hoai-tools.js";
 import { BGOS_AGENT_HINTS } from "./agent-hints.js";
 import { DECLARED_CAPABILITIES } from "./declared-capabilities.js";
+import { reportKey, type SessionReport } from "./session-report.js";
 import { retireOrphanedApprovals, unescapeButton } from "./interactions.js";
 import type { VoiceRpcFrame } from "./voice-rpc.js";
 import { VoiceRpcHandler } from "./hoai-shared/voice-rpc.js";
@@ -211,6 +212,20 @@ export class CodexAdapter {
    * did not move.
    */
   private readonly lastSessionModeByChat = new Map<number, string>();
+  /**
+   * The model and effort report last SENT per chat (P5 stage 7, C-26, S15),
+   * keyed by the value without its timestamp, so an unchanged value is not
+   * sent again: the backend's no op makes a repeat harmless, but not free (a
+   * request per turn per chat for nothing). Forgotten when a send fails, so
+   * the next source retries. Created on first use, like `stopLines`.
+   */
+  private lastSessionSettingsByChat?: Map<number, string>;
+  /**
+   * Per chat, the report on its way. Two reports for one chat leave in
+   * order, never racing: the backend's last write wins, so order is ours to
+   * keep. Another chat is never held behind this one.
+   */
+  private sessionReportChains?: Map<number, Promise<void>>;
   private readonly replyQueues = new Map<number, Promise<void>>();
   private readonly generations = new Map<number, number>();
   private readonly assistantToRoute = new Map<number, string>();
@@ -332,6 +347,11 @@ export class CodexAdapter {
       onGoalUpdate: (chatId, goal) => this.goalLane.handleGoalUpdate(chatId, goal),
       // And the continuation turn itself, which nobody here asked for.
       onAdoptedTurn: (chatId) => this.adoptGoalTurn(chatId),
+      // What each chat is really running, from the host's five sources (P5
+      // stage 7). The daemon reports ALWAYS and never reads the owner's
+      // switch: the app decides whether to draw the row.
+      onSessionSettings: (chatId, report) =>
+        this.noteSessionSettings(chatId, report),
     });
     // The third argument is not optional in practice: every mission the
     // typed tools write is stamped here, so a backend that sends no
@@ -665,6 +685,9 @@ export class CodexAdapter {
       void this.reportStoredPlanModes().then(() =>
         this.sweepMissedPlanAnswers(),
       );
+      // The model and effort of every chat the store holds one for, for the
+      // same reason and on the same terms: after identity, never awaited.
+      void this.reportStoredSessionSettings();
     } else if (!this.fatalLatched) {
       this.scheduleIdentityRetry(1000);
     }
@@ -2039,6 +2062,78 @@ export class CodexAdapter {
       // Forgetting here is what makes the next attempt retry rather than dedupe
       // against a report the backend never took.
       this.lastSessionModeByChat.delete(chatId);
+    }
+  }
+
+  /**
+   * The host learned what a chat is really running (P5 stage 7, C-26). Sent
+   * as the chat's own agent; a chat whose agent this daemon cannot name is
+   * skipped, because the route needs the assistant and a wrong one is
+   * refused. Never throws and never waits: the listener sits on the host's
+   * notification path.
+   */
+  private noteSessionSettings(chatId: number, report: SessionReport): void {
+    const assistantId = this.assistantForChat(chatId);
+    if (!assistantId) return;
+    void this.reportSessionSettings(assistantId, chatId, report);
+  }
+
+  /**
+   * Send one chat's model and effort report (S15): per chat in order, an
+   * unchanged value skipped unless `force`, a failure swallowed and its key
+   * forgotten so the next source retries. Resolves when this report has left
+   * (or been skipped), never rejects.
+   */
+  private reportSessionSettings(
+    assistantId: number,
+    chatId: number,
+    report: SessionReport,
+    options: { force?: boolean } = {},
+  ): Promise<void> {
+    const chains = (this.sessionReportChains ??= new Map());
+    const sent = (this.lastSessionSettingsByChat ??= new Map());
+    const key = reportKey(report);
+    const run = (chains.get(chatId) ?? Promise.resolve())
+      .then(async () => {
+        if (!options.force && sent.get(chatId) === key) return;
+        sent.set(chatId, key);
+        try {
+          await this.api.reportSessionSettings(assistantId, chatId, report);
+        } catch {
+          // A 404 from a backend without the route, or anything else: the
+          // row stays as it was. Forget the key only while it is still ours,
+          // so a newer report that already left is not re-sent for nothing.
+          if (sent.get(chatId) === key) sent.delete(chatId);
+        }
+      })
+      .catch(() => {});
+    chains.set(chatId, run);
+    void run.then(() => {
+      if (chains.get(chatId) === run) chains.delete(chatId);
+    });
+    return run;
+  }
+
+  /**
+   * At connect: report every chat the store holds a model for, one at a
+   * time, FORCED (S15). The dedupe map is empty at boot and the app may be
+   * drawing a value left by the daemon that died, so this process's value has
+   * to reach the row; the backend's no op keeps an unchanged one from
+   * writing anything. A chat with nothing stored has a value only the runtime
+   * knows, reported the next time its thread is started or resumed (S16).
+   * Never throws: a row the app cannot draw never costs a boot.
+   */
+  private async reportStoredSessionSettings(): Promise<void> {
+    try {
+      for (const [chatId, report] of this.host.storedSessionReports()) {
+        const assistantId = this.assistantForChat(chatId);
+        if (!assistantId) continue;
+        await this.reportSessionSettings(assistantId, chatId, report, {
+          force: true,
+        });
+      }
+    } catch {
+      // See the docblock.
     }
   }
 
