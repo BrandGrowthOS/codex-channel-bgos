@@ -17,7 +17,8 @@
  *   2. rev-parse --verify --quiet HEAD   (a first commit exists?)
  *   3. symbolic-ref --quiet --short HEAD, then rev-parse --short HEAD
  *   4. diff --numstat -z   (exact counts, past any drawing cap)
- *   5. diff   (the patch, with a/ and b/ pinned whatever the host config says)
+ *   5. diff   (the patch, with a/ and b/ and the short submodule format
+ *      pinned whatever the host config says)
  *   6. ls-files --others --exclude-standard -z   (new files, .gitignore kept)
  * Every command after the first runs in the ROOT the first one printed, so the
  * tracked paths (which `git diff` prints root relative) and the new file names
@@ -116,6 +117,14 @@ const GIT_NUMSTAT = [
  * diff.noprefix (headers with no prefix), diff.mnemonicPrefix (`c/` and `w/`)
  * or diff.srcPrefix and diff.dstPrefix, so the backend always reads the
  * `a/` and `b/` it splits on. Both flags are as old as Git 1.5.
+ *
+ * `--submodule=short` overrides a host with diff.submodule=log (a moved
+ * submodule written as `Submodule <path> <a>..<b>:` and its commit subjects)
+ * or diff.submodule=diff (the submodule's own files inline): neither starts
+ * with a `diff --git` line, so the backend's splitter would hang them on the
+ * previous file's section, or draw files the numstat never names. Short is
+ * Git's default: one `diff --git a/<path> b/<path>` section whose two lines
+ * are the old and the new `Subproject commit`.
  */
 const GIT_PATCH = [
   "-c",
@@ -129,6 +138,7 @@ const GIT_PATCH = [
   "--find-renames",
   "--src-prefix=a/",
   "--dst-prefix=b/",
+  "--submodule=short",
   "HEAD",
   "--",
 ] as const;

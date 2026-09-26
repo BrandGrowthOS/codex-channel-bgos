@@ -71,7 +71,10 @@ const NUMSTAT = [
 ];
 // --src-prefix and --dst-prefix: a host whose Git config sets diff.noprefix,
 // diff.mnemonicPrefix or diff.srcPrefix would otherwise write headers the
-// backend cannot read as a/ and b/ (lane B review, round 1).
+// backend cannot read as a/ and b/ (lane B review, round 1). --submodule=short:
+// a host with diff.submodule=log or =diff would otherwise write a moved
+// submodule as "Submodule ..." lines with no diff --git header, which the
+// backend's splitter would hang on the previous file (review round 1, C-R3).
 const PATCH = [
   "-c",
   "core.quotepath=false",
@@ -85,6 +88,7 @@ const PATCH = [
   "--find-renames",
   "--src-prefix=a/",
   "--dst-prefix=b/",
+  "--submodule=short",
   "HEAD",
   "--",
 ];
@@ -899,9 +903,9 @@ describe.skipIf(!gitOnPath)("against a real Git repository", () => {
   }
 
   /** One Git command run directly, with the collector's own environment. */
-  const runDirect = (argv: string[]) =>
+  const runDirect = (argv: string[], cwd = repo) =>
     spawnSync("git", argv, {
-      cwd: repo,
+      cwd,
       env: { ...env, GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" },
       windowsHide: true,
     });
@@ -1010,6 +1014,83 @@ describe.skipIf(!gitOnPath)("against a real Git repository", () => {
       expect(JSON.stringify(payload)).not.toContain(
         dirname(repo).replace(/\\/g, "/"),
       );
+    }, 30_000);
+  }
+
+  /** A second repository whose one change is a moved submodule: vendor/lib is
+   * an embedded repository recorded at its first commit, then moved on to a
+   * second one. Built once, on first use. */
+  let submodule: { outer: string; first: string; second: string } | null = null;
+  function submoduleRepo(): { outer: string; first: string; second: string } {
+    if (submodule) return submodule;
+    const outer = mkdtempSync(join(tmpdir(), "bgos-changes-submodule-"));
+    made.push(outer);
+    const inner = join(outer, "vendor", "lib");
+    const git = (cwd: string, ...args: string[]) => {
+      const run = spawnSync("git", args, { cwd, env, windowsHide: true });
+      if (run.status !== 0) {
+        throw new Error(`setup git ${args.join(" ")}: ${String(run.stderr)}`);
+      }
+      return String(run.stdout).trim();
+    };
+    git(outer, "-c", "init.defaultBranch=main", "init", "-q");
+    writeFileSync(join(outer, "a.txt"), "one\n");
+    mkdirSync(inner, { recursive: true });
+    git(inner, "-c", "init.defaultBranch=main", "init", "-q");
+    writeFileSync(join(inner, "lib.txt"), "v1\n");
+    git(inner, "add", "lib.txt");
+    git(inner, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "lib one");
+    const first = git(inner, "rev-parse", "HEAD");
+    git(outer, "add", "a.txt", "vendor/lib");
+    git(outer, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "first");
+    writeFileSync(join(inner, "lib.txt"), "v2\n");
+    git(inner, "-c", "commit.gpgsign=false", "commit", "-q", "-a", "-m", "lib two");
+    const second = git(inner, "rev-parse", "HEAD");
+    submodule = { outer, first, second };
+    return submodule;
+  }
+
+  for (const [label, config] of [
+    ["diff.submodule=log", "[diff]\n\tsubmodule = log\n"],
+    ["diff.submodule=diff", "[diff]\n\tsubmodule = diff\n"],
+  ] as Array<[string, string]>) {
+    it(`a host with ${label} set still writes a moved submodule as its own a/ b/ section`, async () => {
+      const { outer, first, second } = submoduleRepo();
+      writeFileSync(globalConfig, config);
+      // The control: the same patch without --submodule=short writes Git's
+      // "Submodule vendor/lib ..." line, which starts no diff --git section.
+      const control = runDirect(
+        PATCH.filter((word) => word !== "--submodule=short"),
+        outer,
+      );
+      expect(control.status).toBe(0);
+      const controlLines = String(control.stdout).split(/\r?\n/);
+      expect(
+        controlLines.some((line) => line.startsWith("Submodule vendor/lib ")),
+        String(control.stdout),
+      ).toBe(true);
+
+      const result = await collectChanges({
+        workdir: outer,
+        caps: readCaps({}),
+        runGit: createNodeRunGit(),
+        fs: nodeChangesFs,
+        env,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const lines = result.payload.patch.replace(/\r\n/g, "\n").split("\n");
+      // One section, named by its own diff --git line, and nothing the
+      // splitter would hang on another file.
+      expect(lines.filter((line) => line.startsWith("diff --git "))).toEqual([
+        "diff --git a/vendor/lib b/vendor/lib",
+      ]);
+      expect(lines.filter((line) => line.startsWith("Submodule "))).toEqual([]);
+      expect(lines).toContain("--- a/vendor/lib");
+      expect(lines).toContain("+++ b/vendor/lib");
+      expect(lines).toContain(`-Subproject commit ${first}`);
+      expect(lines).toContain(`+Subproject commit ${second}`);
+      expect(result.payload.numstat).toBe("1\t1\tvendor/lib\0");
     }, 30_000);
   }
 });
