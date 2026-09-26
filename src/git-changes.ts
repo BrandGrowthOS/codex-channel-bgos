@@ -12,7 +12,8 @@
  * before any client sees the answer (backend/src/changes-panel/changes-view.ts).
  * A mask here would also make the backend's "N lines hidden" count wrong.
  *
- * READ ONLY. Seven commands, in order, and nothing else:
+ * READ ONLY. Seven commands, in order, and nothing else (each after
+ * `-c core.fsmonitor=false`, see below):
  *   1. rev-parse --show-toplevel   (in the working folder; prints the root)
  *   2. rev-parse --verify --quiet HEAD   (a first commit exists?)
  *   3. symbolic-ref --quiet --short HEAD, then rev-parse --short HEAD
@@ -44,6 +45,18 @@
  * optional lock takers quiet. Nothing here stages, stashes, checks out, or
  * asks for status, and an agent's own `git add` or `git commit` never meets
  * an index.lock this read took.
+ *
+ * RUNS NO PROGRAM THE REPOSITORY NAMES FOR ITS FSMONITOR. core.fsmonitor in
+ * the repository's own config (which the agent writes) names a program Git
+ * runs whenever it reads the index: both diffs and ls-files ran one on Git
+ * 2.55.0.windows.3, the rev-parse and symbolic-ref reads did not (measured,
+ * fix round w4). So every command starts with `-c core.fsmonitor=false`,
+ * which Git documents as the fsmonitor off, in its program form and its
+ * built in daemon form alike (the program form is the one measured). The
+ * diffs already pass --no-ext-diff and --no-textconv, which keep out an
+ * external diff and a textconv program. A clean filter the repository names
+ * still runs on both diffs: no flag here stops it (measured, and left open
+ * in the fix round's record).
  *
  * GIT BY ITS ABSOLUTE PATH. `spawn("git", { cwd })` on Windows looks in the
  * child's working folder BEFORE PATH (libuv's search_path, which uv_spawn
@@ -123,13 +136,33 @@ export function readCaps(payload: unknown): ChangesCaps {
 // the commands
 // ---------------------------------------------------------------------------
 
-const GIT_TOPLEVEL = ["rev-parse", "--show-toplevel"] as const;
-const GIT_VERIFY_HEAD = ["rev-parse", "--verify", "--quiet", "HEAD"] as const;
-const GIT_BRANCH = ["symbolic-ref", "--quiet", "--short", "HEAD"] as const;
-const GIT_SHORT_HEAD = ["rev-parse", "--short", "HEAD"] as const;
-/** A porcelain diff that never refreshes the index (see the header). */
-const NO_INDEX_REFRESH = ["-c", "diff.autoRefreshIndex=false"] as const;
+/**
+ * First on EVERY command: a core.fsmonitor the repository's own config names
+ * is a program Git runs when it reads the index (see the header). Exported
+ * for the native /diff, which reads the same folder.
+ */
+export const NO_FSMONITOR = ["-c", "core.fsmonitor=false"] as const;
+const GIT_TOPLEVEL = [...NO_FSMONITOR, "rev-parse", "--show-toplevel"] as const;
+const GIT_VERIFY_HEAD = [
+  ...NO_FSMONITOR,
+  "rev-parse",
+  "--verify",
+  "--quiet",
+  "HEAD",
+] as const;
+const GIT_BRANCH = [
+  ...NO_FSMONITOR,
+  "symbolic-ref",
+  "--quiet",
+  "--short",
+  "HEAD",
+] as const;
+const GIT_SHORT_HEAD = [...NO_FSMONITOR, "rev-parse", "--short", "HEAD"] as const;
+/** A porcelain diff that never refreshes the index (see the header).
+ * Exported for the native /diff. */
+export const NO_INDEX_REFRESH = ["-c", "diff.autoRefreshIndex=false"] as const;
 const GIT_NUMSTAT = [
+  ...NO_FSMONITOR,
   "-c",
   "core.quotepath=false",
   ...NO_INDEX_REFRESH,
@@ -159,6 +192,7 @@ const GIT_NUMSTAT = [
  * The options are in spec 10.1 item 7's own order (fix round w4, F9).
  */
 const GIT_PATCH = [
+  ...NO_FSMONITOR,
   "-c",
   "core.quotepath=false",
   ...NO_INDEX_REFRESH,
@@ -174,7 +208,13 @@ const GIT_PATCH = [
   "HEAD",
   "--",
 ] as const;
-const GIT_UNTRACKED = ["ls-files", "--others", "--exclude-standard", "-z"] as const;
+const GIT_UNTRACKED = [
+  ...NO_FSMONITOR,
+  "ls-files",
+  "--others",
+  "--exclude-standard",
+  "-z",
+] as const;
 
 /** Variables that make Git read another repository or index, whatever
  * folder it runs in (see the header). */

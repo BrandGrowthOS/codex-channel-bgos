@@ -21,6 +21,7 @@ import { EventEmitter } from "node:events";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -51,15 +52,35 @@ import {
 // the commands, written out whole (never imported from the code under test)
 // ---------------------------------------------------------------------------
 
-const TOPLEVEL = ["rev-parse", "--show-toplevel"];
-const VERIFY_HEAD = ["rev-parse", "--verify", "--quiet", "HEAD"];
-const BRANCH = ["symbolic-ref", "--quiet", "--short", "HEAD"];
-const SHORT_HEAD = ["rev-parse", "--short", "HEAD"];
+// -c core.fsmonitor=false first on EVERY command: a core.fsmonitor the
+// repository's own config names is a program Git runs on a read (both diffs
+// and ls-files ran one on Git 2.55.0.windows.3), and the agent writes that
+// config (fix round w4, F1).
+const TOPLEVEL = ["-c", "core.fsmonitor=false", "rev-parse", "--show-toplevel"];
+const VERIFY_HEAD = [
+  "-c",
+  "core.fsmonitor=false",
+  "rev-parse",
+  "--verify",
+  "--quiet",
+  "HEAD",
+];
+const BRANCH = [
+  "-c",
+  "core.fsmonitor=false",
+  "symbolic-ref",
+  "--quiet",
+  "--short",
+  "HEAD",
+];
+const SHORT_HEAD = ["-c", "core.fsmonitor=false", "rev-parse", "--short", "HEAD"];
 // -c diff.autoRefreshIndex=false on both diffs: a porcelain `git diff` would
 // otherwise refresh .git/index (taking index.lock) when a tracked file has
 // only a stat change, and GIT_OPTIONAL_LOCKS=0 does not stop that path
 // (review round 1, C-R1).
 const NUMSTAT = [
+  "-c",
+  "core.fsmonitor=false",
   "-c",
   "core.quotepath=false",
   "-c",
@@ -82,6 +103,8 @@ const NUMSTAT = [
 // The options in spec 10.1 item 7's own order (fix round w4, F9).
 const PATCH = [
   "-c",
+  "core.fsmonitor=false",
+  "-c",
   "core.quotepath=false",
   "-c",
   "diff.autoRefreshIndex=false",
@@ -97,7 +120,14 @@ const PATCH = [
   "HEAD",
   "--",
 ];
-const UNTRACKED = ["ls-files", "--others", "--exclude-standard", "-z"];
+const UNTRACKED = [
+  "-c",
+  "core.fsmonitor=false",
+  "ls-files",
+  "--others",
+  "--exclude-standard",
+  "-z",
+];
 
 const key = (argv: readonly string[]) => argv.join(" ");
 
@@ -615,6 +645,12 @@ describe("collectChanges", () => {
           words.splice(0, words[0] === "-c" ? 2 : 1);
         }
         expect(READS, key(call.args)).toContain(words[0]);
+        // Every read turns off a fsmonitor the repository's config names,
+        // before the subcommand (fix round w4, F1).
+        expect(call.args.slice(0, 2), key(call.args)).toEqual([
+          "-c",
+          "core.fsmonitor=false",
+        ]);
         // A porcelain diff refreshes the index unless told not to.
         if (words[0] === "diff") {
           const at = call.args.indexOf("diff.autoRefreshIndex=false");
@@ -1415,6 +1451,12 @@ describe.skipIf(!gitOnPath)("against a real Git repository", () => {
     return at < 1 ? [...argv] : [...argv.slice(0, at - 1), ...argv.slice(at + 1)];
   };
 
+  /** The same argv without the `-c core.fsmonitor=false` pair (fix round w4). */
+  const withoutFsmonitor = (argv: string[]) => {
+    const at = argv.indexOf("core.fsmonitor=false");
+    return at < 1 ? [...argv] : [...argv.slice(0, at - 1), ...argv.slice(at + 1)];
+  };
+
   /** The same patch WITHOUT the two prefix flags: the control that proves
    * the host setting really bites on this Git. */
   const controlMinusLine = () => {
@@ -1662,6 +1704,72 @@ describe.skipIf(!gitOnPath)("against a real Git repository", () => {
       numstat: "1\t1\ta.txt\0",
       untracked: "",
       untrackedFiles: [],
+    });
+  }, 30_000);
+
+  // Fix round w4, F1: core.fsmonitor in a repository's own config names a
+  // program Git runs when it reads the index. The agent writes that config.
+  it("a repository whose core.fsmonitor names a program never has it run by a read (fix round w4, F1)", async () => {
+    writeFileSync(globalConfig, "");
+    const scratch = mkdtempSync(join(tmpdir(), "bgos-changes-fsmonitor-"));
+    made.push(scratch);
+    const outside = mkdtempSync(join(tmpdir(), "bgos-changes-fsmonitor-hook-"));
+    made.push(outside);
+    const git = (...args: string[]) => {
+      const run = spawnSync("git", args, { cwd: scratch, env, windowsHide: true });
+      if (run.status !== 0) {
+        throw new Error(`setup git ${args.join(" ")}: ${String(run.stderr)}`);
+      }
+    };
+    git("-c", "init.defaultBranch=main", "init", "-q");
+    writeFileSync(join(scratch, "a.txt"), "one\n");
+    git("add", "a.txt");
+    git("-c", "commit.gpgsign=false", "commit", "-q", "-m", "first");
+    writeFileSync(join(scratch, "a.txt"), "two\n");
+    writeFileSync(join(scratch, "new.txt"), "hello\n");
+    // The program: it writes a marker and fails, so Git falls back to its own
+    // scan and the read's output is unchanged whether it ran or not.
+    const marker = join(outside, "fsmonitor-ran.txt");
+    const hook = join(outside, "fsmonitor-hook.sh");
+    writeFileSync(
+      hook,
+      `#!/bin/sh\necho ran >> '${marker.replace(/\\/g, "/")}'\nexit 1\n`,
+    );
+    chmodSync(hook, 0o755);
+    git("config", "core.fsmonitor", hook.replace(/\\/g, "/"));
+
+    // The controls: each index read WITHOUT the pair, under the collector's
+    // own environment, runs the program on this Git. So the case can fail.
+    for (const argv of [NUMSTAT, PATCH, UNTRACKED]) {
+      rmSync(marker, { force: true });
+      const run = runDirect(withoutFsmonitor(argv), scratch);
+      expect(run.status, key(argv)).toBe(0);
+      expect(
+        existsSync(marker),
+        `control: ${key(withoutFsmonitor(argv))} runs the program`,
+      ).toBe(true);
+    }
+
+    rmSync(marker, { force: true });
+    const result = await collectChanges({
+      workdir: scratch,
+      caps: readCaps({}),
+      runGit: createNodeRunGit(),
+      fs: nodeChangesFs,
+      env,
+    });
+    expect(existsSync(marker), "the program the repository names never ran").toBe(
+      false,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.payload).toMatchObject({
+      state: "ok",
+      folder: basename(scratch),
+      branch: "main",
+      numstat: "1\t1\ta.txt\0",
+      untracked: "new.txt\0",
+      untrackedFiles: [{ path: "new.txt", bytes: 6, text: "hello\n" }],
     });
   }, 30_000);
 
