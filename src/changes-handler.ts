@@ -16,12 +16,16 @@
  *     ack: several daemons can share one pairing room, and an answer from the
  *     wrong one would win the race with the wrong folder.
  *  3. The last 256 ids are remembered: an id still running is ignored, an
- *     answered id gets the same answer again. Never forgotten in a `finally`,
- *     so the backend's re emit can never run Git twice. The answer ITSELF is
- *     kept for the newest 8 ids only: one answer can carry a 1 MB patch and 20
- *     new files, and the backend re emits once, 1.5 s after the frame, and
- *     waits 20 s at most, so an older id can never be waited on again. It is
- *     still remembered, and gets nothing.
+ *     answered id gets the same answer again while that answer is held.
+ *     Never forgotten in a `finally`, so the backend's re emit can never run
+ *     Git twice. The answer ITSELF is held for the backend's own hold only
+ *     (CHANGES_READ_TIMEOUT_MS, 20 s, changes-panel.service.ts) and for the
+ *     newest 8 ids only: one answer can carry a 1 MB patch and 20 new files,
+ *     and the backend re emits once, 1.5 s after the frame, takes the first
+ *     result and drops anything after its hold as late, so a copy kept longer
+ *     buys nothing and would stay in a daemon that runs for days (parity
+ *     round, D-R1). An id whose answer was let go is still remembered, and
+ *     gets nothing.
  *  4. The ack is best effort; a failed ack never stops the work.
  *  5. The work runs under the frame's budget (git-changes.ts): past it the
  *     answer is `too_slow`.
@@ -71,6 +75,11 @@ export interface ChangesHandlerDeps {
   collect?: ChangesCollect;
   log?: (message: string) => void;
   nowImpl?: () => number;
+  /**
+   * Runs `run` once, `ms` from now, without keeping the process alive. The
+   * default is an unref'd setTimeout; the tests inject their own clock.
+   */
+  schedule?: (run: () => void, ms: number) => void;
 }
 
 /** How long one result post may take (BgosApi.changesRpcResult). */
@@ -80,6 +89,12 @@ export const CHANGES_ACK_TIMEOUT_MS = 3_000;
 /** A retry is tried only if it can still land this long after the frame
  * arrived: inside the backend's 20 s hold, with room to spare. */
 export const CHANGES_RESULT_DEADLINE_MS = 18_000;
+/**
+ * How long a whole answer is held for a re sent id: the backend's own hold,
+ * CHANGES_READ_TIMEOUT_MS in changes-panel.service.ts. Past it the backend has
+ * given up on the frame and logs any answer as late.
+ */
+export const CHANGES_ANSWER_HOLD_MS = 20_000;
 
 const SEEN_LIMIT = 256;
 /** How many answers are kept whole for a re sent id (see rule 3). */
@@ -128,20 +143,27 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-type Seen =
-  | { state: "running" }
-  /** `result` is null once the answer fell out of the newest ANSWER_KEEP. */
-  | { state: "done"; result: ChangesResultBody | null };
+/** `result` is null once the answer was let go (its hold ran out, or it
+ * fell out of the newest ANSWER_KEEP). */
+type Answered = { state: "done"; result: ChangesResultBody | null };
+type Seen = { state: "running" } | Answered;
+
+function scheduleUnref(run: () => void, ms: number): void {
+  const timer = setTimeout(run, ms) as { unref?: () => unknown };
+  timer.unref?.();
+}
 
 /** Build the non throwing handler for pairing room `changes_rpc` frames. */
 export function createChangesHandler(deps: ChangesHandlerDeps) {
   const nowImpl = deps.nowImpl ?? Date.now;
+  const schedule = deps.schedule ?? scheduleUnref;
   const runGit = createNodeRunGit();
   const collect: ChangesCollect =
     deps.collect ??
     ((input) => collectChanges({ ...input, runGit, fs: nodeChangesFs }));
   const seen = new Map<string, Seen>();
-  const kept: string[] = [];
+  /** The entries still holding their answer, oldest first. */
+  let kept: Answered[] = [];
 
   const report = (message: string): void => {
     try {
@@ -160,17 +182,22 @@ export function createChangesHandler(deps: ChangesHandlerDeps) {
     }
   };
 
-  /** Remember an answer, keeping the body of the newest ANSWER_KEEP only. */
+  const letGo = (entry: Answered): void => {
+    entry.result = null;
+    kept = kept.filter((held) => held !== entry);
+  };
+
+  /** Remember an answer: the id for good (bounded), the body only for the
+   * backend's hold and only while it is among the newest ANSWER_KEEP. */
   const rememberAnswer = (rpcId: string, result: ChangesResultBody): void => {
-    remember(rpcId, { state: "done", result });
-    kept.push(rpcId);
+    const entry: Answered = { state: "done", result };
+    remember(rpcId, entry);
+    kept.push(entry);
     while (kept.length > ANSWER_KEEP) {
-      const dropped = kept.shift() as string;
-      const entry = seen.get(dropped);
-      if (entry?.state === "done") {
-        seen.set(dropped, { state: "done", result: null });
-      }
+      const oldest = kept.shift();
+      if (oldest) oldest.result = null;
     }
+    schedule(() => letGo(entry), CHANGES_ANSWER_HOLD_MS);
   };
 
   const answer = async (frame: ChangesRpcFrame): Promise<ChangesResultBody> => {

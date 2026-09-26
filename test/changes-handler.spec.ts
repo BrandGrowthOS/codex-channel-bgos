@@ -80,6 +80,12 @@ function harness(
     now?: () => number;
   } = {},
 ) {
+  // The clock for the answer hold: every timer the handler asks for is kept
+  // here and runs only when a case runs it (parity round, D-R1).
+  const timers: Array<{ run: () => void; ms: number }> = [];
+  const schedule = (run: () => void, ms: number) => {
+    timers.push({ run, ms });
+  };
   const events: string[] = [];
   const api = {
     changesRpcAck: vi.fn(async (rpcId: string) => {
@@ -102,8 +108,9 @@ function harness(
     collect,
     log: (message) => logs.push(message),
     nowImpl: options.now,
-  });
-  return { handle, api, collect, events, logs };
+    schedule,
+  } as Parameters<typeof createChangesHandler>[0]);
+  return { handle, api, collect, events, logs, timers };
 }
 
 describe("normalizeChangesRpc", () => {
@@ -280,6 +287,92 @@ describe("createChangesHandler", () => {
     expect(h.collect).toHaveBeenCalledTimes(10);
     expect(h.api.changesRpcResult).toHaveBeenCalledTimes(11);
     expect(h.api.changesRpcResult.mock.calls[10]).toEqual(["rpc-3", OK_BODY]);
+  });
+
+  // Parity round, D-R1 (lane D's review): the answer is held only for the
+  // backend's own hold. The backend re emits once, 1.5 s after the frame,
+  // takes the first result, and gives up at CHANGES_READ_TIMEOUT_MS (20 s,
+  // backend/src/changes-panel/changes-panel.service.ts); anything later is
+  // logged as a late result and dropped. A copy kept past that buys nothing,
+  // and the newest 8 would otherwise stay in a daemon that runs for days.
+  it("keeps a whole answer for the backend's 20 s hold, then lets it go: a later re send runs nothing and posts nothing", async () => {
+    const h = harness();
+    await h.handle(frame());
+    // The re emit inside the hold: the same answer again, Git not run again.
+    await h.handle(frame());
+    expect(h.collect).toHaveBeenCalledTimes(1);
+    expect(h.api.changesRpcResult).toHaveBeenCalledTimes(2);
+    expect(h.api.changesRpcResult.mock.calls[1]).toEqual(["rpc-1", OK_BODY]);
+
+    // The hold runs out.
+    for (const timer of h.timers.splice(0)) timer.run();
+    await h.handle(frame());
+    expect(
+      h.api.changesRpcResult,
+      "a re send past the hold posts nothing",
+    ).toHaveBeenCalledTimes(2);
+    expect(
+      h.collect,
+      "Git never runs twice, even after the answer is let go",
+    ).toHaveBeenCalledTimes(1);
+    expect(h.events).toEqual(["ack:rpc-1", "result:rpc-1", "result:rpc-1"]);
+  });
+
+  it("the hold is the backend's own 20 s, one timer per answer, and every answer is held, a failure too", async () => {
+    const h = harness();
+    await h.handle(frame({ rpcId: "rpc-ok" }));
+    await h.handle(frame({ rpcId: "rpc-op", op: "stage" }));
+    expect(h.timers.map((timer) => timer.ms)).toEqual([20_000, 20_000]);
+
+    // Only the answer whose hold ran out is let go.
+    h.timers[0]!.run();
+    await h.handle(frame({ rpcId: "rpc-ok" }));
+    await h.handle(frame({ rpcId: "rpc-op", op: "stage" }));
+    const posted = h.api.changesRpcResult.mock.calls.map((call) => call[0]);
+    expect(posted, "only the answer whose hold ran out is let go").toEqual([
+      "rpc-ok",
+      "rpc-op",
+      "rpc-op",
+    ]);
+    expect(h.collect).toHaveBeenCalledTimes(1);
+  });
+
+  it("with no clock injected the hold is a real 20 s timer that never keeps the daemon alive", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    try {
+      const api = {
+        changesRpcAck: vi.fn(async () => ({})),
+        changesRpcResult: vi.fn(async () => ({})),
+      };
+      const collect = vi.fn(async () => OK_BODY);
+      const handle = createChangesHandler({
+        api,
+        workdir: "/home/owner/billing-export",
+        owns: () => true,
+        collect,
+      });
+      await handle(frame());
+      const holds = setTimeoutSpy.mock.calls
+        .map((call, index) => ({ ms: call[1], timer: setTimeoutSpy.mock.results[index]!.value }))
+        .filter((entry) => entry.ms === 20_000);
+      expect(holds).toHaveLength(1);
+      expect(
+        (holds[0]!.timer as { hasRef(): boolean }).hasRef(),
+        "the hold timer is unref'd",
+      ).toBe(false);
+
+      vi.advanceTimersByTime(19_999);
+      await handle(frame());
+      expect(api.changesRpcResult).toHaveBeenCalledTimes(2);
+      vi.advanceTimersByTime(1);
+      await handle(frame());
+      expect(api.changesRpcResult).toHaveBeenCalledTimes(2);
+      expect(collect).toHaveBeenCalledTimes(1);
+    } finally {
+      setTimeoutSpy.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it("a failed ack does not stop the work", async () => {
