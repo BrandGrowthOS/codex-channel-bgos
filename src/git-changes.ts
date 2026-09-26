@@ -48,6 +48,14 @@
  * asks for status, and an agent's own `git add` or `git commit` never meets
  * an index.lock this read took.
  *
+ * NEVER FETCHES. In a partial clone (one made with --filter), a diff that
+ * needs a blob the clone never downloaded fetches it from the promisor remote
+ * on demand: that runs the programs the repository's config names for the
+ * remote (its upload-pack, its ssh command) and can hang on the network.
+ * Every command runs with GIT_NO_LAZY_FETCH=1, so such a read fails instead:
+ * both diffs exit 128 and the answer is read_failed (measured with a file://
+ * promisor on Git 2.55.0.windows.3, fix round w5, W4-N1).
+ *
  * RUNS NO PROGRAM THE REPOSITORY NAMES FOR ITS FSMONITOR. core.fsmonitor in
  * the repository's own config (which the agent writes) names a program Git
  * runs whenever it reads the index: both diffs and ls-files ran one on Git
@@ -235,11 +243,17 @@ const OVERRIDE_NAMES: ReadonlySet<string> = new Set(REPOSITORY_OVERRIDES);
 
 /**
  * The environment Git gets: a COPY of the daemon's, with the repository
- * overrides dropped and the three read settings set. Windows reads
+ * overrides dropped and the four read settings set. Windows reads
  * environment names case blind, so there a key in ANY spelling whose capitals
  * are one of the eight is dropped (Git_Dir reached Git there, measured in fix
  * round w4); elsewhere another spelling is another variable, which Git never
  * reads, and it passes through. Exported for the native /diff.
+ *
+ * GIT_NO_LAZY_FETCH=1: in a partial clone a diff that needs a blob the clone
+ * never downloaded fetches it from the promisor remote, which runs the
+ * programs the repository's config names for that remote and can hang on the
+ * network (measured, fix round w5, W4-N1). The variable, not the
+ * `--no-lazy-fetch` flag, which an older Git refuses as an unknown option.
  */
 export function gitReadEnv(
   base: Record<string, string | undefined>,
@@ -256,6 +270,7 @@ export function gitReadEnv(
   env.GIT_OPTIONAL_LOCKS = "0";
   env.GIT_TERMINAL_PROMPT = "0";
   env.LC_ALL = "C";
+  env.GIT_NO_LAZY_FETCH = "1";
   return env;
 }
 

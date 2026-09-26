@@ -549,6 +549,8 @@ describe("collectChanges", () => {
       expect(call.env.GIT_OPTIONAL_LOCKS, key(call.args)).toBe("0");
       expect(call.env.GIT_TERMINAL_PROMPT, key(call.args)).toBe("0");
       expect(call.env.LC_ALL, key(call.args)).toBe("C");
+      // No read starts a fetch from a promisor remote (fix round w5, W4-N1).
+      expect(call.env.GIT_NO_LAZY_FETCH, key(call.args)).toBe("1");
     }
     // The three raw reads carry the frame's own caps.
     expect(calls[4]!.maxBytes).toBe(262_144);
@@ -595,6 +597,9 @@ describe("collectChanges", () => {
       GIT_ALTERNATE_OBJECT_DIRECTORIES: "/home/owner/shared/objects",
       GIT_NAMESPACE: "elsewhere",
       GIT_PREFIX: "services/",
+      // A daemon started with lazy fetching on still reads with it off
+      // (fix round w5, W4-N1).
+      GIT_NO_LAZY_FETCH: "0",
     };
     const given = { ...daemonEnv };
     const { runGit, calls } = fakeGit(okScript());
@@ -615,6 +620,7 @@ describe("collectChanges", () => {
         GIT_OPTIONAL_LOCKS: "0",
         GIT_TERMINAL_PROMPT: "0",
         LC_ALL: "C",
+        GIT_NO_LAZY_FETCH: "1",
       });
     }
     expect(daemonEnv, "the daemon's own environment is left as it was").toEqual(
@@ -642,7 +648,12 @@ describe("collectChanges", () => {
       ...spelled,
     };
     const given = { ...daemonEnv };
-    const settings = { GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" };
+    const settings = {
+      GIT_OPTIONAL_LOCKS: "0",
+      GIT_TERMINAL_PROMPT: "0",
+      LC_ALL: "C",
+      GIT_NO_LAZY_FETCH: "1",
+    };
     for (const [platform, expected] of [
       [
         "win32",
@@ -1973,6 +1984,127 @@ describe.skipIf(!gitOnPath)("against a real Git repository", () => {
       untrackedFiles: [{ path: "new.txt", bytes: 6, text: "hello\n" }],
     });
   }, 30_000);
+
+  /** The source a partial clone fetches from: one commit (a.txt, sub/keep.txt)
+   * in a repository that serves filtered clones. Built once, on first use. */
+  let promisorSource = "";
+
+  /**
+   * A fresh partial clone (fix round w5, W4-N1). Its promisor remote is a
+   * file:// URL to promisorSource, it holds HEAD's trees and no blobs, its
+   * index is read from HEAD (so it has no stat data), a.txt is edited and
+   * sub/keep.txt is as in HEAD. A diff then needs a.txt's HEAD blob, which is
+   * missing, and Git fetches it from the promisor on demand. That fetch runs
+   * the upload-pack program the clone's OWN config names
+   * (remote.origin.uploadpack): here a script outside the clone that writes
+   * a marker and then runs the real one. Fresh per call, because a fetch
+   * fills the blob in.
+   */
+  function partialClone(): {
+    clone: string;
+    marker: string;
+    missing: () => string[];
+  } {
+    const fwd = (path: string) => path.replace(/\\/g, "/");
+    const setup = (cwd: string, ...args: string[]) => {
+      const run = spawnSync("git", args, { cwd, env, windowsHide: true });
+      if (run.status !== 0) {
+        throw new Error(`setup git ${args.join(" ")}: ${String(run.stderr)}`);
+      }
+    };
+    if (!promisorSource) {
+      const source = mkdtempSync(join(tmpdir(), "bgos-changes-promisor-src-"));
+      made.push(source);
+      setup(source, "-c", "init.defaultBranch=main", "init", "-q");
+      mkdirSync(join(source, "sub"));
+      writeFileSync(join(source, "a.txt"), "one\n");
+      writeFileSync(join(source, "sub", "keep.txt"), "keep\n");
+      setup(source, "add", "a.txt", "sub/keep.txt");
+      setup(source, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "first");
+      setup(source, "config", "uploadpack.allowFilter", "true");
+      setup(source, "config", "uploadpack.allowAnySHA1InWant", "true");
+      promisorSource = source;
+    }
+    const outside = mkdtempSync(join(tmpdir(), "bgos-changes-promisor-hook-"));
+    made.push(outside);
+    const marker = join(outside, "upload-pack-ran.txt");
+    const wrapper = join(outside, "upload-pack.sh");
+    writeFileSync(
+      wrapper,
+      `#!/bin/sh\necho ran >> '${fwd(marker)}'\nexec git-upload-pack "$@"\n`,
+    );
+    chmodSync(wrapper, 0o755);
+    const clone = mkdtempSync(join(tmpdir(), "bgos-changes-partial-"));
+    made.push(clone);
+    setup(
+      tmpdir(),
+      "clone",
+      "-q",
+      "--filter=blob:none",
+      "--no-checkout",
+      `file:///${fwd(promisorSource).replace(/^\/+/, "")}`,
+      clone,
+    );
+    setup(clone, "read-tree", "HEAD");
+    writeFileSync(join(clone, "a.txt"), "two\n");
+    mkdirSync(join(clone, "sub"));
+    writeFileSync(join(clone, "sub", "keep.txt"), "keep\n");
+    setup(clone, "config", "remote.origin.uploadpack", fwd(wrapper));
+    /** The objects HEAD names that the clone does not hold; listed without
+     * fetching any (--missing=print, and the variable besides). */
+    const missing = () =>
+      String(
+        spawnSync("git", ["rev-list", "--objects", "--missing=print", "HEAD"], {
+          cwd: clone,
+          env: { ...env, GIT_NO_LAZY_FETCH: "1" },
+          windowsHide: true,
+        }).stdout,
+      )
+        .split(/\r?\n/)
+        .filter((line) => line.startsWith("?"));
+    return { clone, marker, missing };
+  }
+
+  // Fix round w5, W4-N1: in a partial clone a read that needs a blob the
+  // clone never downloaded fetches it from the promisor remote, which runs
+  // programs the repository's config names and can hang on the network.
+  it("a partial clone's missing blob is never fetched by a read: no read starts a fetch from the promisor remote (fix round w5, W4-N1)", async () => {
+    writeFileSync(globalConfig, "");
+    // The controls: numstat and the patch, each run directly on a fresh clone
+    // under the read environment WITHOUT the variable, start a fetch on this
+    // Git: the program the clone names ran and the blobs arrived. So the case
+    // below can fail.
+    for (const argv of [NUMSTAT, PATCH]) {
+      const control = partialClone();
+      expect(control.missing().length, `control: ${key(argv)} starts with blobs missing`).toBeGreaterThan(0);
+      const run = runDirect(argv, control.clone);
+      expect(run.status, key(argv)).toBe(0);
+      expect(existsSync(control.marker), `control: ${key(argv)} started a fetch`).toBe(true);
+      expect(control.missing(), `control: ${key(argv)} fetched the blobs`).toEqual([]);
+    }
+
+    const subject = partialClone();
+    const before = subject.missing();
+    expect(before.length).toBeGreaterThan(0);
+    const outcome = await collectChanges({
+      workdir: subject.clone,
+      caps: readCaps({}),
+      runGit: createNodeRunGit(),
+      fs: nodeChangesFs,
+      env,
+    }).then(
+      (answer) => answer,
+      (error: unknown) => error,
+    );
+    expect(existsSync(subject.marker), "no read started a fetch").toBe(false);
+    expect(subject.missing(), "the missing blobs are still missing").toEqual(before);
+    // Without the blob Git cannot diff, and says so: a failed read, whose
+    // summary alone travels (review round 1, C-R4).
+    expect(outcome).toMatchObject({
+      name: "GitCommandError",
+      summary: "git diff exited 128",
+    });
+  }, 60_000);
 
   /** A second repository, elsewhere: its own branch, its own commit and its
    * own index, holding only b.txt. Built once, on first use. */

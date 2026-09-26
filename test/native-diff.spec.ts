@@ -138,6 +138,8 @@ describe("/diff (fix round w4, R-3)", () => {
     expect(env.GIT_OPTIONAL_LOCKS).toBe("0");
     expect(env.GIT_TERMINAL_PROMPT).toBe("0");
     expect(env.LC_ALL).toBe("C");
+    // No read starts a fetch from a promisor remote (fix round w5, W4-N1).
+    expect(env.GIT_NO_LAZY_FETCH).toBe("1");
     // Looked up once, with the environment Git itself gets.
     expect(lookups).toEqual([env]);
     expect(r.said()).toEqual([
@@ -354,6 +356,89 @@ describe.skipIf(!gitOnPath)("/diff against a real Git repository (fix round w4, 
     expect(posted).toContain("diff --git a/a.txt b/a.txt");
     expect(posted.filter((line) => line.includes("keep.txt"))).toEqual([]);
   }, 30_000);
+
+  /**
+   * A fresh partial clone (fix round w5, W4-N1): its promisor remote is a
+   * file:// URL to a source repository that serves filtered clones, it holds
+   * HEAD's trees and no blobs, its index is read from HEAD (no stat data),
+   * a.txt is edited and sub/keep.txt is as in HEAD. A diff then needs a.txt's
+   * HEAD blob, which is missing, and Git fetches it on demand; that fetch
+   * runs the upload-pack program the clone's OWN config names, here a script
+   * outside it that writes a marker and then runs the real one.
+   */
+  function partialClone(): { clone: string; marker: string; missing: () => string[] } {
+    const fwd = (path: string) => path.replace(/\\/g, "/");
+    const setup = (cwd: string, ...args: string[]) => {
+      const run = spawnSync("git", args, { cwd, env: setupEnv, windowsHide: true });
+      if (run.status !== 0) {
+        throw new Error(`setup git ${args.join(" ")}: ${String(run.stderr)}`);
+      }
+    };
+    const source = scratch("bgos-native-diff-promisor-src-");
+    setup(source, "-c", "init.defaultBranch=main", "init", "-q");
+    mkdirSync(join(source, "sub"));
+    writeFileSync(join(source, "a.txt"), "one\n");
+    writeFileSync(join(source, "sub", "keep.txt"), "keep\n");
+    setup(source, "add", "a.txt", "sub/keep.txt");
+    setup(source, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "first");
+    setup(source, "config", "uploadpack.allowFilter", "true");
+    setup(source, "config", "uploadpack.allowAnySHA1InWant", "true");
+    const outside = scratch("bgos-native-diff-promisor-hook-");
+    const marker = join(outside, "upload-pack-ran.txt");
+    const wrapper = join(outside, "upload-pack.sh");
+    writeFileSync(
+      wrapper,
+      `#!/bin/sh\necho ran >> '${fwd(marker)}'\nexec git-upload-pack "$@"\n`,
+    );
+    chmodSync(wrapper, 0o755);
+    const clone = scratch("bgos-native-diff-partial-");
+    setup(
+      tmpdir(),
+      "clone",
+      "-q",
+      "--filter=blob:none",
+      "--no-checkout",
+      `file:///${fwd(source).replace(/^\/+/, "")}`,
+      clone,
+    );
+    setup(clone, "read-tree", "HEAD");
+    writeFileSync(join(clone, "a.txt"), "two\n");
+    mkdirSync(join(clone, "sub"));
+    writeFileSync(join(clone, "sub", "keep.txt"), "keep\n");
+    setup(clone, "config", "remote.origin.uploadpack", fwd(wrapper));
+    const missing = () =>
+      String(
+        spawnSync("git", ["rev-list", "--objects", "--missing=print", "HEAD"], {
+          cwd: clone,
+          env: { ...setupEnv, GIT_NO_LAZY_FETCH: "1" },
+          windowsHide: true,
+        }).stdout,
+      )
+        .split(/\r?\n/)
+        .filter((line) => line.startsWith("?"));
+    return { clone, marker, missing };
+  }
+
+  it("a partial clone's missing blob is never fetched by /diff (fix round w5, W4-N1)", async () => {
+    // The control: the same diff under the read environment WITHOUT the
+    // variable starts a fetch on this Git (the program ran, the blobs came).
+    const control = partialClone();
+    expect(control.missing().length, "control: starts with blobs missing").toBeGreaterThan(0);
+    const run = spawnSync("git", DIFF, { cwd: control.clone, env: readEnv(), windowsHide: true });
+    expect(run.status).toBe(0);
+    expect(existsSync(control.marker), "control: the diff started a fetch").toBe(true);
+    expect(control.missing(), "control: the diff fetched the blobs").toEqual([]);
+
+    const subject = partialClone();
+    const before = subject.missing();
+    expect(before.length).toBeGreaterThan(0);
+    const r = router(subject.clone);
+    await r.diff();
+    expect(existsSync(subject.marker), "/diff started no fetch").toBe(false);
+    expect(subject.missing(), "the missing blobs are still missing").toEqual(before);
+    // Without the blob Git cannot diff: the existing "could not be loaded".
+    expect(r.said()).toEqual([NOT_LOADED]);
+  }, 60_000);
 
   const variables =
     process.platform === "win32" ? ["GIT_DIR", "Git_Dir"] : ["GIT_DIR"];
