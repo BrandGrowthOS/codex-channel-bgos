@@ -25,6 +25,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   utimesSync,
@@ -214,11 +215,18 @@ interface MemFile {
 
 function memoryFs(files: Record<string, MemFile>) {
   const lstatCalls: string[] = [];
+  /** The files whose BYTES were read, by any route. */
   const readCalls: string[] = [];
-  /** The maxBytes of each readAtMost. */
+  /** The maxBytes of each byte read. */
   const askedFor: number[] = [];
-  /** Calls of the old whole name read (readPrefix): a TRAP, it answers the
-   * way a plain open would, and must never be used. */
+  /** Every step on a handle, in order: `open`, `stat`, `read <maxBytes>`,
+   * `close` (fix round w4, F7), and any call of the old reads. */
+  const events: string[] = [];
+  /** Calls of the OLD reads, each a TRAP that must never be used: the whole
+   * name read (readPrefix, before the parity round) and `readAtMost` (before
+   * fix round w4), which answers the way the old node read did: it opened,
+   * fstat'd and read the bytes of any regular file, before its caller could
+   * compare the file id. */
   const trapCalls: string[] = [];
   const names = Object.keys(files);
   const inoOf = (path: string) => files[path]?.ino ?? 1_000 + names.indexOf(path);
@@ -236,6 +244,12 @@ function memoryFs(files: Record<string, MemFile>) {
       ino: inoOf(path),
       isFile: file.symlink !== true && file.dir !== true,
     };
+  const statOf = (handle: ReturnType<typeof opened>) => ({
+    isFile: () => handle.isFile,
+    size: handle.data?.length ?? 0,
+    ino: handle.ino,
+    dev: 7,
+  });
   const fs = {
     async lstat(path: string) {
       lstatCalls.push(path);
@@ -247,22 +261,38 @@ function memoryFs(files: Record<string, MemFile>) {
         dev: 7,
       };
     },
-    async readAtMost(path: string, maxBytes: number) {
-      readCalls.push(path);
-      askedFor.push(maxBytes);
+    async open(path: string) {
+      events.push(`open ${path}`);
       const handle = opened(path, at(path));
-      if (!handle.data) throw new Error(`cannot read ${path}`);
       return {
-        stat: {
-          isFile: () => handle.isFile,
-          size: handle.data.length,
-          ino: handle.ino,
-          dev: 7,
+        async stat() {
+          events.push(`stat ${path}`);
+          return statOf(handle);
         },
-        data: handle.data.subarray(0, maxBytes),
+        async read(maxBytes: number) {
+          events.push(`read ${path} ${maxBytes}`);
+          readCalls.push(path);
+          askedFor.push(maxBytes);
+          if (!handle.data) throw new Error(`cannot read ${path}`);
+          return handle.data.subarray(0, maxBytes);
+        },
+        async close() {
+          events.push(`close ${path}`);
+        },
       };
     },
+    async readAtMost(path: string, maxBytes: number) {
+      events.push(`readAtMost ${path} ${maxBytes}`);
+      trapCalls.push(path);
+      const handle = opened(path, at(path));
+      if (!handle.data) throw new Error(`cannot read ${path}`);
+      if (!handle.isFile) return { stat: statOf(handle), data: new Uint8Array(0) };
+      readCalls.push(path);
+      askedFor.push(maxBytes);
+      return { stat: statOf(handle), data: handle.data.subarray(0, maxBytes) };
+    },
     async readPrefix(path: string, limit: number) {
+      events.push(`readPrefix ${path} ${limit}`);
       readCalls.push(path);
       trapCalls.push(path);
       const handle = opened(path, at(path));
@@ -270,7 +300,7 @@ function memoryFs(files: Record<string, MemFile>) {
       return handle.data.subarray(0, limit);
     },
   } as unknown as ChangesFs;
-  return { fs, lstatCalls, readCalls, askedFor, trapCalls };
+  return { fs, lstatCalls, readCalls, askedFor, events, trapCalls };
 }
 
 const PATCH_TEXT =
@@ -1074,13 +1104,15 @@ describe("collectChanges", () => {
   // the same NAME can reach another file. The read is one handle, at most the
   // text cap and one byte, and only while it is still the regular file the
   // lstat saw (Windows has no O_NOFOLLOW, so the file id is what tells).
-  it("a file that changes between its check and its read is read through one handle, never past the text cap, and never through a name swapped in", async () => {
+  // Fix round w4, F7: the open handle's kind and id are checked BEFORE any
+  // byte is read, so a swapped name is never read at all, not only never sent.
+  it("a file that changes between its check and its read is read through one handle, never past the text cap, and never through a name swapped in: the handle is checked before any byte is read", async () => {
     const names = ["grows.log", "swapped.txt", "fifo", "steady.md"];
     const forty = Buffer.alloc(40, 0x61);
     const { runGit } = fakeGit(
       okScript({ [key(UNTRACKED)]: { stdout: names.join("\0") + "\0" } }),
     );
-    const { fs, askedFor, trapCalls } = memoryFs({
+    const { fs, askedFor, events, readCalls, trapCalls } = memoryFs({
       // 40 bytes at the lstat, 500,000 by the read: the same file, grown.
       [`${ROOT}/grows.log`]: {
         data: forty,
@@ -1121,13 +1153,120 @@ describe("collectChanges", () => {
       { path: "fifo", bytes: 40 },
       { path: "steady.md", bytes: 7, text: "steady\n" },
     ]);
-    expect(trapCalls, "no whole name read").toEqual([]);
+    expect(readCalls, "no byte of the swapped name or the device is read").toEqual([
+      `${ROOT}/grows.log`,
+      `${ROOT}/steady.md`,
+    ]);
+    // Each file: one handle, its kind and id first, bytes only from the same
+    // regular file, and the handle closed. The swapped name and the device
+    // are opened and checked, and not one byte of either is read.
+    expect(
+      events.map((line) => line.replace(`${ROOT}/`, "")),
+      "the steps on each handle, in order",
+    ).toEqual([
+      "open grows.log",
+      "stat grows.log",
+      "read grows.log 65537",
+      "close grows.log",
+      "open swapped.txt",
+      "stat swapped.txt",
+      "close swapped.txt",
+      "open fifo",
+      "stat fifo",
+      "close fifo",
+      "open steady.md",
+      "stat steady.md",
+      "read steady.md 65537",
+      "close steady.md",
+    ]);
+    expect(trapCalls, "no old read by name").toEqual([]);
     expect(askedFor, "each read asks for the text cap and one byte, no more").toEqual([
-      65_537, 65_537, 65_537, 65_537,
+      65_537, 65_537,
     ]);
   });
 
-  it("the node read opens one handle and reads at most what it is asked for, from the same file lstat saw", async () => {
+  // Fix round w4, F7, on the real file system: a name swapped for another
+  // file after its lstat is opened, checked and never read.
+  it("a real file swapped for another after its lstat is never read: the open handle's id differs, and no byte of it is read", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "bgos-changes-swap-"));
+    try {
+      const root = dir.replace(/\\/g, "/");
+      writeFileSync(join(dir, "swapped.txt"), "the file Git listed\n");
+      writeFileSync(join(dir, "steady.md"), "steady\n");
+      writeFileSync(join(dir, "other.txt"), "another file moved into its name\n");
+      const real = nodeChangesFs as unknown as {
+        lstat(path: string): Promise<{ ino: number; dev: number }>;
+        open(path: string): Promise<{
+          stat(): Promise<unknown>;
+          read(maxBytes: number): Promise<Uint8Array>;
+          close(): Promise<void>;
+        }>;
+        readAtMost(path: string, maxBytes: number): Promise<unknown>;
+      };
+      /** The names whose bytes were read, by any route. */
+      const reads: string[] = [];
+      let seenIno = 0;
+      const fs = {
+        async lstat(path: string) {
+          const seen = await real.lstat(path);
+          if (path.endsWith("/swapped.txt") && seenIno === 0) {
+            seenIno = seen.ino;
+            // After the check and before the read: another file takes the name.
+            renameSync(join(dir, "other.txt"), join(dir, "swapped.txt"));
+          }
+          return seen;
+        },
+        async open(path: string) {
+          const handle = await real.open(path);
+          return {
+            stat: () => handle.stat(),
+            read: (maxBytes: number) => {
+              reads.push(basename(path));
+              return handle.read(maxBytes);
+            },
+            close: () => handle.close(),
+          };
+        },
+        // The read before fix round w4 (a trap here): it read the bytes
+        // before its caller compared the file id.
+        async readAtMost(path: string, maxBytes: number) {
+          reads.push(basename(path));
+          return real.readAtMost(path, maxBytes);
+        },
+      } as unknown as ChangesFs;
+      const { runGit } = fakeGit(
+        okScript({
+          [key(TOPLEVEL)]: { stdout: `${root}\n` },
+          [key(UNTRACKED)]: { stdout: "swapped.txt\0steady.md\0" },
+        }),
+      );
+      const result = await collectChanges({
+        workdir: root,
+        caps: readCaps({}),
+        runGit,
+        fs,
+      });
+      // The control: the name really holds another file now, with another
+      // id this host reports, so the case can fail.
+      const now = await real.lstat(join(dir, "swapped.txt"));
+      expect(seenIno, "control: the lstat saw a file id").toBeGreaterThan(0);
+      expect(now.ino, "control: another file holds the name").not.toBe(seenIno);
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.payload.untrackedFiles).toEqual([
+        { path: "swapped.txt", bytes: 20 },
+        { path: "steady.md", bytes: 7, text: "steady\n" },
+      ]);
+      expect(reads, "not one byte of the swapped name is read").toEqual([
+        "steady.md",
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+    }
+  });
+
+  it("the node read opens one handle, whose kind and id are the file lstat saw, and reads at most what it is asked for", async () => {
     const dir = mkdtempSync(join(tmpdir(), "bgos-changes-read-"));
     try {
       const big = join(dir, "big.log");
@@ -1136,45 +1275,54 @@ describe("collectChanges", () => {
       writeFileSync(big, bytes);
       const fs = nodeChangesFs as unknown as {
         lstat(path: string): Promise<{ ino: number; dev: number }>;
-        readAtMost(
-          path: string,
-          maxBytes: number,
-        ): Promise<{
-          stat: { isFile(): boolean; size: number; ino: number; dev: number };
-          data: Uint8Array;
+        open(path: string): Promise<{
+          stat(): Promise<{ isFile(): boolean; size: number; ino: number; dev: number }>;
+          read(maxBytes: number): Promise<Uint8Array>;
+          close(): Promise<void>;
         }>;
       };
       const seen = await fs.lstat(big);
-      const read = await fs.readAtMost(big, 1_000);
-      expect(read.data.length, "at most what was asked for").toBe(1_000);
-      expect(Buffer.from(read.data).equals(bytes.subarray(0, 1_000))).toBe(true);
-      expect(read.stat.isFile()).toBe(true);
-      expect(read.stat.size).toBe(200_000);
-      // The handle's id is the lstat's on this host, so the check is live.
-      expect(seen.ino).toBeGreaterThan(0);
-      expect(read.stat.ino).toBe(seen.ino);
-      expect(read.stat.dev).toBe(seen.dev);
+      const handle = await fs.open(big);
+      try {
+        const stat = await handle.stat();
+        expect(stat.isFile()).toBe(true);
+        expect(stat.size).toBe(200_000);
+        // The handle's id is the lstat's on this host, so the check is live.
+        expect(seen.ino).toBeGreaterThan(0);
+        expect(stat.ino).toBe(seen.ino);
+        expect(stat.dev).toBe(seen.dev);
+        const data = await handle.read(1_000);
+        expect(data.length, "at most what was asked for").toBe(1_000);
+        expect(Buffer.from(data).equals(bytes.subarray(0, 1_000))).toBe(true);
+      } finally {
+        await handle.close();
+      }
 
       const small = join(dir, "small.md");
       writeFileSync(small, "hi\n");
-      const whole = await fs.readAtMost(small, 65_537);
-      expect(Buffer.from(whole.data).toString("utf8")).toBe("hi\n");
+      const smallHandle = await fs.open(small);
+      try {
+        const whole = await smallHandle.read(65_537);
+        expect(Buffer.from(whole).toString("utf8")).toBe("hi\n");
+      } finally {
+        await smallHandle.close();
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
     }
   });
 
   it.skipIf(process.platform === "win32")(
-    "the node read refuses a symlink, where the host has O_NOFOLLOW",
+    "the node open refuses a symlink, where the host has O_NOFOLLOW",
     async () => {
       const dir = mkdtempSync(join(tmpdir(), "bgos-changes-link-"));
       try {
         writeFileSync(join(dir, "target.txt"), "secret\n");
         symlinkSync(join(dir, "target.txt"), join(dir, "link.txt"));
         const fs = nodeChangesFs as unknown as {
-          readAtMost(path: string, maxBytes: number): Promise<unknown>;
+          open(path: string): Promise<unknown>;
         };
-        await expect(fs.readAtMost(join(dir, "link.txt"), 65_537)).rejects.toThrow();
+        await expect(fs.open(join(dir, "link.txt"))).rejects.toThrow();
       } finally {
         rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
       }

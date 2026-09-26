@@ -453,7 +453,7 @@ describe("createChangesHandler", () => {
       lstat: async () => {
         throw new Error("not read");
       },
-      readAtMost: async () => {
+      open: async () => {
         throw new Error("not read");
       },
     };
