@@ -49,6 +49,15 @@ const DIFF = [
 /** Where Git for Windows puts its launcher, written out. */
 const GIT_EXE = "C:\\Program Files\\Git\\cmd\\git.exe";
 
+/** `git version`, read before anything else (fix round w5, W4-N3). */
+const VERSION = ["version"];
+const HOST_VERSION = "git version 2.55.0.windows.3\n";
+
+/** What /diff says for a Git below the floor, or one whose version cannot
+ * be read (fix round w5, W4-N3). */
+const TOO_OLD =
+  "Git 2.36 or later is needed to read changes safely. Update Git on this computer, then retry.";
+
 const NOT_LOADED =
   "The Git diff could not be loaded. Check that Git is installed and the project is accessible, then retry.";
 
@@ -118,14 +127,26 @@ describe("/diff (fix round w4, R-3)", () => {
       },
       execGit: async (file: string, args: readonly string[], options: Run["options"]) => {
         runs.push({ file, args: [...args], options });
-        return { stdout: "diff --git a/a.txt b/a.txt\n-one\n+two\n" };
+        return {
+          stdout:
+            args.join(" ") === "version"
+              ? HOST_VERSION
+              : "diff --git a/a.txt b/a.txt\n-one\n+two\n",
+        };
       },
+      gitVersions: new Map(),
     });
     await r.diff();
     expect(runs.map((run) => run.file), "the absolute path, never a bare git").toEqual([
       GIT_EXE,
+      GIT_EXE,
     ]);
-    expect(runs[0]!.args).toEqual(DIFF);
+    // Its version first (fix round w5, W4-N3), in the same folder and
+    // environment, then the diff.
+    expect(runs.map((run) => run.args)).toEqual([VERSION, DIFF]);
+    expect(runs[0]!.options.cwd).toBe(workdir);
+    expect(runs[0]!.options.env).toBe(runs[1]!.options.env);
+    runs.shift();
     expect(runs[0]!.options).toMatchObject({
       cwd: workdir,
       windowsHide: true,
@@ -172,9 +193,12 @@ describe("/diff (fix round w4, R-3)", () => {
     ]) {
       const r = router(workdir, {
         findGit: async () => GIT_EXE,
-        execGit: async () => {
+        // Its version reads (fix round w5, W4-N3); the read after it fails.
+        execGit: async (_file: string, args: readonly string[]) => {
+          if (args.join(" ") === "version") return { stdout: HOST_VERSION };
           throw Object.assign(new Error("Command failed"), { code: 128, stderr });
         },
+        gitVersions: new Map(),
       });
       await r.diff();
       said.push(...r.said());
@@ -184,6 +208,55 @@ describe("/diff (fix round w4, R-3)", () => {
       "This repository has no first commit yet. Commit its initial files before comparing working changes.",
       NOT_LOADED,
     ]);
+  });
+});
+
+describe("/diff and the Git floor (fix round w5, W4-N3)", () => {
+  it("a Git older than 2.36, or one whose version cannot be read, is refused in plain words before any other Git command", async () => {
+    const workdir = scratch("bgos-native-diff-");
+    for (const answer of [
+      { stdout: "git version 2.35.1\n" },
+      { stdout: "git version 2.9.5\n" },
+      { stdout: "" },
+      Object.assign(new Error("Command failed"), { code: 1, stdout: "", stderr: "whoami: extra operand\n" }),
+    ]) {
+      const label = answer instanceof Error ? "exit 1" : JSON.stringify(answer);
+      const runs: string[][] = [];
+      const r = router(workdir, {
+        findGit: async () => GIT_EXE,
+        execGit: async (_file: string, args: readonly string[]) => {
+          runs.push([...args]);
+          if (args.join(" ") !== "version") return { stdout: "diff --git a/a.txt b/a.txt\n" };
+          if (answer instanceof Error) throw answer;
+          return answer;
+        },
+        gitVersions: new Map(),
+      });
+      await r.diff();
+      expect(r.said(), label).toEqual([TOO_OLD]);
+      expect(runs, `${label}: its version, and nothing else`).toEqual([VERSION]);
+    }
+  });
+
+  it("reads a Git's version once: a second /diff with the same Git reads none", async () => {
+    const workdir = scratch("bgos-native-diff-");
+    const runs: string[][] = [];
+    const gitVersions = new Map();
+    for (let i = 0; i < 2; i += 1) {
+      const r = router(workdir, {
+        findGit: async () => GIT_EXE,
+        execGit: async (_file: string, args: readonly string[]) => {
+          runs.push([...args]);
+          return {
+            stdout: args.join(" ") === "version" ? HOST_VERSION : "diff --git a/a.txt b/a.txt\n",
+          };
+        },
+        gitVersions,
+      });
+      await r.diff();
+      expect(r.said()).toEqual(["```diff\ndiff --git a/a.txt b/a.txt\n\n```"]);
+    }
+    expect(runs).toEqual([VERSION, DIFF, DIFF]);
   });
 });
 

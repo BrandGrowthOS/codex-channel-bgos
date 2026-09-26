@@ -37,13 +37,16 @@ import { basename, dirname, join } from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
+import { createChangesHandler } from "../src/changes-handler.js";
 import {
   collectChanges,
   createFindGit,
   createNodeRunGit,
+  gitVersionMeetsFloor,
   nodeChangesFs,
   readCaps,
   type ChangesFs,
+  type ChangesResultBody,
   type GitRunOptions,
   type GitRunResult,
   type RunGit,
@@ -345,8 +348,11 @@ const GIT_EXE = "C:\\Program Files\\Git\\cmd\\git.exe";
  */
 function recordingSpawn(script: Record<string, Reply>) {
   const commands: string[] = [];
+  /** Each argv the spawn was handed, in order (fix round w5). */
+  const argvs: string[][] = [];
   const spawnImpl = ((command: string, args: string[]) => {
     commands.push(command);
+    argvs.push([...args]);
     const child = Object.assign(new EventEmitter(), {
       stdout: new PassThrough(),
       stderr: new PassThrough(),
@@ -364,8 +370,13 @@ function recordingSpawn(script: Record<string, Reply>) {
     });
     return child;
   }) as unknown as typeof spawn;
-  return { spawnImpl, commands };
+  return { spawnImpl, commands, argvs };
 }
+
+/** `git version`, as the floor reads it (fix round w5, W4-N3), written out. */
+const VERSION = ["version"];
+/** What Git for Windows prints for it on this host. */
+const HOST_VERSION = { stdout: "git version 2.55.0.windows.3\n" };
 
 // ---------------------------------------------------------------------------
 // the collector
@@ -771,7 +782,12 @@ describe("collectChanges", () => {
       children.push(child);
       return child;
     }) as unknown as typeof spawn;
-    const adapter = createNodeRunGit({ bin: process.execPath, spawnImpl });
+    // Node, not Git: it has no version to read (fix round w5, W4-N3).
+    const adapter = createNodeRunGit({
+      bin: process.execPath,
+      spawnImpl,
+      gitVersions: null,
+    } as Parameters<typeof createNodeRunGit>[0]);
     const script =
       "const b=Buffer.alloc(65536,120);let n=0;" +
       "(function w(){while(n<48){n++;if(!process.stdout.write(b)){process.stdout.once('drain',w);return;}}" +
@@ -834,6 +850,9 @@ describe("collectChanges", () => {
       }) as unknown as typeof spawn,
       // The environment below has no PATH; the lookup names Git outright.
       findGit: async () => GIT_EXE,
+      // Its version was read before (fix round w5, W4-N3), so the one child
+      // is the patch's.
+      gitVersions: new Map([[GIT_EXE, Promise.resolve(true)]]),
     } as Parameters<typeof createNodeRunGit>[0]);
     const pending = adapter(PATCH, {
       cwd: ROOT,
@@ -860,7 +879,9 @@ describe("collectChanges", () => {
   // folder, so a git.exe it left there would run as the owner each time the
   // owner opened the panel.
   it("the node adapter runs the Git that PATH names by its absolute path, never a bare git a folder could answer", async () => {
-    const { spawnImpl, commands } = recordingSpawn(okScript());
+    const { spawnImpl, commands, argvs } = recordingSpawn(
+      okScript({ [key(VERSION)]: HOST_VERSION }),
+    );
     const lookups: Array<Record<string, string | undefined>> = [];
     const runGit = createNodeRunGit({
       spawnImpl,
@@ -868,6 +889,7 @@ describe("collectChanges", () => {
         lookups.push(env);
         return GIT_EXE;
       },
+      gitVersions: new Map(),
     } as Parameters<typeof createNodeRunGit>[0]);
     const result = await collectChanges({
       workdir: WORKDIR,
@@ -880,7 +902,18 @@ describe("collectChanges", () => {
     expect(
       commands,
       "every command runs the absolute path, never a bare name the working folder could answer",
-    ).toEqual(Array.from({ length: 7 }, () => GIT_EXE));
+    ).toEqual(Array.from({ length: 8 }, () => GIT_EXE));
+    // Its version first, then the seven reads (fix round w5, W4-N3).
+    expect(argvs).toEqual([
+      VERSION,
+      TOPLEVEL,
+      VERIFY_HEAD,
+      BRANCH,
+      SHORT_HEAD,
+      NUMSTAT,
+      PATCH,
+      UNTRACKED,
+    ]);
     expect(lookups, "PATH is looked up once per read").toHaveLength(1);
     // With the environment Git itself gets.
     expect(lookups[0]).toMatchObject({
@@ -922,6 +955,164 @@ describe("collectChanges", () => {
       },
     });
     expect(commands).toEqual([]);
+  });
+
+  // Fix round w5, W4-N3: before Git 2.36, core.fsmonitor=false is read as the
+  // path of a program to run, so every read would run a program named
+  // "false". A Git below 2.36, or one whose version cannot be read, reads
+  // nothing.
+  it("reads Git's version: 2.36 and later meet the floor, anything older or unreadable does not (fix round w5, W4-N3)", () => {
+    const table: Array<[string, boolean]> = [
+      ["git version 2.35.1\n", false],
+      ["git version 2.36.0\n", true],
+      ["git version 2.55.0.windows.3\n", true],
+      ["git version 2.39.3 (Apple Git-146)\n", true],
+      ["git version 2.36\n", true],
+      ["  git version 2.40.1  \n", true],
+      ["git version 3.0.0\n", true],
+      ["git version 2.9.5\n", false],
+      ["git version 2.3.10\n", false],
+      ["git version 1.99.9\n", false],
+      ["git version 1.36.0\n", false],
+      ["", false],
+      ["git version two\n", false],
+      ["whoami: extra operand 'version'\n", false],
+      ["hub version 2.40.0\n", false],
+    ];
+    expect(
+      table.map(([text]) => [text, gitVersionMeetsFloor(text)]),
+    ).toEqual(table);
+  });
+
+  it("a Git older than 2.36, or one whose version cannot be read, answers read_failed saying so, and no other Git command runs (fix round w5, W4-N3)", async () => {
+    for (const reply of [
+      { stdout: "git version 2.35.1\n" },
+      { stdout: "git version 2.9.5\n" },
+      { stdout: "" },
+      { code: 1, stderr: "whoami: extra operand 'version'\n" },
+    ]) {
+      const label = JSON.stringify(reply);
+      const { spawnImpl, argvs } = recordingSpawn(
+        okScript({ [key(VERSION)]: reply }),
+      );
+      const api = {
+        changesRpcAck: vi.fn(async () => ({})),
+        changesRpcResult: vi.fn(
+          async (_rpcId: string, _body: ChangesResultBody) => ({}),
+        ),
+      };
+      const handle = createChangesHandler({
+        api,
+        workdir: WORKDIR,
+        owns: () => true,
+        newRunGit: () =>
+          createNodeRunGit({
+            spawnImpl,
+            findGit: async () => GIT_EXE,
+            gitVersions: new Map(),
+          } as Parameters<typeof createNodeRunGit>[0]),
+        schedule: () => {},
+      } as Parameters<typeof createChangesHandler>[0]);
+      await handle({
+        rpcId: "rpc-floor",
+        op: "diff",
+        assistantId: "10",
+        payload: { scope: "uncommitted" },
+      });
+      expect(api.changesRpcResult.mock.calls, label).toEqual([
+        [
+          "rpc-floor",
+          {
+            ok: false,
+            error: {
+              code: "read_failed",
+              message:
+                "changes could not be read on the agent host: Git 2.36 or later is needed to read changes safely",
+            },
+          },
+        ],
+      ]);
+      expect(argvs, `${label}: its version, and nothing else`).toEqual([VERSION]);
+    }
+  });
+
+  it("a Git of 2.36 or later has its version read first, then the seven reads: 2.36.0, and a Windows form like 2.55.0.windows.3 (fix round w5, W4-N3)", async () => {
+    for (const stdout of ["git version 2.36.0\n", "git version 2.55.0.windows.3\n"]) {
+      const { spawnImpl, argvs } = recordingSpawn(
+        okScript({ [key(VERSION)]: { stdout } }),
+      );
+      const result = await collectChanges({
+        workdir: WORKDIR,
+        caps: readCaps({}),
+        runGit: createNodeRunGit({
+          spawnImpl,
+          findGit: async () => GIT_EXE,
+          gitVersions: new Map(),
+        } as Parameters<typeof createNodeRunGit>[0]),
+        fs: okFs().fs,
+        now: FIXED_NOW,
+      });
+      expect(result.ok && result.payload.state, stdout).toBe("ok");
+      expect(argvs, stdout).toEqual([
+        VERSION,
+        TOPLEVEL,
+        VERIFY_HEAD,
+        BRANCH,
+        SHORT_HEAD,
+        NUMSTAT,
+        PATCH,
+        UNTRACKED,
+      ]);
+    }
+  });
+
+  it("Git's version is read once per Git path: a later read of the same Git reads none, another Git is read, and a refusal is not kept (fix round w5, W4-N3)", async () => {
+    const accepted = recordingSpawn(okScript({ [key(VERSION)]: HOST_VERSION }));
+    const cache = new Map();
+    /** One read, with its own runner, as the handler makes one per read. */
+    const read = (spawnImpl: typeof spawn, bin: string, gitVersions: unknown) =>
+      collectChanges({
+        workdir: WORKDIR,
+        caps: readCaps({}),
+        runGit: createNodeRunGit({
+          spawnImpl,
+          findGit: async () => bin,
+          gitVersions,
+        } as Parameters<typeof createNodeRunGit>[0]),
+        fs: okFs().fs,
+      });
+    const versionReads = (log: { argvs: string[][]; commands: string[] }) =>
+      log.argvs.flatMap((argv, at) => (key(argv) === key(VERSION) ? [log.commands[at]] : []));
+
+    // Two reads of one Git, one after the other, and two at once.
+    for (const answer of [
+      await read(accepted.spawnImpl, GIT_EXE, cache),
+      await read(accepted.spawnImpl, GIT_EXE, cache),
+      ...(await Promise.all([
+        read(accepted.spawnImpl, GIT_EXE, cache),
+        read(accepted.spawnImpl, GIT_EXE, cache),
+      ])),
+    ]) {
+      expect(answer.ok && answer.payload.state).toBe("ok");
+    }
+    expect(versionReads(accepted), "one version read for one Git").toEqual([GIT_EXE]);
+
+    // Another Git is another binary: its own version is read.
+    const other = "D:\\PortableGit\\cmd\\git.exe";
+    const second = await read(accepted.spawnImpl, other, cache);
+    expect(second.ok && second.payload.state).toBe("ok");
+    expect(versionReads(accepted)).toEqual([GIT_EXE, other]);
+
+    // A refusal is not kept: a Git updated in place is read again next time.
+    const old = recordingSpawn(okScript({ [key(VERSION)]: { stdout: "git version 2.35.1\n" } }));
+    const oldCache = new Map();
+    for (let i = 0; i < 2; i += 1) {
+      await expect(read(old.spawnImpl, GIT_EXE, oldCache)).rejects.toMatchObject({
+        summary: "Git 2.36 or later is needed to read changes safely",
+      });
+    }
+    expect(versionReads(old), "read again after a refusal").toEqual([GIT_EXE, GIT_EXE]);
+    expect(old.argvs, "and nothing else ran").toEqual([VERSION, VERSION]);
   });
 
   it("never sends more than the cap, even when a read hands back more", async () => {
@@ -997,7 +1188,11 @@ describe("collectChanges", () => {
 
     // The patch comes through the REAL node adapter, from a child that
     // writes those bytes, so the decode is the adapter's own.
-    const adapter = createNodeRunGit({ bin: process.execPath });
+    // Node, not Git: it has no version to read (fix round w5, W4-N3).
+    const adapter = createNodeRunGit({
+      bin: process.execPath,
+      gitVersions: null,
+    } as Parameters<typeof createNodeRunGit>[0]);
     const scripted = fakeGit(okScript());
     const runGit: RunGit = (args, options) =>
       key(args) === key(PATCH)
@@ -1403,7 +1598,12 @@ describe("collectChanges", () => {
       children.push(child);
       return child;
     }) as unknown as typeof spawn;
-    const adapter = createNodeRunGit({ bin: process.execPath, spawnImpl });
+    // Node, not Git: it has no version to read (fix round w5, W4-N3).
+    const adapter = createNodeRunGit({
+      bin: process.execPath,
+      spawnImpl,
+      gitVersions: null,
+    } as Parameters<typeof createNodeRunGit>[0]);
     const controller = new AbortController();
     const killedAt = Date.now();
     setTimeout(() => controller.abort(), 100);
@@ -1983,6 +2183,42 @@ describe.skipIf(!gitOnPath)("against a real Git repository", () => {
       untracked: "new.txt\0",
       untrackedFiles: [{ path: "new.txt", bytes: 6, text: "hello\n" }],
     });
+  }, 30_000);
+
+  // Fix round w5, W4-N3: the real Git on this host meets the floor, and its
+  // version is read once for two reads of it.
+  it("the Git on this host meets the floor: its version is read once, and both reads read (fix round w5, W4-N3)", async () => {
+    writeFileSync(globalConfig, "");
+    // The control: what this Git prints, read here with its own numbers.
+    const printed = String(spawnSync("git", ["version"], { env, windowsHide: true }).stdout);
+    const [, major, minor] = /^git version (\d+)\.(\d+)/.exec(printed) ?? [];
+    expect(Number(major) * 1_000 + Number(minor), printed).toBeGreaterThanOrEqual(2_036);
+
+    const argvs: string[][] = [];
+    const spawnImpl = ((command: string, args: string[], options: object) => {
+      argvs.push([...args]);
+      return spawn(command, args, options);
+    }) as unknown as typeof spawn;
+    const gitVersions = new Map();
+    for (let i = 0; i < 2; i += 1) {
+      const result = await collectChanges({
+        workdir: repo,
+        caps: readCaps({}),
+        runGit: createNodeRunGit({ spawnImpl, gitVersions } as Parameters<
+          typeof createNodeRunGit
+        >[0]),
+        fs: nodeChangesFs,
+        env,
+      });
+      expect(result.ok && result.payload.state, printed).toBe("ok");
+      expect(result.ok && result.payload.numstat).toBe("1\t1\ta.txt\0");
+    }
+    expect(argvs[0], "its version first").toEqual(VERSION);
+    expect(
+      argvs.filter((argv) => key(argv) === key(VERSION)),
+      "and once for both reads",
+    ).toHaveLength(1);
+    expect(argvs).toHaveLength(15);
   }, 30_000);
 
   /** The source a partial clone fetches from: one commit (a.txt, sub/keep.txt)

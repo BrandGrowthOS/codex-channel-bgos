@@ -68,6 +68,17 @@
  * still runs on both diffs: no flag here stops it (measured, and left open
  * in the fix round's record).
  *
+ * GIT 2.36 OR LATER, OR NOTHING. Before Git 2.36, core.fsmonitor=false is
+ * read as the path of a program to run, so the flag above would itself name
+ * a program. So `git version` is read first, once per Git path for the
+ * daemon's life (the panel and /diff share the answer), and a Git below 2.36,
+ * or one whose version cannot be read, runs no other command: the read is
+ * read_failed with the plain words GIT_FLOOR_MESSAGE (fix round w5, W4-N3).
+ * Only an accepted Git is remembered: a refusal is read again at the next
+ * read, so a Git updated in place is seen without restarting the daemon.
+ * `git version` reads no index and no repository config (a fsmonitor the
+ * repository names did not run for it, measured in fix round w5).
+ *
  * GIT BY ITS ABSOLUTE PATH. `spawn("git", { cwd })` on Windows looks in the
  * child's working folder BEFORE PATH (libuv's search_path, which uv_spawn
  * hands the child's cwd), and a relative PATH entry does the same on any
@@ -274,6 +285,68 @@ export function gitReadEnv(
   return env;
 }
 
+// ---------------------------------------------------------------------------
+// the Git floor (fix round w5, W4-N3)
+// ---------------------------------------------------------------------------
+
+/** What a read answers for a Git below 2.36, or one whose version cannot be
+ * read: the summary of GitTooOldError, which travels with read_failed. */
+export const GIT_FLOOR_MESSAGE =
+  "Git 2.36 or later is needed to read changes safely";
+
+const GIT_VERSION = ["version"] as const;
+
+/**
+ * Whether `git version`'s output names Git 2.36 or later. Only its first line
+ * counts, and only when it starts `git version <major>.<minor>`; anything else
+ * cannot be read and does not meet the floor. The numbers are compared as
+ * numbers: 2.9 is older than 2.36.
+ */
+export function gitVersionMeetsFloor(output: string): boolean {
+  const match = /^git version (\d+)\.(\d+)(?:[.\s]|$)/.exec(
+    firstLine(output.trim()),
+  );
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  return major > 2 || (major === 2 && minor >= 36);
+}
+
+/** Each Git path's verdict, true once its version met the floor. */
+export type GitVersionCache = Map<string, Promise<boolean>>;
+
+/** The daemon's one cache: the panel's reads and /diff share it. */
+const DAEMON_GIT_VERSIONS: GitVersionCache = new Map();
+
+/**
+ * Throws GitTooOldError unless the Git at `bin` meets the floor. Its version
+ * is read (`readVersion`, which answers `git version`'s stdout, or "" when
+ * Git ran and failed) only when `cache` holds no verdict for that path; reads
+ * at the same moment share one. Only an ACCEPTED Git stays in the cache: a
+ * refusal, or a version read that threw (the folder gone, the budget spent),
+ * is let go, so the next read asks again. A throw of `readVersion` is thrown
+ * as it is.
+ */
+export async function checkGitFloor(
+  bin: string,
+  readVersion: () => Promise<string>,
+  cache: GitVersionCache = DAEMON_GIT_VERSIONS,
+): Promise<void> {
+  let verdict = cache.get(bin);
+  if (verdict === undefined) {
+    const reading = readVersion().then(gitVersionMeetsFloor);
+    verdict = reading;
+    cache.set(bin, reading);
+    const letGo = () => {
+      if (cache.get(bin) === reading) cache.delete(bin);
+    };
+    reading.then((accepted) => {
+      if (!accepted) letGo();
+    }, letGo);
+  }
+  if (!(await verdict)) throw new GitTooOldError();
+}
+
 /** The cap on the small reads (the root, the branch, the head). */
 const SMALL_OUTPUT_MAX = 65_536;
 /** A NUL in this many first bytes makes a new file binary (Git's own rule). */
@@ -414,23 +487,51 @@ function gitNotFound(): Error {
  * header): `findGit` looks it up on PATH's absolute entries once per adapter,
  * with the environment Git gets, and the handler makes one adapter per read.
  * `bin` names the binary outright instead (the tests' own child processes).
+ * Before the first command the Git found must meet the floor (see the
+ * header): its `git version` is read in the same folder, with the same
+ * environment and under the same budget, unless `gitVersions` (the daemon's
+ * one cache by default) already accepted that path; below the floor the
+ * adapter throws GitTooOldError and starts nothing else. `gitVersions: null`
+ * skips the floor, for a `bin` that is not Git (the tests' node).
  * stdout is read until `maxBytes` and the child is then killed, so a large
  * diff is cut instead of failing the whole read. The budget's abort kills the
  * child too. No Git on PATH rejects with `code` `ENOENT` and starts nothing;
  * so does a spawn of a binary that is not there.
  */
 export function createNodeRunGit(
-  options: { bin?: string; spawnImpl?: typeof spawn; findGit?: FindGit } = {},
+  options: {
+    bin?: string;
+    spawnImpl?: typeof spawn;
+    findGit?: FindGit;
+    gitVersions?: GitVersionCache | null;
+  } = {},
 ): RunGit {
   const spawnImpl = options.spawnImpl ?? spawn;
   const findGit = options.findGit ?? createFindGit();
+  const gitVersions =
+    options.gitVersions === undefined ? DAEMON_GIT_VERSIONS : options.gitVersions;
   let located: Promise<string | null> | null =
     options.bin !== undefined ? Promise.resolve(options.bin) : null;
+  let floor: Promise<void> | null = null;
   return async (args, runOptions) => {
     if (runOptions.signal.aborted) throw new Error("changes read aborted");
     located ??= findGit(runOptions.env).catch(() => null);
     const bin = await located;
     if (!bin) throw gitNotFound();
+    if (gitVersions) {
+      floor ??= checkGitFloor(
+        bin,
+        async () => {
+          const run = await spawnGit(spawnImpl, bin, GIT_VERSION, {
+            ...runOptions,
+            maxBytes: SMALL_OUTPUT_MAX,
+          });
+          return run.code === 0 ? run.stdout : "";
+        },
+        gitVersions,
+      );
+      await floor;
+    }
     return spawnGit(spawnImpl, bin, args, runOptions);
   };
 }
@@ -706,6 +807,18 @@ export class GitCommandError extends Error {
     super(detail ? `${summary}: ${detail}` : summary);
     this.name = "GitCommandError";
     this.summary = summary;
+  }
+}
+
+/**
+ * A Git below 2.36, or one whose version cannot be read (fix round w5,
+ * W4-N3). Its summary is the floor's plain words, and nothing of Git's own
+ * output, so it travels with read_failed.
+ */
+export class GitTooOldError extends GitCommandError {
+  constructor() {
+    super(GIT_FLOOR_MESSAGE);
+    this.name = "GitTooOldError";
   }
 }
 

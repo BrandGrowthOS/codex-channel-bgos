@@ -3,11 +3,15 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { CodexHost, RunTurnCallbacks } from "./codex-host.js";
 import {
+  checkGitFloor,
   createFindGit,
+  GIT_FLOOR_MESSAGE,
   gitReadEnv,
+  GitTooOldError,
   NO_FSMONITOR,
   NO_INDEX_REFRESH,
   type FindGit,
+  type GitVersionCache,
 } from "./git-changes.js";
 import { formatGoalSeconds, goalStatusWord, GOAL_DEFAULT_TURN_CAP } from "./goal-lane.js";
 import type { ThreadGoal } from "./goal-protocol.js";
@@ -92,6 +96,9 @@ const exec = promisify(execFile);
  * GIT_OPTIONAL_LOCKS=0). Until fix round w4 (R-3) /diff ran a bare `git`
  * from the agent's folder, which a git.exe the agent left there answered on
  * Windows, with none of those rules: a gap there since /diff was written.
+ * Since fix round w5 it also never fetches (GIT_NO_LAZY_FETCH, in Git's read
+ * environment) and reads nothing with a Git below 2.36 (W4-N3): the Git
+ * found must meet the floor first, through the cache the panel uses.
  */
 const NATIVE_DIFF_ARGS = [
   ...NO_FSMONITOR,
@@ -249,6 +256,9 @@ export class NativeCommands {
       findGit?: FindGit;
       /** /diff's runner, execFile by default. */
       execGit?: ExecGit;
+      /** Each Git path's floor verdict, the daemon's one cache by default
+       * (fix round w5, W4-N3). */
+      gitVersions?: GitVersionCache;
     },
   ) {}
 
@@ -549,18 +559,35 @@ export class NativeCommands {
           () => null,
         );
         if (!git) throw new Error("git was not found on an absolute PATH entry");
-        ({ stdout } = await (this.deps.execGit ?? execGitFile)(
+        const execGit = this.deps.execGit ?? execGitFile;
+        const options = {
+          cwd: host.workdir,
+          env,
+          windowsHide: true,
+          timeout: 15_000,
+          maxBuffer: 512_000,
+        };
+        // Git 2.36 or later, or nothing (fix round w5, W4-N3). A Git that ran
+        // and failed has no version to read; one that could not start, or
+        // ran out of time, is the diff failing to load.
+        await checkGitFloor(
           git,
-          NATIVE_DIFF_ARGS,
-          {
-            cwd: host.workdir,
-            env,
-            windowsHide: true,
-            timeout: 15_000,
-            maxBuffer: 512_000,
+          async () => {
+            try {
+              return (await execGit(git, ["version"], options)).stdout;
+            } catch (failed) {
+              if (typeof (failed as { code?: unknown }).code === "number") return "";
+              throw failed;
+            }
           },
-        ));
+          this.deps.gitVersions,
+        );
+        ({ stdout } = await execGit(git, NATIVE_DIFF_ARGS, options));
       } catch (error) {
+        if (error instanceof GitTooOldError)
+          throw new Error(
+            `${GIT_FLOOR_MESSAGE}. Update Git on this computer, then retry.`,
+          );
         const detail = String((error as { stderr?: string }).stderr ?? "");
         if (/not a git repository/i.test(detail))
           throw new Error(

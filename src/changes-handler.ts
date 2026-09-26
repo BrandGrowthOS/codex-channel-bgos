@@ -31,8 +31,11 @@
  *     answer is `too_slow`.
  *  6. A result is ALWAYS posted; a throw answers `read_failed` with the spec's
  *     sentence, plus `git <subcommand> exited <code>` when a Git command
- *     failed, and nothing else: Git's own words, and any other error's text,
- *     can name the owner's folder, so they go to this computer's log only.
+ *     failed, or plus "Git 2.36 or later is needed to read changes safely"
+ *     when the Git found is older or its version cannot be read (fix round
+ *     w5, W4-N3), and nothing else: Git's own words, and any other error's
+ *     text, can name the owner's folder, so they go to this computer's log
+ *     only.
  *     Every message is at most 300 characters with no em or en dash.
  *
  * The owner's per agent switch is NOT read here, or anywhere in this plugin:
