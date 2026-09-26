@@ -141,6 +141,7 @@ describe("HeartbeatController", () => {
           "mission_events",
           "mission_goal_loop",
           "mission_pause",
+          "session_model_control",
         ]);
       } finally {
         hb.stop();
@@ -191,6 +192,7 @@ describe("HeartbeatController", () => {
             "mission_events",
             "mission_goal_loop",
             "mission_pause",
+            "session_model_control",
           ]);
       } finally {
         hb.stop();

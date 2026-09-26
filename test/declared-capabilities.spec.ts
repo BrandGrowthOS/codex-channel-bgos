@@ -16,6 +16,7 @@ import {
   MISSION_GOAL_CHECKS,
   MISSION_GOAL_LOOP,
   MISSION_PAUSE,
+  SESSION_MODEL_CONTROL,
 } from "../src/declared-capabilities.js";
 
 // backend/src/dto/integrations/pair-exchange.dto.ts CAPABILITY_TOKEN_REGEX
@@ -55,6 +56,17 @@ describe("DECLARED_CAPABILITIES", () => {
     // the token would put a Checked tag on the owner's card for a check that
     // never ran, which is the exact thing this whole stage exists to stop.
     expect(DECLARED_CAPABILITIES).not.toContain(MISSION_GOAL_CHECKS);
+  });
+
+  it("declares session_model_control, because this daemon reports each chat's model and effort", () => {
+    // P5 stage 7 (C-26). The token lights the owner's "Show the model and
+    // effort" switch and the row under a Codex chat's message box. It is
+    // honest only because this daemon REPORTS what the runtime runs (the
+    // session-settings rail) and its own /model changes it between turns;
+    // the name is the backend's own constant (session-settings-rail.ts),
+    // pinned by one hash in both repos (test/session-rail-contract.spec.ts).
+    expect(SESSION_MODEL_CONTROL).toBe("session_model_control");
+    expect(DECLARED_CAPABILITIES).toContain(SESSION_MODEL_CONTROL);
   });
 
   it("is frozen, so one constant is the single source", () => {
