@@ -7,14 +7,27 @@
  *
  * Types mirror gobot-channel-bgos/src/voice-rpc.ts (originally the OpenClaw
  * normalizer) so a future voice module drops in without a wire change.
+ *
+ * P6 stage 3 (C-32) adds the three Sessions ops, spelled by the contract file
+ * shared with BGOS and the Claude plugin: list this chat's threads, resume one
+ * into the chat, rename one. They ride this lane because stop_turn already
+ * does, and the backend sends them only to a daemon that declares
+ * `sessions_library`.
  */
+import {
+  LIST_SESSIONS,
+  RENAME_SESSION,
+  RESUME_SESSION,
+  type SessionOp,
+} from "./session-controls-contract.js";
 
 export type VoiceRpcOp =
   | "mint"
   | "consult"
   | "dispatch"
   | "stop_turn"
-  | "cancel";
+  | "cancel"
+  | SessionOp;
 
 export interface VoiceRpcFrame {
   rpcId: string;
@@ -45,7 +58,10 @@ export function normalizeVoiceRpc(raw: unknown): VoiceRpcFrame | null {
     r.op === "consult" ||
     r.op === "dispatch" ||
     r.op === "stop_turn" ||
-    r.op === "cancel"
+    r.op === "cancel" ||
+    r.op === LIST_SESSIONS ||
+    r.op === RESUME_SESSION ||
+    r.op === RENAME_SESSION
       ? r.op
       : null;
   if (!rpcId || !op) return null;

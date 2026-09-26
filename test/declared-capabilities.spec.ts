@@ -8,6 +8,8 @@
  * down with it), and `mission_pause` must stay out until there is a loop to
  * suspend.
  */
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -17,6 +19,10 @@ import {
   MISSION_GOAL_LOOP,
   MISSION_PAUSE,
 } from "../src/declared-capabilities.js";
+import {
+  SESSIONS_LIBRARY,
+  STOP_PAUSES_MISSION,
+} from "../src/session-controls-contract.js";
 
 // backend/src/dto/integrations/pair-exchange.dto.ts CAPABILITY_TOKEN_REGEX
 const CAPABILITY_TOKEN_REGEX = /^[a-z][a-z0-9_]{0,63}$/;
@@ -59,5 +65,66 @@ describe("DECLARED_CAPABILITIES", () => {
 
   it("is frozen, so one constant is the single source", () => {
     expect(Object.isFrozen(DECLARED_CAPABILITIES)).toBe(true);
+  });
+
+  it("declares stop_pauses_mission, spelled by the contract file, because an owner Stop now pauses the mission", () => {
+    // P6 stage 3 (C-32). BGOS serves the Codex canon's Stop sentence ("your
+    // host pauses the chat's open mission with the reason Stopped by you")
+    // only to a daemon that declares this, so the token ships in the same
+    // release as the code that keeps it.
+    expect(STOP_PAUSES_MISSION).toBe("stop_pauses_mission");
+    expect(DECLARED_CAPABILITIES).toContain(STOP_PAUSES_MISSION);
+    expect(DECLARED_CAPABILITIES.filter((t) => t === STOP_PAUSES_MISSION)).toHaveLength(1);
+  });
+
+  it("declares stop_pauses_mission only beside the code that keeps the promise", () => {
+    // The token and its enforcement travel together. If the Stop's abort
+    // stopped carrying its cause, or the lane stopped pausing with the
+    // contract's reason, the token would be a promise nothing keeps; the
+    // mission lane and adapter specs hold the behaviour, this holds the tie.
+    const read = (file: string) =>
+      readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8");
+    const adapter = read("adapter.ts");
+    const lane = read("mission-lane.ts");
+    expect(adapter).toContain('abortWith(controller, "owner_stop")');
+    expect(adapter).toContain("this.missionLane.stoppedByOwner(");
+    expect(adapter).toContain("this.missionLane.noteOwnerTurn(");
+    // A Stop during a Keep working continuation turn keeps it too (D35).
+    expect(adapter).toContain("this.missionLane.stoppedGoalByOwner(");
+    expect(lane).toContain("reason: STOP_PAUSE_REASON");
+    // Only the exact reason is resumed. Review F4 moved that check into one
+    // guard, which the owner turn's read and the /new read both use.
+    expect(lane).toContain("mission.pausedReason === STOP_PAUSE_REASON");
+    expect(lane).toContain("if (isStopPausedIn(active, chatId)) {");
+  });
+
+  it("declares sessions_library, spelled by the contract file, because this daemon answers the Sessions ops", () => {
+    // FLIPPED in P6 stage 3 Wave E (item 28), deliberately: until item 27
+    // this daemon did not answer list_sessions, resume_session or
+    // rename_session, and this test said it must not declare the token.
+    // BGOS shows the Sessions circle, and forwards a Sessions request, only
+    // for a pairing that declares it.
+    expect(SESSIONS_LIBRARY).toBe("sessions_library");
+    expect(DECLARED_CAPABILITIES).toContain(SESSIONS_LIBRARY);
+    expect(DECLARED_CAPABILITIES.filter((t) => t === SESSIONS_LIBRARY)).toHaveLength(1);
+  });
+
+  it("declares sessions_library only beside the code that answers the three ops", () => {
+    // The token and the answers travel together: a declared token with an
+    // op the normalizer drops would be a Sessions circle whose every request
+    // times out. sessions-ops.spec.ts holds the behaviour, this the tie.
+    const read = (file: string) =>
+      readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8");
+    const rpc = read("voice-rpc.ts");
+    const adapter = read("adapter.ts");
+    const host = read("codex-host.ts");
+    for (const op of ["LIST_SESSIONS", "RESUME_SESSION", "RENAME_SESSION"]) {
+      expect(rpc).toContain(`r.op === ${op}`);
+      expect(adapter).toContain(`frame.op === ${op}`);
+    }
+    expect(adapter).toContain("this.host.listSavedThreads(");
+    expect(adapter).toContain("this.host.resumeSavedThread(");
+    expect(adapter).toContain("this.host.renameThread(");
+    expect(host).toContain('this.server.request("thread/name/set"');
   });
 });

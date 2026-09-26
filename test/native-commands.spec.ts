@@ -3,6 +3,7 @@ import {
   NativeCommands,
   parseNativeCommand,
   normalizeNativeCommand,
+  RESUMED_SAVED_CONVERSATION,
   reviewTarget,
   usageSummary,
 } from "../src/native-commands.js";
@@ -51,6 +52,7 @@ function setup() {
     pauseForChat: vi.fn(async () => null),
     resumeForChat: vi.fn(async () => null),
   };
+  const clearStopMarker = vi.fn(async (_chatId: number, _assistantId: number) => {});
   const router = new NativeCommands({
     host: host as any,
     interactions: interactions as any,
@@ -58,7 +60,8 @@ function setup() {
     status: () => "connected",
     run,
     goalLane: goalLane as any,
-  });
+    clearStopMarker,
+  } as any);
   const sendText = vi.fn(async () => ({ id: 1 }));
   const args = (name: string, text = "", extra = {}) =>
     ({
@@ -69,7 +72,7 @@ function setup() {
       replyHandle: { sendText },
       ...extra,
     }) as any;
-  return { host, interactions, run, router, args, sendText, goalLane };
+  return { host, interactions, run, router, args, sendText, goalLane, clearStopMarker };
 }
 describe("native controls", () => {
   it("keeps literal paths and argument backslashes intact", () => {
@@ -180,6 +183,7 @@ describe("native controls", () => {
       );
       expect(s.host.updateSettings).not.toHaveBeenCalled();
       expect(s.host.resumeSavedThread).not.toHaveBeenCalled();
+      expect(s.clearStopMarker).not.toHaveBeenCalled();
       expect(s.run).not.toHaveBeenCalled();
     },
   );
@@ -341,5 +345,64 @@ describe("the goal control", () => {
     const s = setup();
     await s.router.handle(s.args("help"));
     expect(String(s.sendText.mock.calls[0]![0])).toContain("`/goal`");
+  });
+});
+
+/**
+ * `/resume` leaves the context a Stop paused (P6 stage 3, review F4).
+ *
+ * It switches the chat's thread through the same host call as the Sessions
+ * sheet's Resume, and like it and like `/new` it must forget the chat's Stop
+ * pause and put that mission into the discards (D25): otherwise the owner's
+ * next message resumed the paused mission and handed it to the resumed
+ * thread's plan, and the same action behaved differently by door.
+ */
+describe("/resume and the chat's Stop pause (review F4)", () => {
+  it.each([
+    ["named", (s: ReturnType<typeof setup>) => s.router.handle(s.args("resume", "saved"))],
+    [
+      "picked",
+      (s: ReturnType<typeof setup>) => {
+        s.interactions.ask.mockResolvedValue([{ picked_option_value: "saved" }]);
+        return s.router.handle(s.args("resume"));
+      },
+    ],
+  ])("a %s conversation: the thread switches, THEN the Stop pause is forgotten, THEN the line", async (_how, resume) => {
+    const s = setup();
+    const order: string[] = [];
+    s.host.resumeSavedThread.mockImplementation((async () => {
+      order.push("thread switched");
+    }) as never);
+    s.clearStopMarker.mockImplementation(async (chatId: number, assistantId: number) => {
+      order.push(`stop pause forgotten ${chatId} ${assistantId}`);
+    });
+    s.sendText.mockImplementation((async (text: string) => {
+      order.push(text);
+      return { id: 1 };
+    }) as never);
+
+    await resume(s);
+
+    expect(s.host.resumeSavedThread).toHaveBeenCalledWith(20, "saved");
+    expect(order).toEqual([
+      "thread switched",
+      "stop pause forgotten 20 10",
+      RESUMED_SAVED_CONVERSATION,
+    ]);
+  });
+
+  it("a switch the runtime refuses forgets nothing: the chat is still in the context the Stop paused", async () => {
+    const s = setup();
+    s.host.resumeSavedThread.mockRejectedValue(new Error("thread not found") as never);
+    await s.router.handle(s.args("resume", "saved"));
+    expect(s.clearStopMarker).not.toHaveBeenCalled();
+  });
+
+  it("a chat with no saved conversation forgets nothing", async () => {
+    const s = setup();
+    s.host.savedThreads.mockResolvedValue([] as never);
+    await s.router.handle(s.args("resume", "saved"));
+    expect(s.host.resumeSavedThread).not.toHaveBeenCalled();
+    expect(s.clearStopMarker).not.toHaveBeenCalled();
   });
 });

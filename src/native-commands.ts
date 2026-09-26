@@ -9,6 +9,14 @@ import type { Interactions, InteractionContext } from "./interactions.js";
 import type { SessionSettings } from "./session-settings.js";
 import type { RpcObject } from "./app-server.js";
 
+/**
+ * The line after a saved conversation is bound to the chat, from /resume and
+ * from the Sessions sheet's Resume alike (P6 stage 3, D25). BGOS's Codex
+ * canon quotes it to the model word for word, so it lives in one place.
+ */
+export const RESUMED_SAVED_CONVERSATION =
+  "Resumed the saved Codex conversation. Your HOAI messages remain in place.";
+
 export const NATIVE_COMMAND_DESCRIPTIONS = [
   ["model", "Choose this chat's Codex model and reasoning level"],
   ["effort", "Change the reasoning level for the current model"],
@@ -201,6 +209,14 @@ export class NativeCommands {
         pauseForChat(chatId: number): Promise<ThreadGoal | null>;
         resumeForChat(chatId: number): Promise<ThreadGoal | null>;
       };
+      /**
+       * `/resume` leaves the context this chat's Stop paused, exactly as
+       * `/new` and the Sessions sheet's Resume do (P6 stage 3, D25, review
+       * F4): the mission lane forgets the chat's Stop pause and discards that
+       * mission, so the owner's next message does not resume it into the
+       * resumed thread. Never throws.
+       */
+      clearStopMarker: (chatId: number, assistantId: number) => Promise<void>;
     },
   ) {}
 
@@ -560,9 +576,10 @@ export class NativeCommands {
         ));
       if (id) {
         await host.resumeSavedThread(args.chatId, id);
-        await say(
-          "Resumed the saved Codex conversation. Your HOAI messages remain in place.",
-        );
+        // After the switch, never before: a switch the runtime refused leaves
+        // the chat in the context the Stop paused (review F4).
+        await this.deps.clearStopMarker(args.chatId, args.assistantId);
+        await say(RESUMED_SAVED_CONVERSATION);
       }
       return;
     }

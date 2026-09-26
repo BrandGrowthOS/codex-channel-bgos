@@ -137,10 +137,15 @@ describe("HeartbeatController", () => {
       });
       hb.start();
       try {
+        // P6 stage 3 (C-32) added stop_pauses_mission: an owner Stop now
+        // pauses the chat's open mission instead of failing it. Its Wave E
+        // added sessions_library: this daemon answers the Sessions ops.
         expect(posts[0]!.capabilities).toEqual([
           "mission_events",
           "mission_goal_loop",
           "mission_pause",
+          "stop_pauses_mission",
+          "sessions_library",
         ]);
       } finally {
         hb.stop();
@@ -191,6 +196,8 @@ describe("HeartbeatController", () => {
             "mission_events",
             "mission_goal_loop",
             "mission_pause",
+            "stop_pauses_mission",
+            "sessions_library",
           ]);
       } finally {
         hb.stop();

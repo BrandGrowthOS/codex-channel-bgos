@@ -11,6 +11,10 @@
  * token that fails either is a 400 on the whole heartbeat, which would take
  * daemon liveness down with it.
  */
+import {
+  SESSIONS_LIBRARY,
+  STOP_PAUSES_MISSION,
+} from "./session-controls-contract.js";
 
 /** This daemon hears the eight mission events and tells its model in band. */
 export const MISSION_EVENTS = "mission_events";
@@ -53,8 +57,36 @@ export const MISSION_GOAL_CHECKS = "mission_goal_checks";
  */
 export const MISSION_PAUSE = "mission_pause";
 
+/**
+ * `stop_pauses_mission`, spelled by the contract file shared with BGOS and the
+ * Claude plugin (P6 stage 3, C-32). Declared from 0.16.0.
+ *
+ * An owner Stop, the app's Stop button or `/stop`, PAUSES the chat's open
+ * mission with the reason "Stopped by you" instead of failing it, and the
+ * owner's next message in that chat resumes it. The abort carries its cause
+ * (abort-cause.ts) and the mission lane does the pause and the resume.
+ * BGOS serves the Codex canon's Stop sentence only to a daemon that declares
+ * this, so the token ships in the same release as the code that keeps it.
+ */
+export { STOP_PAUSES_MISSION };
+
+/**
+ * `sessions_library`, spelled by the same contract file (P6 stage 3, C-32).
+ * Declared from 0.16.0.
+ *
+ * This daemon answers list_sessions, resume_session and rename_session on
+ * the control lane: the threads THIS HOAI chat has used (the set /resume
+ * offers), resumed into the chat or renamed through the runtime's own
+ * thread/name/set. BGOS shows the Sessions circle, and forwards a Sessions
+ * request, only for a pairing that declares it, so the token ships in the
+ * same release as the answers.
+ */
+export { SESSIONS_LIBRARY };
+
 export const DECLARED_CAPABILITIES: readonly string[] = Object.freeze([
   MISSION_EVENTS,
   MISSION_GOAL_LOOP,
   MISSION_PAUSE,
+  STOP_PAUSES_MISSION,
+  SESSIONS_LIBRARY,
 ]);

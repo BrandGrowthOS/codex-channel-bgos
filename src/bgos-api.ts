@@ -600,6 +600,47 @@ export class BgosApi {
   }
 
   /**
+   * Pause a mission, with an optional reason (P6 stage 3, C-32).
+   *
+   * An owner Stop pauses the chat's open mission with STOP_PAUSE_REASON
+   * rather than failing it. The answer is the snapshot the lane reads: a
+   * mission the owner had already paused comes back UNCHANGED, with the
+   * owner's own reason, and then it is not this daemon's pause to undo.
+   * The body carries `reason` only when there is one (PauseMissionDto
+   * declares nothing else).
+   */
+  async pauseMission(
+    assistantId: number,
+    missionId: number,
+    body: { reason?: string } = {},
+    options?: { timeout?: number },
+  ): Promise<MissionSnapshot> {
+    const r = await this.http.patch(
+      `integrations/assistants/${assistantId}/missions/${missionId}/pause`,
+      typeof body.reason === "string" ? { reason: body.reason } : {},
+      options,
+    );
+    return r.data.mission;
+  }
+
+  /**
+   * Resume a paused mission (P6 stage 3, C-32). The daemon calls this only
+   * for a mission its own owner Stop paused, on the owner's next message.
+   */
+  async resumeMission(
+    assistantId: number,
+    missionId: number,
+    options?: { timeout?: number },
+  ): Promise<MissionSnapshot> {
+    const r = await this.http.patch(
+      `integrations/assistants/${assistantId}/missions/${missionId}/resume`,
+      {},
+      options,
+    );
+    return r.data.mission;
+  }
+
+  /**
    * Report that this daemon's own goal loop stopped itself.
    *
    * The mission stays open on purpose: the answer belongs to the owner, so

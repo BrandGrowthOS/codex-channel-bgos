@@ -1055,3 +1055,146 @@ describe("a child agent's name and its last look at the turn's end", () => {
     expect((await settled).helpersStillRunning).toBeUndefined();
   });
 });
+
+describe("the saved threads as the Sessions library reads them (P6 stage 3, C-32)", () => {
+  // Spec 5.6: savedThreads grows its row from the same thread/read it has
+  // always done, and renameThread is new. Field names and the unknown method
+  // answer were read from the installed Codex CLI 0.154.0 with
+  // `codex app-server generate-ts` and a live probe
+  // (_tools-p6/evidence/s3/wave-e.rename-confirm.txt).
+  let home: string, server: Server, host: CodexHost;
+  const iso = (seconds: number) => new Date(seconds * 1000).toISOString();
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "hoai-saved-"));
+    vi.stubEnv("CODEX_BGOS_HOME", home);
+    writeFileSync(join(home, "threads.json"), JSON.stringify({ "7": "live" }));
+    writeFileSync(
+      join(home, "previous-threads.json"),
+      JSON.stringify({ "7:older": "older", "8:foreign": "foreign" }),
+    );
+    server = new Server();
+    server.threads = {
+      live: {
+        name: "Live work",
+        preview:
+          "HOAI event: assistant_id=1, sender_user_id=private\n\nMessage:\nStart   here",
+        createdAt: 1789000000,
+        updatedAt: 1789500000,
+        gitInfo: { sha: null, branch: "main", originUrl: null },
+      },
+      older: { name: null, preview: "Older question", createdAt: 1788000000 },
+      foreign: { name: "Not this chat's", preview: "" },
+    };
+    host = new CodexHost({
+      auth: { ok: true, mode: "chatgpt", label: "test" },
+      workdir: home,
+      server: server as any,
+    });
+  });
+  afterEach(() => {
+    host.close();
+    vi.unstubAllEnvs();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("savedThreads grows its row: title, preview, last activity, branch and Current, the live thread first", async () => {
+    expect(await host.savedThreads(7)).toEqual([
+      {
+        id: "live",
+        name: "Live work",
+        preview: "Start here",
+        lastActivityAt: iso(1789500000),
+        branch: "main",
+        current: true,
+      },
+      {
+        id: "older",
+        name: "Older question",
+        preview: null,
+        lastActivityAt: iso(1788000000),
+        branch: null,
+        current: false,
+      },
+    ]);
+  });
+
+  it("listSavedThreads filters by query before the cap and says when the set was cut", async () => {
+    const previous: Record<string, string> = {};
+    for (let i = 0; i < 35; i++) {
+      previous[`7:t${i}`] = `t${i}`;
+      server.threads[`t${i}`] = { name: `Plan ${i}`, preview: "" };
+    }
+    server.threads.t1 = { name: "Deploy checklist", preview: "" };
+    writeFileSync(join(home, "previous-threads.json"), JSON.stringify(previous));
+    const all = await host.listSavedThreads(7);
+    expect(all.threads).toHaveLength(30);
+    expect(all.threads[0]).toMatchObject({ id: "live", current: true });
+    expect(all.truncated).toBe(true);
+    const found = await host.listSavedThreads(7, "deploy");
+    expect(found.threads.map((t) => t.id)).toEqual(["t1"]);
+    expect(found.truncated).toBe(false);
+  });
+
+  it("renameThread sets the name through thread/name/set, for this chat's threads only", async () => {
+    const row = await host.renameThread(7, "older", "Named now");
+    expect(server.request).toHaveBeenCalledWith("thread/name/set", {
+      threadId: "older",
+      name: "Named now",
+    });
+    expect(row).toMatchObject({
+      id: "older",
+      name: "Named now",
+      preview: "Older question",
+      current: false,
+    });
+    await expect(host.renameThread(7, "foreign", "Mine")).rejects.toMatchObject({
+      code: "not_found",
+    });
+    expect(
+      server.request.mock.calls.filter((c) => c[0] === "thread/name/set"),
+    ).toHaveLength(1);
+  });
+
+  it("an unknown thread/name/set turns rename off for the life of the process", async () => {
+    const base = server.request.getMockImplementation()!;
+    server.request.mockImplementation(async (method: string, p: any) => {
+      if (method === "thread/name/set")
+        throw new Error(
+          "Invalid request: unknown variant `thread/name/set`, expected one of `initialize`, `thread/start`",
+        );
+      return base(method, p);
+    });
+    expect(host.sessionAbilities()).toEqual({ resume: true, rename: true });
+    await expect(host.renameThread(7, "older", "x")).rejects.toMatchObject({
+      code: "unsupported",
+    });
+    expect(host.sessionAbilities()).toEqual({ resume: true, rename: false });
+    await expect(host.renameThread(7, "older", "y")).rejects.toMatchObject({
+      code: "unsupported",
+    });
+    expect(
+      server.request.mock.calls.filter((c) => c[0] === "thread/name/set"),
+    ).toHaveLength(1);
+  });
+
+  it("resumeSavedThread answers with the row it bound, and refuses with the contract's codes", async () => {
+    await expect(host.resumeSavedThread(7, "foreign")).rejects.toMatchObject({
+      code: "not_found",
+      message: "That conversation does not belong to this HOAI chat.",
+    });
+    const busy = vi.spyOn(host, "isBusy").mockReturnValue(true);
+    await expect(host.resumeSavedThread(7, "older")).rejects.toMatchObject({
+      code: "busy",
+      message: "Stop the current response before changing this conversation.",
+    });
+    busy.mockRestore();
+    expect(await host.resumeSavedThread(7, "older")).toMatchObject({
+      id: "older",
+      name: "Older question",
+      current: true,
+    });
+    expect(
+      JSON.parse(readFileSync(join(home, "threads.json"), "utf8"))["7"],
+    ).toBe("older");
+  });
+});
