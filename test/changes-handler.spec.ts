@@ -375,6 +375,38 @@ describe("createChangesHandler", () => {
     }
   });
 
+  it("each read makes its own Git runner, so Git is looked up on PATH per read, never once for the daemon's life", async () => {
+    // Parity round, D-R2: Git runs by the absolute path found on PATH's
+    // absolute entries, looked up once per read, so a Git installed, moved
+    // or removed while the daemon runs is what the next read finds.
+    const notGit: RunGit = async () => ({
+      code: 128,
+      stdout: "",
+      stderr:
+        "fatal: not a git repository (or any of the parent directories): .git\n",
+      truncated: false,
+    });
+    const newRunGit = vi.fn(() => notGit);
+    const api = {
+      changesRpcAck: vi.fn(async () => ({})),
+      changesRpcResult: vi.fn(async (_rpcId: string, _body: ChangesResultBody) => ({})),
+    };
+    const handle = createChangesHandler({
+      api,
+      workdir: "/home/owner/billing-export",
+      owns: () => true,
+      newRunGit,
+      schedule: () => {},
+    } as Parameters<typeof createChangesHandler>[0]);
+    expect(newRunGit, "nothing is looked up before a read").not.toHaveBeenCalled();
+    await handle(frame({ rpcId: "rpc-a" }));
+    await handle(frame({ rpcId: "rpc-b" }));
+    expect(newRunGit, "one runner per read").toHaveBeenCalledTimes(2);
+    expect(
+      api.changesRpcResult.mock.calls.map(([, body]) => body.ok && body.payload.state),
+    ).toEqual(["not_git", "not_git"]);
+  });
+
   it("a failed ack does not stop the work", async () => {
     const h = harness({
       ack: () => Promise.reject(new Error("Request failed with status code 502")),

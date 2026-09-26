@@ -36,6 +36,15 @@
  * asks for status, and an agent's own `git add` or `git commit` never meets
  * an index.lock this read took.
  *
+ * GIT BY ITS ABSOLUTE PATH. `spawn("git", { cwd })` on Windows looks in the
+ * child's working folder BEFORE PATH (libuv's search_path, which uv_spawn
+ * hands the child's cwd), and a relative PATH entry does the same on any
+ * host. The agent writes that folder, so a git.exe it left there would run as
+ * the owner, outside the agent's own approvals, each time the owner opened the
+ * panel (measured on this plugin's node, parity round D-R2). So Git is looked
+ * up on PATH's ABSOLUTE entries only, once per read, and spawned by that path;
+ * no Git there reads as `git_missing`, and nothing is started.
+ *
  * The frame's caps are honoured and never raised (`readCaps`), the reads stop
  * at the byte cap and kill the child (a large diff never fails the whole read
  * the way a `maxBuffer` would), and the whole collection runs under the
@@ -46,7 +55,13 @@
  * system user.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { lstat as fsLstat, open as fsOpen } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import {
+  access as fsAccess,
+  lstat as fsLstat,
+  open as fsOpen,
+  stat as fsStat,
+} from "node:fs/promises";
 
 /** The frame's numbers, and the ceiling on each (backend CHANGES_FRAME_PAYLOAD). */
 export interface ChangesCaps {
@@ -184,106 +199,199 @@ export interface ChangesFs {
   readPrefix(path: string, limit: number): Promise<Uint8Array>;
 }
 
+/** Finds the Git to run: an absolute path, or null when no PATH entry holds one. */
+export type FindGit = (
+  env: Record<string, string | undefined>,
+) => Promise<string | null>;
+
+export interface FindGitDeps {
+  platform: string;
+  /** True when the path is a file this process may run. */
+  isRunnable: (path: string) => Promise<boolean>;
+}
+
+async function nodeIsRunnable(path: string): Promise<boolean> {
+  try {
+    const found = await fsStat(path);
+    if (!found.isFile()) return false;
+    if (process.platform !== "win32") await fsAccess(path, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** PATH's value. Windows spells the name Path and reads it case blind. */
+function pathVariable(
+  env: Record<string, string | undefined>,
+  win: boolean,
+): string {
+  if (!win) return typeof env.PATH === "string" ? env.PATH : "";
+  for (const [name, value] of Object.entries(env)) {
+    if (name.toUpperCase() === "PATH" && typeof value === "string") return value;
+  }
+  return "";
+}
+
 /**
- * Git through `spawn`, never a shell: stdout is read until `maxBytes` and the
- * child is then killed, so a large diff is cut instead of failing the whole
- * read. The budget's abort kills the child too. A Git that is not on PATH
- * rejects with the spawn error, whose `code` is `ENOENT`.
+ * An entry that names a folder on its own, whatever folder Git runs in.
+ * Empty, `.`, `bin`, a drive relative `C:tools` and a rooted `\tools` with no
+ * drive all depend on the working folder, so they are never looked at.
+ */
+function isAbsoluteEntry(dir: string, win: boolean): boolean {
+  if (win) return /^[A-Za-z]:[\\/]/.test(dir) || /^[\\/]{2}[^\\/]/.test(dir);
+  return dir.startsWith("/");
+}
+
+/**
+ * The Git lookup: the first absolute PATH entry holding `git.exe` (Windows)
+ * or a runnable `git` (elsewhere), in PATH order. Never the working folder.
+ */
+export function createFindGit(deps: Partial<FindGitDeps> = {}): FindGit {
+  const win = (deps.platform ?? process.platform) === "win32";
+  const isRunnable = deps.isRunnable ?? nodeIsRunnable;
+  return async (env) => {
+    for (const raw of pathVariable(env, win).split(win ? ";" : ":")) {
+      const dir = win ? raw.trim().replace(/^"(.*)"$/, "$1").trim() : raw;
+      if (!isAbsoluteEntry(dir, win)) continue;
+      const candidate = win
+        ? `${dir.replace(/[\\/]+$/, "")}\\git.exe`
+        : `${dir.replace(/\/+$/, "")}/git`;
+      if (await isRunnable(candidate)) return candidate;
+    }
+    return null;
+  };
+}
+
+/** What a read gets when no absolute PATH entry holds Git: ENOENT, as the
+ * spawn of a missing binary says, which the collector answers git_missing. */
+function gitNotFound(): Error {
+  return Object.assign(
+    new Error("git was not found on an absolute PATH entry"),
+    { code: "ENOENT" },
+  );
+}
+
+/**
+ * Git through `spawn`, never a shell, and by its ABSOLUTE path (see the
+ * header): `findGit` looks it up on PATH's absolute entries once per adapter,
+ * with the environment Git gets, and the handler makes one adapter per read.
+ * `bin` names the binary outright instead (the tests' own child processes).
+ * stdout is read until `maxBytes` and the child is then killed, so a large
+ * diff is cut instead of failing the whole read. The budget's abort kills the
+ * child too. No Git on PATH rejects with `code` `ENOENT` and starts nothing;
+ * so does a spawn of a binary that is not there.
  */
 export function createNodeRunGit(
-  options: { bin?: string; spawnImpl?: typeof spawn } = {},
+  options: { bin?: string; spawnImpl?: typeof spawn; findGit?: FindGit } = {},
 ): RunGit {
-  const bin = options.bin ?? "git";
   const spawnImpl = options.spawnImpl ?? spawn;
-  return (args, { cwd, env, maxBytes, signal }) =>
-    new Promise<GitRunResult>((resolve, reject) => {
-      if (signal.aborted) {
-        reject(new Error("changes read aborted"));
-        return;
-      }
-      let child: ChildProcess;
+  const findGit = options.findGit ?? createFindGit();
+  let located: Promise<string | null> | null =
+    options.bin !== undefined ? Promise.resolve(options.bin) : null;
+  return async (args, runOptions) => {
+    if (runOptions.signal.aborted) throw new Error("changes read aborted");
+    located ??= findGit(runOptions.env).catch(() => null);
+    const bin = await located;
+    if (!bin) throw gitNotFound();
+    return spawnGit(spawnImpl, bin, args, runOptions);
+  };
+}
+
+function spawnGit(
+  spawnImpl: typeof spawn,
+  bin: string,
+  args: readonly string[],
+  { cwd, env, maxBytes, signal }: GitRunOptions,
+): Promise<GitRunResult> {
+  return new Promise<GitRunResult>((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new Error("changes read aborted"));
+      return;
+    }
+    let child: ChildProcess;
+    try {
+      child = spawnImpl(bin, [...args], {
+        cwd,
+        env,
+        stdio: ["ignore", "pipe", "pipe"],
+        shell: false,
+        windowsHide: true,
+      });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let truncated = false;
+    const errChunks: Buffer[] = [];
+    let errSize = 0;
+    let settled = false;
+
+    const kill = () => {
       try {
-        child = spawnImpl(bin, [...args], {
-          cwd,
-          env,
-          stdio: ["ignore", "pipe", "pipe"],
-          shell: false,
-          windowsHide: true,
-        });
-      } catch (error) {
-        reject(error);
-        return;
+        child.kill();
+      } catch {
+        // Already gone.
       }
+    };
+    const settle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      fn();
+    };
+    const onAbort = () => {
+      kill();
+      settle(() => reject(new Error("changes read aborted")));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
 
-      const chunks: Buffer[] = [];
-      let size = 0;
-      let truncated = false;
-      const errChunks: Buffer[] = [];
-      let errSize = 0;
-      let settled = false;
-
-      const kill = () => {
-        try {
-          child.kill();
-        } catch {
-          // Already gone.
-        }
-      };
-      const settle = (fn: () => void) => {
-        if (settled) return;
-        settled = true;
-        signal.removeEventListener("abort", onAbort);
-        fn();
-      };
-      const onAbort = () => {
+    const stderrText = () => Buffer.concat(errChunks).toString("utf8");
+    child.stdout?.on("data", (chunk: Buffer) => {
+      if (truncated) return;
+      const room = maxBytes - size;
+      if (chunk.length > room) {
+        if (room > 0) chunks.push(chunk.subarray(0, room));
+        size = maxBytes;
+        truncated = true;
         kill();
-        settle(() => reject(new Error("changes read aborted")));
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
-
-      const stderrText = () => Buffer.concat(errChunks).toString("utf8");
-      child.stdout?.on("data", (chunk: Buffer) => {
-        if (truncated) return;
-        const room = maxBytes - size;
-        if (chunk.length > room) {
-          if (room > 0) chunks.push(chunk.subarray(0, room));
-          size = maxBytes;
-          truncated = true;
-          kill();
-          child.stdout?.destroy();
-          // Settle now, not on "close": on Windows Git's launcher can leave a
-          // grandchild holding the pipes for a while after the kill, and the
-          // read already has everything it will send.
-          settle(() =>
-            resolve({
-              code: null,
-              stdout: Buffer.concat(chunks).toString("utf8"),
-              stderr: stderrText(),
-              truncated: true,
-            }),
-          );
-          return;
-        }
-        chunks.push(chunk);
-        size += chunk.length;
-      });
-      child.stderr?.on("data", (chunk: Buffer) => {
-        if (errSize >= STDERR_MAX) return;
-        errChunks.push(chunk.subarray(0, STDERR_MAX - errSize));
-        errSize += Math.min(chunk.length, STDERR_MAX - errSize);
-      });
-      child.on("error", (error) => settle(() => reject(error)));
-      child.on("close", (code) =>
+        child.stdout?.destroy();
+        // Settle now, not on "close": on Windows Git's launcher can leave a
+        // grandchild holding the pipes for a while after the kill, and the
+        // read already has everything it will send.
         settle(() =>
           resolve({
-            code: truncated ? null : code,
+            code: null,
             stdout: Buffer.concat(chunks).toString("utf8"),
             stderr: stderrText(),
-            truncated,
+            truncated: true,
           }),
-        ),
-      );
+        );
+        return;
+      }
+      chunks.push(chunk);
+      size += chunk.length;
     });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      if (errSize >= STDERR_MAX) return;
+      errChunks.push(chunk.subarray(0, STDERR_MAX - errSize));
+      errSize += Math.min(chunk.length, STDERR_MAX - errSize);
+    });
+    child.on("error", (error) => settle(() => reject(error)));
+    child.on("close", (code) =>
+      settle(() =>
+        resolve({
+          code: truncated ? null : code,
+          stdout: Buffer.concat(chunks).toString("utf8"),
+          stderr: stderrText(),
+          truncated,
+        }),
+      ),
+    );
+  });
 }
 
 /** The real file system: `lstat`, and a bounded read that never loads more. */

@@ -46,6 +46,7 @@ import {
   readCaps,
   type ChangesCaps,
   type ChangesResultBody,
+  type RunGit,
 } from "./git-changes.js";
 
 export interface ChangesRpcFrame {
@@ -73,6 +74,13 @@ export interface ChangesHandlerDeps {
   /** Whether this daemon runs that agent (the adapter's scope rule). */
   owns: (assistantId: string) => boolean;
   collect?: ChangesCollect;
+  /**
+   * Makes the Git runner for ONE read (the default collector calls it per
+   * read), so Git is looked up on PATH's absolute entries per read: a Git
+   * installed, moved or removed while the daemon runs is what the next read
+   * finds (parity round, D-R2). The default is createNodeRunGit().
+   */
+  newRunGit?: () => RunGit;
   log?: (message: string) => void;
   nowImpl?: () => number;
   /**
@@ -157,10 +165,11 @@ function scheduleUnref(run: () => void, ms: number): void {
 export function createChangesHandler(deps: ChangesHandlerDeps) {
   const nowImpl = deps.nowImpl ?? Date.now;
   const schedule = deps.schedule ?? scheduleUnref;
-  const runGit = createNodeRunGit();
+  const newRunGit = deps.newRunGit ?? (() => createNodeRunGit());
   const collect: ChangesCollect =
     deps.collect ??
-    ((input) => collectChanges({ ...input, runGit, fs: nodeChangesFs }));
+    ((input) =>
+      collectChanges({ ...input, runGit: newRunGit(), fs: nodeChangesFs }));
   const seen = new Map<string, Seen>();
   /** The entries still holding their answer, oldest first. */
   let kept: Answered[] = [];

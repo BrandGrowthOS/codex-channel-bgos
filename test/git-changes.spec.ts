@@ -19,6 +19,8 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
+  chmodSync,
+  copyFileSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -34,6 +36,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import {
   collectChanges,
+  createFindGit,
   createNodeRunGit,
   nodeChangesFs,
   readCaps,
@@ -225,6 +228,38 @@ function okFs() {
 }
 
 const FIXED_NOW = () => Date.parse("2026-09-26T09:00:00.000Z");
+
+/** Where Git for Windows puts its launcher, written out. */
+const GIT_EXE = "C:\\Program Files\\Git\\cmd\\git.exe";
+
+/**
+ * A spawn that starts no process: it records the command it is handed and
+ * answers each argv from `script` the way a Git child would (stdout, then
+ * close with the exit code). An argv it was not given exits 99.
+ */
+function recordingSpawn(script: Record<string, Reply>) {
+  const commands: string[] = [];
+  const spawnImpl = ((command: string, args: string[]) => {
+    commands.push(command);
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      kill: () => true,
+    });
+    const reply = script[key(args)];
+    setImmediate(() => {
+      const scripted =
+        reply && typeof reply === "object" && !(reply instanceof Error)
+          ? reply
+          : { code: 99, stderr: `unscripted git ${key(args)}\n` };
+      child.stdout.end(scripted.stdout ?? "");
+      child.stderr.end(scripted.stderr ?? "");
+      setImmediate(() => child.emit("close", scripted.code ?? 0));
+    });
+    return child;
+  }) as unknown as typeof spawn;
+  return { spawnImpl, commands };
+}
 
 // ---------------------------------------------------------------------------
 // the collector
@@ -518,15 +553,27 @@ describe("collectChanges", () => {
       stderr: new PassThrough(),
       kill: vi.fn(() => true),
     });
-    const adapter = createNodeRunGit({
-      spawnImpl: (() => child) as unknown as typeof spawn,
+    // The adapter looks Git up before it spawns (parity round, D-R2), so the
+    // child writes only once it has been started, as a real one would.
+    let started!: () => void;
+    const spawned = new Promise<void>((resolve) => {
+      started = resolve;
     });
+    const adapter = createNodeRunGit({
+      spawnImpl: (() => {
+        started();
+        return child;
+      }) as unknown as typeof spawn,
+      // The environment below has no PATH; the lookup names Git outright.
+      findGit: async () => GIT_EXE,
+    } as Parameters<typeof createNodeRunGit>[0]);
     const pending = adapter(PATCH, {
       cwd: ROOT,
       env: {},
       maxBytes: 1_024,
       signal: new AbortController().signal,
     });
+    await spawned;
     child.stderr.write("warning: something\n");
     child.stdout.write(Buffer.alloc(4_096, 0x78));
     const run = await pending;
@@ -537,6 +584,75 @@ describe("collectChanges", () => {
       truncated: true,
     });
     expect(child.kill).toHaveBeenCalled();
+  });
+
+  // Parity round, D-R2 (lane D's review): spawn("git", { cwd }) on Windows
+  // looks in the child's working folder BEFORE PATH (libuv's search_path),
+  // and a relative PATH entry does the same anywhere. The agent writes that
+  // folder, so a git.exe it left there would run as the owner each time the
+  // owner opened the panel.
+  it("the node adapter runs the Git that PATH names by its absolute path, never a bare git a folder could answer", async () => {
+    const { spawnImpl, commands } = recordingSpawn(okScript());
+    const lookups: Array<Record<string, string | undefined>> = [];
+    const runGit = createNodeRunGit({
+      spawnImpl,
+      findGit: async (env: Record<string, string | undefined>) => {
+        lookups.push(env);
+        return GIT_EXE;
+      },
+    } as Parameters<typeof createNodeRunGit>[0]);
+    const result = await collectChanges({
+      workdir: WORKDIR,
+      caps: readCaps({}),
+      runGit,
+      fs: okFs().fs,
+      env: { Path: "C:\\Program Files\\Git\\cmd" },
+    });
+    expect(result.ok && result.payload.state).toBe("ok");
+    expect(
+      commands,
+      "every command runs the absolute path, never a bare name the working folder could answer",
+    ).toEqual(Array.from({ length: 7 }, () => GIT_EXE));
+    expect(lookups, "PATH is looked up once per read").toHaveLength(1);
+    // With the environment Git itself gets.
+    expect(lookups[0]).toMatchObject({
+      Path: "C:\\Program Files\\Git\\cmd",
+      GIT_OPTIONAL_LOCKS: "0",
+    });
+  });
+
+  it("a PATH with no Git answers git_missing and starts nothing", async () => {
+    const { spawnImpl, commands } = recordingSpawn(okScript());
+    const runGit = createNodeRunGit({
+      spawnImpl,
+      findGit: async () => null,
+    } as Parameters<typeof createNodeRunGit>[0]);
+    const result = await collectChanges({
+      workdir: WORKDIR,
+      caps: readCaps({}),
+      runGit,
+      fs: okFs().fs,
+      now: FIXED_NOW,
+    });
+    expect(result).toEqual({
+      ok: true,
+      payload: {
+        v: 1,
+        state: "git_missing",
+        folder: "billing",
+        branch: null,
+        head: null,
+        numstat: "",
+        numstatTruncated: false,
+        patch: "",
+        patchTruncated: false,
+        untracked: "",
+        untrackedTruncated: false,
+        untrackedFiles: [],
+        takenAt: "2026-09-26T09:00:00.000Z",
+      },
+    });
+    expect(commands).toEqual([]);
   });
 
   it("never sends more than the cap, even when a read hands back more", async () => {
@@ -898,6 +1014,70 @@ describe("collectChanges", () => {
 // against a real Git repository
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// finding Git (parity round, D-R2)
+// ---------------------------------------------------------------------------
+
+describe("createFindGit", () => {
+  /** A lookup where EVERY candidate "exists" except the ones named absent,
+   * so an entry that should never be looked at would win if it were. */
+  function lookup(platform: string, absent: string[] = []) {
+    const probed: string[] = [];
+    const findGit = createFindGit({
+      platform,
+      isRunnable: async (path: string) => {
+        probed.push(path);
+        return !absent.includes(path);
+      },
+    });
+    return { findGit, probed };
+  }
+
+  it("finds Git on the absolute PATH entries only, in order; an empty or relative entry, which names the folder Git runs in, is never looked at", async () => {
+    // Windows, where the variable is spelled Path and read case blind.
+    const win = lookup("win32", ["D:\\empty\\git.exe"]);
+    const found = await win.findGit({
+      Path: [
+        ".",
+        "",
+        "bin",
+        "C:tools",
+        "\\tools",
+        "D:\\empty\\",
+        '  "C:\\Program Files\\Git\\cmd"  ',
+        "E:\\later",
+      ].join(";"),
+    });
+    expect(found).toBe(GIT_EXE);
+    expect(win.probed).toEqual(["D:\\empty\\git.exe", GIT_EXE]);
+
+    // A UNC entry is absolute.
+    const unc = lookup("win32");
+    expect(await unc.findGit({ PATH: "bin;\\\\server\\share\\git\\cmd" })).toBe(
+      "\\\\server\\share\\git\\cmd\\git.exe",
+    );
+    expect(unc.probed).toEqual(["\\\\server\\share\\git\\cmd\\git.exe"]);
+
+    // Elsewhere: a leading slash, and a runnable file named git.
+    const posix = lookup("linux", ["/usr/local/bin/git"]);
+    expect(
+      await posix.findGit({ PATH: ":.:bin:./tools:/usr/local/bin/:/usr/bin:/bin" }),
+    ).toBe("/usr/bin/git");
+    expect(posix.probed).toEqual(["/usr/local/bin/git", "/usr/bin/git"]);
+  });
+
+  it("only relative entries, or no PATH at all, find nothing and look at nothing", async () => {
+    const win = lookup("win32");
+    expect(await win.findGit({ Path: ".;bin;C:tools;\\tools" })).toBeNull();
+    expect(await win.findGit({})).toBeNull();
+    expect(win.probed).toEqual([]);
+    const posix = lookup("linux");
+    expect(await posix.findGit({ PATH: ".:bin:" })).toBeNull();
+    expect(await posix.findGit({})).toBeNull();
+    expect(posix.probed).toEqual([]);
+  });
+});
+
 const gitOnPath = spawnSync("git", ["--version"], { windowsHide: true }).status === 0;
 
 describe.skipIf(!gitOnPath)("against a real Git repository", () => {
@@ -1162,4 +1342,76 @@ describe.skipIf(!gitOnPath)("against a real Git repository", () => {
       expect(result.payload.numstat).toBe("1\t1\tvendor/lib\0");
     }, 30_000);
   }
+
+  it("a git planted in the folder Git runs in is never the one that runs (parity round, D-R2)", async () => {
+    writeFileSync(globalConfig, "");
+    const win = process.platform === "win32";
+    const scratch = mkdtempSync(join(tmpdir(), "bgos-changes-planted-"));
+    made.push(scratch);
+    const sub = join(scratch, "sub");
+    mkdirSync(sub);
+    // Built with real Git BEFORE anything is planted.
+    const git = (...args: string[]) => {
+      const run = spawnSync("git", args, { cwd: scratch, env, windowsHide: true });
+      if (run.status !== 0) {
+        throw new Error(`setup git ${args.join(" ")}: ${String(run.stderr)}`);
+      }
+    };
+    git("-c", "init.defaultBranch=main", "init", "-q");
+    writeFileSync(join(scratch, "a.txt"), "one\n");
+    git("add", "a.txt");
+    git("-c", "commit.gpgsign=false", "commit", "-q", "-m", "first");
+    writeFileSync(join(scratch, "a.txt"), "two\n");
+    // The planted names stay out of the untracked list.
+    mkdirSync(join(scratch, ".git", "info"), { recursive: true });
+    writeFileSync(join(scratch, ".git", "info", "exclude"), "git.exe\ngit\n");
+
+    // A harmless binary named git in the working folder AND at the root: a
+    // copy of whoami.exe on Windows (it only refuses Git's arguments), a
+    // script that exits 3 elsewhere, where a folder is searched only through
+    // a relative PATH entry, so one is added.
+    const plantedEnv: Record<string, string | undefined> = { ...env };
+    for (const dir of [sub, scratch]) {
+      if (win) {
+        copyFileSync(
+          join(process.env.SystemRoot ?? "C:\\Windows", "System32", "whoami.exe"),
+          join(dir, "git.exe"),
+        );
+      } else {
+        writeFileSync(join(dir, "git"), "#!/bin/sh\nexit 3\n");
+        chmodSync(join(dir, "git"), 0o755);
+      }
+    }
+    if (!win) plantedEnv.PATH = `.:${plantedEnv.PATH ?? ""}`;
+
+    // The control: on this host a bare git started in that folder IS the
+    // planted one, so the case below can fail.
+    const control = spawnSync("git", ["--version"], {
+      cwd: sub,
+      env: plantedEnv,
+      windowsHide: true,
+    });
+    expect(
+      String(control.stdout),
+      "control: a bare git in the planted folder is not Git",
+    ).not.toMatch(/^git version/);
+
+    const result = await collectChanges({
+      workdir: sub,
+      caps: readCaps({}),
+      runGit: createNodeRunGit(),
+      fs: nodeChangesFs,
+      env: plantedEnv,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.payload).toMatchObject({
+      state: "ok",
+      folder: basename(scratch),
+      branch: "main",
+      numstat: "1\t1\ta.txt\0",
+      untracked: "",
+      untrackedFiles: [],
+    });
+  }, 30_000);
 });
