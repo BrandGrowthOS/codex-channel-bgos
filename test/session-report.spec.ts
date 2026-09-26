@@ -33,8 +33,10 @@ import {
   reportFromThreadResponse,
   reportFromThreadSettings,
   reportKey,
+  sessionReportRetryable,
   type SessionReport,
 } from "../src/session-report.js";
+import { PairingRevokedError } from "../src/types.js";
 
 const wire = JSON.parse(
   readFileSync(
@@ -393,5 +395,28 @@ describe("Phase B: the patterns the builders use are the ones the pin hashes", (
       reportFromThreadSettings({ model: "gpt-5.5", serviceTier: "t".repeat(51) }, AT)
         ?.serviceTier,
     ).toBeNull();
+  });
+});
+
+/**
+ * P5 stage 7, round C, decision 3: which failed sends are worth repeating.
+ * BgosApi's interceptor turns a 401 into a PairingRevokedError with no
+ * `response`, and "no status" had read as "no answer", so a revoked pairing
+ * was retried with the dead token. It is a refusal, and never retried.
+ */
+describe("Round C: sessionReportRetryable", () => {
+  it("a revoked pairing is never retryable", () => {
+    expect(sessionReportRetryable(new PairingRevokedError("revoked"))).toBe(false);
+  });
+
+  it("CONTROL: no answer, a timeout, a 5xx, a 408 and a 429 still are; any other 4xx is not", () => {
+    expect(sessionReportRetryable(new Error("ECONNREFUSED"))).toBe(true);
+    expect(
+      sessionReportRetryable(Object.assign(new Error("t"), { code: "ECONNABORTED" })),
+    ).toBe(true);
+    for (const status of [500, 503, 408, 429])
+      expect(sessionReportRetryable({ response: { status } })).toBe(true);
+    for (const status of [400, 401, 403, 404])
+      expect(sessionReportRetryable({ response: { status } })).toBe(false);
   });
 });

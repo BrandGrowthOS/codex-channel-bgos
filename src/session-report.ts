@@ -28,6 +28,7 @@
  * the stage 7 gate, so the app claims nothing about it (the spec's L7).
  */
 import type { SessionSettings } from "./session-settings.js";
+import { PairingRevokedError } from "./types.js";
 
 /**
  * One report, exactly the body the rail stores (all five keys, always).
@@ -105,6 +106,12 @@ export const SESSION_REPORT_PATTERNS = Object.freeze({
  * is permanent and is not. Per chat, holding only the chat's LATEST value,
  * after a backoff that doubles from the first delay and stops growing at the
  * cap.
+ *
+ * A REVOKED PAIRING IS A REFUSAL (P5 stage 7, round C, decision 3). BgosApi's
+ * response interceptor turns every 401 into a PairingRevokedError that
+ * carries no `response`, so "no status" alone would read it as "no answer"
+ * and send the report again with the dead token. It is never retried; the
+ * adapter's fatal latch owns what happens next.
  */
 export const SESSION_REPORT_RETRY_FIRST_MS = 2_000;
 export const SESSION_REPORT_RETRY_MAX_MS = 300_000;
@@ -120,6 +127,7 @@ export function sessionReportRetryDelayMs(attempt: number): number {
 
 /** Is this failed send worth sending again? See the constants above. */
 export function sessionReportRetryable(error: unknown): boolean {
+  if (error instanceof PairingRevokedError) return false;
   const status = (error as { response?: { status?: unknown } } | null)
     ?.response?.status;
   if (typeof status !== "number") return true;

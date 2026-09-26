@@ -236,17 +236,29 @@ export class CodexAdapter {
    * A failed report waiting to be sent again (P5 stage 7, Phase B, decision
    * 3): per chat, ONLY the chat's latest value, after a backoff that doubles
    * and is capped. A report that lands drops it; stop and a revoked pairing
-   * clear them all.
+   * clear them all. `generation` is the value's own (round C, decision 2).
    */
   private sessionReportRetries?: Map<
     number,
     {
       assistantId: number;
       report: SessionReport;
+      generation: number;
       attempt: number;
       timer: ReturnType<typeof setTimeout> | null;
     }
   >;
+  /**
+   * Per chat, the generation of the newest report ENQUEUED (P5 stage 7,
+   * round C, decision 2), stamped from one counter that only grows. A failure
+   * holds its value for a retry only while it is still the chat's newest, and
+   * a report that lands drops a held retry only when the held value is not
+   * newer than it; so an older value can never replace, or drop, a newer one.
+   * A retry carries the generation of the value it holds and stamps nothing.
+   * Created on first use, like the maps above.
+   */
+  private sessionReportGenerations?: Map<number, number>;
+  private sessionReportSeq?: number;
   /**
    * Chats that already had a LIVE report in this process (Phase B, decision
    * 1). The connect sweep skips them: that report is this process's truth,
@@ -2173,6 +2185,9 @@ export class CodexAdapter {
    * report's turn in the chain comes (the connect sweep, Phase B, decision
    * 1), answering null to send nothing. Resolves when this report has left
    * (or been skipped), never rejects.
+   *
+   * Each call stamps the chat's next GENERATION (round C, decision 2), so a
+   * failure can tell whether a newer report is already on its way.
    */
   private reportSessionSettings(
     assistantId: number,
@@ -2180,27 +2195,62 @@ export class CodexAdapter {
     report: SessionReport | (() => SessionReport | null),
     options: { force?: boolean } = {},
   ): Promise<void> {
+    const generation = (this.sessionReportSeq =
+      (this.sessionReportSeq ?? 0) + 1);
+    (this.sessionReportGenerations ??= new Map()).set(chatId, generation);
+    return this.enqueueSessionReport(
+      chatId,
+      () => {
+        const value = typeof report === "function" ? report() : report;
+        return value ? { assistantId, report: value, generation } : null;
+      },
+      options,
+    );
+  }
+
+  /**
+   * The chat's chain itself: `next` is called when this report's turn comes
+   * and answers what to send, as which agent and of which generation, or
+   * null to send nothing. A report that lands drops a held retry that is not
+   * newer; a failure holds its value only while it is the chat's NEWEST
+   * report and the pairing is not latched (a report in flight when the latch
+   * closed comes back after the latch cleared the retries, round C, decision
+   * 3), and otherwise drops a held retry that is not newer.
+   */
+  private enqueueSessionReport(
+    chatId: number,
+    next: () => {
+      assistantId: number;
+      report: SessionReport;
+      generation: number;
+    } | null,
+    options: { force?: boolean } = {},
+  ): Promise<void> {
     const chains = (this.sessionReportChains ??= new Map());
     const sent = (this.lastSessionSettingsByChat ??= new Map());
     const run = (chains.get(chatId) ?? Promise.resolve())
       .then(async () => {
-        const value = typeof report === "function" ? report() : report;
-        if (!value) return;
+        const turn = next();
+        if (!turn) return;
+        const { assistantId, report: value, generation } = turn;
         const key = reportKey(value);
         if (!options.force && sent.get(chatId) === key) return;
         sent.set(chatId, key);
         try {
           await this.api.reportSessionSettings(assistantId, chatId, value);
-          // It landed: anything older still waiting is stale now.
-          this.dropSessionReportRetry(chatId);
+          // It landed: anything older still waiting is stale now, and
+          // anything newer is not.
+          this.dropSessionReportRetry(chatId, generation);
         } catch (error) {
           // A 404 from a backend without the route, or anything else: the
           // row stays as it was. Forget the key only while it is still ours,
           // so a newer report that already left is not re-sent for nothing.
           if (sent.get(chatId) === key) sent.delete(chatId);
-          if (sessionReportRetryable(error))
-            this.holdSessionReportRetry(assistantId, chatId, value);
-          else this.dropSessionReportRetry(chatId);
+          const newest =
+            this.sessionReportGenerations?.get(chatId) === generation;
+          if (newest && !this.fatalLatched && sessionReportRetryable(error))
+            this.holdSessionReportRetry(assistantId, chatId, value, generation);
+          else this.dropSessionReportRetry(chatId, generation);
         }
       })
       .catch(() => {});
@@ -2222,31 +2272,70 @@ export class CodexAdapter {
     assistantId: number,
     chatId: number,
     report: SessionReport,
+    generation: number,
   ): void {
     const retries = (this.sessionReportRetries ??= new Map());
     const held = retries.get(chatId) ?? {
       assistantId,
       report,
+      generation,
       attempt: 0,
       timer: null,
     };
     held.assistantId = assistantId;
     held.report = report;
+    held.generation = generation;
     retries.set(chatId, held);
     if (held.timer) return;
     held.timer = setTimeout(() => {
       held.timer = null;
       held.attempt += 1;
-      void this.reportSessionSettings(held.assistantId, chatId, held.report);
+      // THE VALUE IS READ AT THE RETRY'S TURN, not when the timer fires
+      // (round C, decision 2). The timer can fire while a newer report is
+      // still in flight; this retry then waits behind it in the chat's
+      // chain, and when its turn comes the chat's latest held value is
+      // whatever that newer report left (its own, if it failed), or nothing
+      // at all (it landed). A value captured here would land an older value
+      // after a newer one.
+      void this.enqueueSessionReport(chatId, () => {
+        const latest = this.sessionReportRetries?.get(chatId);
+        return latest
+          ? {
+              assistantId: latest.assistantId,
+              report: latest.report,
+              generation: latest.generation,
+            }
+          : null;
+      });
     }, sessionReportRetryDelayMs(held.attempt));
     held.timer.unref?.();
   }
 
-  private dropSessionReportRetry(chatId: number): void {
+  /**
+   * Drop the chat's held retry; with `upTo`, only when the held value is not
+   * newer than that generation (round C, decision 2). Without it, whatever is
+   * held (stop, a revoked pairing).
+   */
+  private dropSessionReportRetry(chatId: number, upTo?: number): void {
     const held = this.sessionReportRetries?.get(chatId);
     if (!held) return;
+    if (upTo !== undefined && held.generation > upTo) return;
     if (held.timer) clearTimeout(held.timer);
     this.sessionReportRetries!.delete(chatId);
+  }
+
+  /**
+   * Forget every model and effort report this process believes BGOS holds
+   * (P5 stage 7, round C, decision 4): the dedupe keys and the live marks.
+   * Called by recover() on an in process re pair, because the new pairing's
+   * bind cleared every chat's value on BGOS's side; kept, the dedupe map
+   * would swallow every unchanged value, and the live marks would keep the
+   * connect sweep from sending the stored ones, so every Codex row stayed
+   * missing until a value changed or the daemon restarted.
+   */
+  private forgetSessionReports(): void {
+    this.lastSessionSettingsByChat?.clear();
+    this.liveSessionReportChats?.clear();
   }
 
   /** Cancel every waiting retry: the daemon is stopping, or was revoked. */
@@ -2271,6 +2360,10 @@ export class CodexAdapter {
    * (decision 3): a chat's agent comes from the pairs kept on disk when no
    * event has named it since the restart. Never throws: a row the app cannot
    * draw never costs a boot.
+   *
+   * AND AFTER AN IN PROCESS RE PAIR (round C, decision 4): recover() forgets
+   * what it sent and runs this again once identity is back, because the new
+   * pairing's bind cleared every chat's value on BGOS's side.
    */
   private async reportStoredSessionSettings(): Promise<void> {
     try {
@@ -2895,12 +2988,20 @@ export class CodexAdapter {
     this.heartbeat.setLastError(null);
     this.stopSecretsWatch();
     this.ws.disconnect();
+    // The new pairing starts from nothing on BGOS's side: a bind to a new
+    // pairing clears every chat's model and effort (Phase B, decision 4), so
+    // what this process remembers having sent is no longer true (round C,
+    // decision 4).
+    this.forgetSessionReports();
     try {
       await this.ws.connect();
       const ok = await this.refreshIdentity();
       if (ok) {
         this.identityReady = true;
         await this.ws.triggerBackfill();
+        // The connect sweep again, on the boot's own terms: after identity,
+        // never awaited.
+        void this.reportStoredSessionSettings();
       }
       this.startPollLoop();
       await this.outbound.replaySpool();

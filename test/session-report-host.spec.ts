@@ -667,6 +667,74 @@ describe("the host's report seam", () => {
   });
 
   /**
+   * P5 stage 7, round C, decision 6: a REFUSED change fires the rollback
+   * report only when the runtime reported a change DURING the request. The
+   * Phase B catch always re-reported the restored value, calling it free
+   * because the adapter dedupes a value already sent. In a REROUTED chat it
+   * was not free: the restored value is the stored pair or the runtime's last
+   * one, unflagged, so a refused /model cleared the reroute flag and the row
+   * switched to a model no turn had run, until the next turn rerouted again.
+   */
+  describe("Round C: a refused change reports a rollback only when the runtime moved", () => {
+    /** A loaded thread whose last turn the runtime rerouted. */
+    async function reroutedChat() {
+      build({ 10: "persisted" });
+      const turn = host.runTurn(10, "hi");
+      await vi.waitFor(() => expect(seen).toHaveLength(1));
+      server.note("model/rerouted", rerouted("persisted"));
+      server.finish("persisted");
+      await turn;
+      await vi.waitFor(() => expect(seen).toHaveLength(2));
+      expect(values()[1]![1]).toMatchObject({ model: "gpt-5.5", rerouted: true });
+    }
+
+    it("a change the runtime refuses outright leaves a rerouted chat's report, and its flag, alone", async () => {
+      await reroutedChat();
+      server.rejectUpdate = true;
+      await expect(
+        host.updateSettings(10, { model: "gpt-6-astra", effort: "high" }),
+      ).rejects.toThrow("runtime rejected");
+      await settle();
+      expect(seen).toHaveLength(2);
+      // The flag is still on: a turn that completes clean is what clears it.
+      server.note("turn/started", { threadId: "persisted", turn: { id: "b" } });
+      server.finish("persisted");
+      await vi.waitFor(() => expect(seen).toHaveLength(3));
+      expect(values()[2]![1]).toMatchObject({ rerouted: false });
+    });
+
+    it("CONTROL: in the same rerouted chat, a change the runtime APPLIED before the request failed is rolled back and reported", async () => {
+      await reroutedChat();
+      server.applyThenReject = true;
+      await expect(
+        host.updateSettings(10, { model: "gpt-6-astra", effort: "high" }),
+      ).rejects.toThrow("timed out");
+      await settle();
+      // The runtime's echo of the applied change, then the rollback, which
+      // reports what the runtime last said it runs (it applied the change,
+      // and nothing is stored to re-assert another): the same decision 5
+      // answer as a chat that was never rerouted.
+      expect(values().slice(2).map(([, v]) => (v as any).model)).toEqual([
+        "gpt-6-astra",
+        "gpt-6-astra",
+      ]);
+    });
+
+    it("a refused change in a chat that was never rerouted fires nothing either", async () => {
+      build({ 10: "persisted" });
+      await host.updateSettings(10, { model: "gpt-5.5", effort: "low" });
+      await settle();
+      seen = [];
+      server.rejectUpdate = true;
+      await expect(
+        host.updateSettings(10, { model: "gpt-6-astra", effort: "high" }),
+      ).rejects.toThrow("runtime rejected");
+      await settle();
+      expect(seen).toEqual([]);
+    });
+  });
+
+  /**
    * P5 stage 7, Phase B, decision 10: the ONE answer to "what does this chat
    * run", the store first and the runtime's own value second, for the /model
    * question's "current" as for the report.

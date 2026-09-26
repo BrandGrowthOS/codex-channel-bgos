@@ -723,6 +723,15 @@ export class CodexHost {
    */
   private readonly reroutedChats = new Set<number>();
   /**
+   * Chats with a settings change in flight, and whether the runtime said
+   * `thread/settings/updated` for the chat while it was (P5 stage 7, round
+   * C, decision 6). Only a change the runtime reported moving is rolled
+   * back with a report; one it refused outright changed nothing anyone was
+   * told. One entry per chat at most: withIdleControl runs one change per
+   * chat at a time, and the entry goes when the request settles.
+   */
+  private readonly runtimeMovedDuringChange = new Map<number, boolean>();
+  /**
    * Threads that said `model/rerouted` since their last `turn/completed`.
    * Turns on one thread run one after another, so "since the last
    * completion" is "in the turn now ending", whichever of `turn/started` and
@@ -1036,6 +1045,7 @@ export class CodexHost {
       // Persist before acknowledgement. Roll back if the runtime rejects the policy/model.
       const saved = this.settings.get(chatId);
       this.settings.set(chatId, next);
+      this.runtimeMovedDuringChange.set(chatId, false);
       try {
         if (threadId)
           await this.server.request("thread/settings/update", {
@@ -1050,13 +1060,23 @@ export class CodexHost {
         // reported store first while the store held `next`. So the value
         // restored is reported too: the stored pair when there is one (it is
         // re-asserted on the next turn), else what the runtime last said it
-        // runs. A change it refused outright re-reports a value already
-        // sent, which the adapter's dedupe makes free.
-        this.fireSessionReport(
-          chatId,
-          reportFromStored(saved) ?? this.lastRuntimeReport.get(chatId) ?? null,
-        );
+        // runs.
+        //
+        // ONLY WHEN THE RUNTIME MOVED (round C, decision 6). A change it
+        // refused outright was never reported, so there is nothing to roll
+        // back, and a report here is not free: in a REROUTED chat the
+        // restored value is unflagged, which cleared the reroute and drew a
+        // model no turn had run until the next turn rerouted again.
+        if (this.runtimeMovedDuringChange.get(chatId))
+          this.fireSessionReport(
+            chatId,
+            reportFromStored(saved) ??
+              this.lastRuntimeReport.get(chatId) ??
+              null,
+          );
         throw error;
+      } finally {
+        this.runtimeMovedDuringChange.delete(chatId);
       }
       // (a) Only once it LANDED: stored and, when the chat has a thread,
       // taken by the runtime.
@@ -2429,6 +2449,10 @@ export class CodexHost {
   private routeThreadSettings(threadId: string, params: RpcObject): void {
     const chatId = this.chatForThread(threadId);
     if (chatId === null) return;
+    // A change in flight for this chat now has something to roll back
+    // (round C, decision 6).
+    if (this.runtimeMovedDuringChange.has(chatId))
+      this.runtimeMovedDuringChange.set(chatId, true);
     this.reportRuntimeValue(chatId, reportFromThreadSettings(params.threadSettings));
   }
 

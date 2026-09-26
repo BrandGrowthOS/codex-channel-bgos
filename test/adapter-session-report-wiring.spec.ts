@@ -33,6 +33,7 @@ import {
   SESSION_REPORT_RETRY_MAX_MS,
   type SessionReport,
 } from "../src/session-report.js";
+import { PairingRevokedError } from "../src/types.js";
 
 const wire = JSON.parse(
   readFileSync(
@@ -557,6 +558,313 @@ describe("Phase B: a failed report is retried, holding only the latest value", (
     expect(latch.slice(0, latch.indexOf("\n  }\n"))).toContain(
       "this.clearSessionReportRetries();",
     );
+  });
+});
+
+/**
+ * P5 stage 7, round C, decision 2: THE RETRY NEVER LANDS AN OLDER VALUE. The
+ * Phase B retry captured the held value when its timer FIRED and queued it
+ * behind whatever was in flight. So: A fails and is held; B leaves and hangs
+ * (a black hole outage holds a request for the 30 s axios timeout, longer
+ * than the first backoffs); A's timer fires and queues A BEHIND B; B fails
+ * and is held; A runs again, fails again and is held over B; the network
+ * comes back and A lands, while every turn runs B. Now the timer queues a
+ * function that reads the chat's latest held value when its turn in the
+ * chain comes, and a per chat generation, stamped at each report, keeps an
+ * older value from ever replacing, or dropping, a newer one.
+ */
+describe("Round C: the retry never lands an older value", () => {
+  function harness() {
+    const adapter = Object.create(CodexAdapter.prototype) as any;
+    const sent = vi.fn(async (..._args: unknown[]) => {});
+    Object.assign(adapter, { api: { reportSessionSettings: sent } });
+    return { adapter, sent };
+  }
+  const network = () =>
+    Object.assign(new Error("ECONNREFUSED"), { code: "ECONNREFUSED" });
+  const efforts = (sent: ReturnType<typeof vi.fn>) =>
+    sent.mock.calls.map((c) => (c[2] as SessionReport).effort);
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("A fails, B is in flight, A's timer fires, B fails: the retry sends B, and B is what lands", async () => {
+    const { adapter, sent } = harness();
+    const b = deferred();
+    sent
+      .mockRejectedValueOnce(network()) // A fails
+      .mockImplementationOnce(() => b.promise) // B hangs
+      .mockRejectedValueOnce(network()); // the first retry fails too
+    // Everything after that lands: the network is back.
+    await adapter.reportSessionSettings(10, 20, report({ effort: "low" }));
+    const pendingB = adapter.reportSessionSettings(
+      10,
+      20,
+      report({ effort: "high" }),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(efforts(sent)).toEqual(["low", "high"]);
+    // A's timer fires while B is still in flight: nothing leaves yet, the
+    // retry waits behind B in the chat's chain.
+    await vi.advanceTimersByTimeAsync(SESSION_REPORT_RETRY_FIRST_MS);
+    expect(sent).toHaveBeenCalledTimes(2);
+    b.reject(network());
+    await pendingB;
+    await vi.advanceTimersByTimeAsync(0);
+    // The retry reads the chat's latest held value at its turn: B, not A.
+    expect(efforts(sent)).toEqual(["low", "high", "high"]);
+    await vi.advanceTimersByTimeAsync(60 * 60_000);
+    // B landed on the next attempt, and A was never sent again after B.
+    expect(efforts(sent)).toEqual(["low", "high", "high", "high"]);
+  });
+
+  it("an older retry that LANDS never drops a newer value waiting to be retried", async () => {
+    // A fails and is held; B leaves and hangs; A's timer fires; B fails and
+    // is held; the network comes back. What lands is B, and it lands once.
+    const { adapter, sent } = harness();
+    const b = deferred();
+    sent
+      .mockRejectedValueOnce(network())
+      .mockImplementationOnce(() => b.promise);
+    await adapter.reportSessionSettings(10, 20, report({ effort: "low" }));
+    const pendingB = adapter.reportSessionSettings(
+      10,
+      20,
+      report({ effort: "high" }),
+    );
+    await vi.advanceTimersByTimeAsync(SESSION_REPORT_RETRY_FIRST_MS);
+    b.reject(network());
+    await pendingB;
+    await vi.advanceTimersByTimeAsync(60 * 60_000);
+    expect(efforts(sent).slice(2)).toEqual(["high"]);
+    expect(efforts(sent).at(-1)).toBe("high");
+  });
+
+  it("a failure while a NEWER report waits behind it arms no retry: the newer one decides", async () => {
+    const { adapter, sent } = harness();
+    const a = deferred();
+    const b = deferred();
+    sent
+      .mockImplementationOnce(() => a.promise)
+      .mockImplementationOnce(() => b.promise);
+    const pendingA = adapter.reportSessionSettings(
+      10,
+      20,
+      report({ effort: "low" }),
+    );
+    const pendingB = adapter.reportSessionSettings(
+      10,
+      20,
+      report({ effort: "high" }),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    const before = vi.getTimerCount();
+    a.reject(network());
+    await pendingA;
+    await vi.advanceTimersByTimeAsync(0);
+    // B is on its way: A is superseded, so no timer is armed for it.
+    expect(efforts(sent)).toEqual(["low", "high"]);
+    expect(vi.getTimerCount()).toBe(before);
+    b.resolve();
+    await pendingB;
+    await vi.advanceTimersByTimeAsync(60 * 60_000);
+    expect(efforts(sent)).toEqual(["low", "high"]);
+  });
+
+  it("CONTROL: the newest failure still arms its retry", async () => {
+    const { adapter, sent } = harness();
+    sent.mockRejectedValueOnce(network());
+    const before = vi.getTimerCount();
+    await adapter.reportSessionSettings(10, 20, report({ effort: "high" }));
+    expect(vi.getTimerCount()).toBe(before + 1);
+    await vi.advanceTimersByTimeAsync(SESSION_REPORT_RETRY_FIRST_MS);
+    expect(efforts(sent)).toEqual(["high", "high"]);
+  });
+});
+
+/**
+ * P5 stage 7, round C, decision 3: A REVOKED PAIRING IS NOT A FAILURE WORTH
+ * REPEATING. BgosApi's response interceptor turns every 401 into a
+ * PairingRevokedError with no `response`, which the Phase B predicate read as
+ * "no answer" and retried, with the dead token, every five minutes while the
+ * daemon sat latched. Now that error is never retryable, and nothing is held
+ * at all while the fatal latch is set (a report already in flight when the
+ * latch closes comes back AFTER the latch cleared the retries).
+ */
+describe("Round C: a revoked pairing is never retried", () => {
+  const network = () =>
+    Object.assign(new Error("ECONNREFUSED"), { code: "ECONNREFUSED" });
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** A bare adapter over a REAL BgosApi whose transport answers `status`. */
+  function throughTheInterceptor(status: number) {
+    const adapter = Object.create(CodexAdapter.prototype) as any;
+    const api = new BgosApi({
+      baseUrl: "http://127.0.0.1:9",
+      pairingToken: "t".repeat(32),
+    } as any) as any;
+    const urls: string[] = [];
+    api.http.defaults.adapter = async (config: any) => {
+      urls.push(String(config.url));
+      throw Object.assign(new Error(`Request failed with status code ${status}`), {
+        config,
+        response: {
+          status,
+          data: { message: "Pairing revoked" },
+          headers: {},
+          config,
+        },
+      });
+    };
+    Object.assign(adapter, { api });
+    return { adapter, api, urls };
+  }
+
+  it("a 401, through the real interceptor, is sent once and never again", async () => {
+    const { adapter, api, urls } = throughTheInterceptor(401);
+    // Positive: the transport's 401 really does come out as the interceptor's
+    // PairingRevokedError, with no response on it.
+    const error = await api
+      .reportSessionSettings(10, 20, report())
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(PairingRevokedError);
+    expect((error as { response?: unknown }).response).toBeUndefined();
+    urls.length = 0;
+    await adapter.reportSessionSettings(10, 20, report());
+    expect(urls).toEqual([
+      "integrations/assistants/10/chats/20/session-settings",
+    ]);
+    await vi.advanceTimersByTimeAsync(60 * 60_000);
+    expect(urls).toHaveLength(1);
+  });
+
+  it("CONTROL: a 503 through the same interceptor IS retried", async () => {
+    const { adapter, urls } = throughTheInterceptor(503);
+    await adapter.reportSessionSettings(10, 20, report());
+    await vi.advanceTimersByTimeAsync(SESSION_REPORT_RETRY_FIRST_MS);
+    expect(urls).toHaveLength(2);
+    adapter.clearSessionReportRetries();
+  });
+
+  it("nothing is held while the fatal latch is set, whatever the failure", async () => {
+    const adapter = Object.create(CodexAdapter.prototype) as any;
+    const sent = vi.fn(async (..._args: unknown[]) => {});
+    Object.assign(adapter, {
+      api: { reportSessionSettings: sent },
+      fatalLatched: true,
+    });
+    sent.mockRejectedValueOnce(network());
+    const before = vi.getTimerCount();
+    await adapter.reportSessionSettings(10, 20, report());
+    expect(vi.getTimerCount()).toBe(before);
+    await vi.advanceTimersByTimeAsync(60 * 60_000);
+    expect(sent).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * P5 stage 7, round C, decision 4: AN IN PROCESS RE PAIR REPORTS AGAIN. A
+ * bind to a new pairing clears every chat's value on the backend (Phase B,
+ * decision 4), and recover() swapped the token in place and kept the dedupe
+ * map, so every unchanged value was deduped and never sent: each Codex row
+ * stayed missing until a value changed or the daemon restarted. Now recover()
+ * clears the dedupe and live report maps once identity is back and runs the
+ * connect sweep again.
+ */
+describe("Round C: an in process re pair reports every chat again", () => {
+  function fixture(identity = true) {
+    const adapter = Object.create(CodexAdapter.prototype) as any;
+    const sent = vi.fn(async (..._args: unknown[]) => {});
+    const store = new Map<number, SessionReport>([[20, report()]]);
+    Object.assign(adapter, {
+      started: true,
+      fatalLatched: true,
+      fatalNotified: true,
+      currentToken: "o".repeat(32),
+      host: {
+        storedSessionChats: vi.fn(() => [...store.keys()]),
+        storedSessionReport: vi.fn(
+          (chatId: number) => store.get(chatId) ?? null,
+        ),
+      },
+      api: { reportSessionSettings: sent, updateToken: vi.fn() },
+      ws: {
+        updateToken: vi.fn(),
+        disconnect: vi.fn(),
+        connect: vi.fn(async () => {}),
+        triggerBackfill: vi.fn(async () => {}),
+      },
+      meetings: { resume: vi.fn() },
+      heartbeat: { setNetEnabled: vi.fn(), setLastError: vi.fn() },
+      outbound: { replaySpool: vi.fn(async () => {}) },
+      assistantToRoute: new Map([[10, "codex"]]),
+      chatToAssistant: new Map([
+        [20, 10],
+        [21, 10],
+      ]),
+      identityReady: true,
+      refreshIdentity: vi.fn(async () => identity),
+      startPollLoop: vi.fn(),
+      stopSecretsWatch: vi.fn(),
+    });
+    return { adapter, sent };
+  }
+
+  it("the stored chats are swept again, forced, after identity is back", async () => {
+    const { adapter, sent } = fixture();
+    // Before the revoke: chat 20's value went out live, so it is deduped
+    // and marked live, which is exactly what kept it from the sweep.
+    adapter.noteSessionSettings(20, report());
+    await settle();
+    expect(sent).toHaveBeenCalledTimes(1);
+    await adapter.recover("n".repeat(32));
+    await vi.waitFor(() => expect(sent).toHaveBeenCalledTimes(2));
+    expect(sent.mock.calls[1]).toEqual([10, 20, report()]);
+    expect(adapter.refreshIdentity.mock.invocationCallOrder[0]).toBeLessThan(
+      adapter.host.storedSessionChats.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("a chat with nothing stored sends its unchanged runtime value again on its next report", async () => {
+    const { adapter, sent } = fixture();
+    adapter.noteSessionSettings(21, report({ model: "gpt-5.5" }));
+    await settle();
+    await adapter.recover("n".repeat(32));
+    await settle();
+    sent.mockClear();
+    // The runtime says the same thing it said before the re pair: the new
+    // pairing's row was cleared, so it must go out, not be deduped.
+    adapter.noteSessionSettings(21, report({ model: "gpt-5.5" }));
+    await settle();
+    expect(sent).toHaveBeenCalledWith(10, 21, report({ model: "gpt-5.5" }));
+  });
+
+  it("CONTROL: without a re pair the same unchanged value is deduped", async () => {
+    const { adapter, sent } = fixture();
+    adapter.noteSessionSettings(21, report({ model: "gpt-5.5" }));
+    await settle();
+    sent.mockClear();
+    adapter.noteSessionSettings(21, report({ model: "gpt-5.5" }));
+    await settle();
+    expect(sent).not.toHaveBeenCalled();
+  });
+
+  it("identity failing on the re pair sweeps nothing (the boot's own rule)", async () => {
+    const { adapter, sent } = fixture(false);
+    await adapter.recover("n".repeat(32));
+    await settle();
+    expect(adapter.host.storedSessionChats).not.toHaveBeenCalled();
+    expect(sent).not.toHaveBeenCalled();
   });
 });
 
