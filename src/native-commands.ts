@@ -209,6 +209,14 @@ export class NativeCommands {
         pauseForChat(chatId: number): Promise<ThreadGoal | null>;
         resumeForChat(chatId: number): Promise<ThreadGoal | null>;
       };
+      /**
+       * `/resume` leaves the context this chat's Stop paused, exactly as
+       * `/new` and the Sessions sheet's Resume do (P6 stage 3, D25, review
+       * F4): the mission lane forgets the chat's Stop pause and discards that
+       * mission, so the owner's next message does not resume it into the
+       * resumed thread. Never throws.
+       */
+      clearStopMarker: (chatId: number, assistantId: number) => Promise<void>;
     },
   ) {}
 
@@ -568,6 +576,9 @@ export class NativeCommands {
         ));
       if (id) {
         await host.resumeSavedThread(args.chatId, id);
+        // After the switch, never before: a switch the runtime refused leaves
+        // the chat in the context the Stop paused (review F4).
+        await this.deps.clearStopMarker(args.chatId, args.assistantId);
         await say(RESUMED_SAVED_CONVERSATION);
       }
       return;

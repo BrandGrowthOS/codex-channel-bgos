@@ -1419,6 +1419,15 @@ describe("the Stop wiring of the mission lane", () => {
     expect(construction).toContain('"stop-discards.json"');
   });
 
+  it("hands the native controls the mission lane's Stop marker, so /resume leaves a Stop pause as /new does (review F4)", () => {
+    const start = source.indexOf("new NativeCommands(");
+    expect(start).toBeGreaterThan(0);
+    const construction = source.slice(start, source.indexOf("\n    });", start));
+    expect(construction).toMatch(
+      /clearStopMarker: \(chatId, assistantId\) =>\s*this\.missionLane\.clearStopMarker\(chatId, assistantId\)/,
+    );
+  });
+
   it("hands the goal lane its kept file, so a Stop's D36 record outlives a restart (review F1)", () => {
     const start = source.indexOf("new GoalLane(");
     expect(start).toBeGreaterThan(0);

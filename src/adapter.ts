@@ -422,6 +422,10 @@ export class CodexAdapter {
       // mission has to exist and the lane has to be watching before the goal
       // is set, because setting one starts a turn at once.
       goalLane: this.goalLane,
+      // `/resume` leaves the context a Stop paused, as /new and the Sessions
+      // resume do: no later owner turn may resume that mission (review F4).
+      clearStopMarker: (chatId, assistantId) =>
+        this.missionLane.clearStopMarker(chatId, assistantId),
       run: async (args, prompt, options = {}) => {
         const files = args.attachments.map((a) => ({
           path: a.localPath,
