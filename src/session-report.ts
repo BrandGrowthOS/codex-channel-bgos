@@ -66,7 +66,8 @@ export const SESSION_REPORT_FIELDS = Object.freeze([
  * sided change that also updates its own word for word pin turns the hash
  * red. Move it only with the other repo's PR.
  */
-export const SESSION_SETTINGS_RAIL_SHA256 = "0".repeat(64);
+export const SESSION_SETTINGS_RAIL_SHA256 =
+  "d0976f00e57f0d5d051cf5ce92e4d1b140cad9f1c86becda0a4fbcb37f4a2a30";
 
 const MODEL = /^[\w./:-]{1,160}$/;
 const EFFORT = /^[a-z]{1,20}$/;
