@@ -568,7 +568,76 @@ describe("collectChanges", () => {
     if (!result.ok) return;
     expect(result.payload.patch.length).toBe(4_096);
     expect(result.payload.patchTruncated).toBe(true);
+
+    // The fence counts what the backend counts (UTF-16 units), and never
+    // leaves half of a surrogate pair at the cut.
+    const face = String.fromCodePoint(0x1f600);
+    const pairs: RunGit = async (args, options) =>
+      key(args) === key(PATCH)
+        ? { code: 0, stdout: face.repeat(3_000), stderr: "", truncated: false }
+        : fakeGit(okScript()).runGit(args, options);
+    const cut = await collectChanges({
+      workdir: ROOT,
+      caps: readCaps({ maxPatchBytes: 4_095 }),
+      runGit: pairs,
+      fs: okFs().fs,
+    });
+    expect(cut.ok).toBe(true);
+    if (!cut.ok) return;
+    expect(cut.payload.patch).toBe(face.repeat(2_047));
+    expect(cut.payload.patchTruncated).toBe(true);
   });
+
+  it("a complete read under the cap is sent whole, even when its bytes are not UTF-8", async () => {
+    // A legacy Latin-1 file: every accented byte decodes as one U+FFFD,
+    // which is 3 bytes if the text were encoded again. The read itself fits
+    // the cap, so nothing may be cut or called cut (review round 1, C-R5).
+    const raw = Buffer.concat([
+      Buffer.from(
+        "diff --git a/legacy.txt b/legacy.txt\n" +
+          "index 1111111..2222222 100644\n" +
+          "--- a/legacy.txt\n" +
+          "+++ b/legacy.txt\n" +
+          "@@ -1 +1 @@\n" +
+          "-old\n" +
+          "+",
+        "utf8",
+      ),
+      Buffer.from("caf\u00e9 ".repeat(1_500), "latin1"),
+      Buffer.from("\n", "utf8"),
+    ]);
+    const cap = 8_192;
+    expect(raw.length).toBeLessThanOrEqual(cap);
+    expect(Buffer.byteLength(raw.toString("utf8"), "utf8")).toBeGreaterThan(cap);
+
+    // The patch comes through the REAL node adapter, from a child that
+    // writes those bytes, so the decode is the adapter's own.
+    const adapter = createNodeRunGit({ bin: process.execPath });
+    const scripted = fakeGit(okScript());
+    const runGit: RunGit = (args, options) =>
+      key(args) === key(PATCH)
+        ? adapter(
+            [
+              "-e",
+              `process.stdout.write(Buffer.from("${raw.toString("base64")}","base64"))`,
+            ],
+            // The scripted root is not on this disk; the child runs here.
+            { ...options, cwd: process.cwd() },
+          )
+        : scripted.runGit(args, options);
+    const result = await collectChanges({
+      workdir: ROOT,
+      caps: readCaps({ maxPatchBytes: cap }),
+      runGit,
+      fs: okFs().fs,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.payload.patchTruncated).toBe(false);
+    expect(result.payload.patch).toBe(raw.toString("utf8"));
+    // What the backend checks: the string's length against the frame's cap.
+    expect(result.payload.patch.length).toBeLessThanOrEqual(cap);
+  }, 15_000);
 
   it("reads the first 20 untracked regular files: text, binary by a NUL, too large by size, a symlink as binary", async () => {
     const names = [

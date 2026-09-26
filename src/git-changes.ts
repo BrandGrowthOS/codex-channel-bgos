@@ -383,13 +383,24 @@ function firstLine(text: string): string {
   return end >= 0 ? text.slice(0, end) : text;
 }
 
-/** Cut a string to at most `maxBytes` UTF-8 bytes. */
-function cutToBytes(text: string, maxBytes: number): string {
-  const bytes = Buffer.from(text, "utf8");
-  if (bytes.length <= maxBytes) return text;
-  // A cut inside one character decodes as the replacement character, which
-  // is never longer than the bytes it replaces.
-  return bytes.subarray(0, maxBytes).toString("utf8");
+/**
+ * Cut a string to at most `max` UTF-16 units, the measure the backend checks
+ * the answer against (`readDaemonAnswer` compares each string's length with
+ * the frame's cap), and never between the two halves of a surrogate pair.
+ *
+ * Only a fence: the node adapter already stops reading at the byte cap, and
+ * text decoded from at most `max` bytes is never longer than `max` units
+ * (every byte decodes to at most one unit, and a byte that is not UTF-8, as
+ * in a legacy Latin-1 file, becomes one U+FFFD). Measuring the DECODED text
+ * in UTF-8 bytes instead would count each such U+FFFD as three bytes, and so
+ * cut, and call cut, a read that arrived whole (review round 1, C-R5).
+ */
+function cutToUnits(text: string, max: number): string {
+  if (text.length <= max) return text;
+  let end = max;
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return text.slice(0, end);
 }
 
 function emptyPayload(
@@ -506,8 +517,8 @@ async function readChanges(
     maxBytes: number,
   ): Promise<{ text: string; truncated: boolean }> => {
     const run = await git(args, cwd, maxBytes);
-    const text = cutToBytes(run.stdout, maxBytes);
-    const truncated = run.truncated || text !== run.stdout;
+    const text = cutToUnits(run.stdout, maxBytes);
+    const truncated = run.truncated || text.length !== run.stdout.length;
     if (!truncated && run.code !== 0) throw gitFailure(args, run);
     return { text, truncated };
   };
