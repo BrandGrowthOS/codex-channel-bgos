@@ -24,6 +24,10 @@ const models = ["one", "two"].map((model, i) => ({
 function setup() {
   const host = {
     sessionSettings: vi.fn(async () => ({ model: "one", effort: "medium" })),
+    // What the chat's report says it runs (P5 stage 7, Phase B, decision
+    // 10): the store, then the runtime's own value, never the catalog guess.
+    // Null here means nothing is known yet for this chat.
+    currentSessionReport: vi.fn((): any => null),
     listModels: vi.fn(async () => models),
     updateSettings: vi.fn(async (_id, v) => v),
     // The pair `/plan` and `/code` actually move: the mode AND the read only
@@ -296,6 +300,85 @@ describe("native controls", () => {
       expect.stringContaining("context is preserved"),
     );
   });
+  /**
+   * P5 stage 7, Phase B, decision 10: the /model question's "current" comes
+   * from the SAME source the model and effort report uses (the store, then
+   * the runtime's own value), so the row under the message box and the card
+   * its tap opens never name two different models one tap apart. The
+   * catalog's default, which sessionSettings() falls back to, is the plugin's
+   * own guess and is never shown as current.
+   */
+  it("Phase B: the model question names the reported model as current, and the effort question the reported effort", async () => {
+    const s = setup();
+    s.host.currentSessionReport.mockReturnValue({
+      model: "two",
+      effort: "low",
+      serviceTier: null,
+      rerouted: false,
+      reportedAt: "2026-09-26T09:30:00.000Z",
+    });
+    s.interactions.ask
+      .mockResolvedValueOnce([{ picked_option_value: "two" }])
+      .mockResolvedValueOnce([{ picked_option_value: "medium" }]);
+    await s.router.handle(s.args("model"));
+    const titles = s.interactions.ask.mock.calls.map((c: any[]) => c[1][0].text);
+    // sessionSettings() says "one" (the catalog's guess); the report says "two".
+    expect(titles[0]).toBe("Choose a model · current: two");
+    expect(titles[1]).toBe("Reasoning level · two · current: low");
+    expect(s.host.currentSessionReport).toHaveBeenCalledWith(20);
+  });
+
+  it("Phase B: with nothing reported yet the model question names no current, never the catalog's guess", async () => {
+    const s = setup();
+    s.interactions.ask
+      .mockResolvedValueOnce([{ picked_option_value: "two" }])
+      .mockResolvedValueOnce([{ picked_option_value: "low" }]);
+    await s.router.handle(s.args("model"));
+    const titles = s.interactions.ask.mock.calls.map((c: any[]) => c[1][0].text);
+    expect(titles[0]).toBe("Choose a model");
+    expect(titles[1]).toBe("Reasoning level · two");
+  });
+
+  it("Phase B: the effort question of ANOTHER model names no current effort", async () => {
+    const s = setup();
+    // The report says "two" (sessionSettings() would guess "one"); the owner
+    // picks "one", whose efforts are not the running one's.
+    s.host.currentSessionReport.mockReturnValue({
+      model: "two",
+      effort: "low",
+      serviceTier: null,
+      rerouted: false,
+      reportedAt: "2026-09-26T09:30:00.000Z",
+    });
+    s.interactions.ask
+      .mockResolvedValueOnce([{ picked_option_value: "one" }])
+      .mockResolvedValueOnce([{ picked_option_value: "low" }]);
+    await s.router.handle(s.args("model"));
+    const titles = s.interactions.ask.mock.calls.map((c: any[]) => c[1][0].text);
+    expect(titles[0]).toBe("Choose a model · current: two");
+    expect(titles[1]).toBe("Reasoning level · one");
+  });
+
+  it("Phase B: /effort names the reported effort as current, and none when nothing is reported", async () => {
+    const s = setup();
+    s.host.currentSessionReport.mockReturnValue({
+      model: "one",
+      effort: "low",
+      serviceTier: null,
+      rerouted: false,
+      reportedAt: "2026-09-26T09:30:00.000Z",
+    });
+    s.interactions.ask.mockResolvedValueOnce([{ picked_option_value: "medium" }]);
+    await s.router.handle(s.args("effort"));
+    expect(s.interactions.ask.mock.calls[0][1][0].text).toBe(
+      "Reasoning level · current: low",
+    );
+    s.host.currentSessionReport.mockReturnValue(null);
+    s.interactions.ask.mockResolvedValueOnce([{ picked_option_value: "medium" }]);
+    await s.router.handle(s.args("effort"));
+    expect(s.interactions.ask.mock.calls[1][1][0].text).toBe("Reasoning level");
+  });
+
   it("does not mutate on skipped picker, unavailable model or another user", async () => {
     const s = setup();
     s.interactions.ask.mockResolvedValue([{ skipped: true }]);
