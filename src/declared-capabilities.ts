@@ -56,7 +56,7 @@ export const MISSION_PAUSE = "mission_pause";
 /**
  * This daemon REPORTS each chat's model and reasoning effort as its runtime
  * really runs them, and its own `/model` changes them between turns from the
- * account's own list. Declared from 0.16.0 (P5 stage 7, C-26).
+ * account's own list. Declared from 0.18.0 (P5 stage 7, C-26).
  *
  * The promise to the person holding the phone: the quiet row under a Codex
  * chat's message box shows what the runtime is running in THAT chat, never a
