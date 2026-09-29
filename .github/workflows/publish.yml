@@ -98,6 +98,12 @@ jobs:
           # to that older version. The HOAI app steers only daemons at 0.15.0
           # or later, so until it is promoted Send now on a Codex agent is a
           # plain send.
+          # 0.17.0: the Changes panel (P7, #21). It answers changes_rpc with
+          # read only Git and declares the changes_rpc token, and the live
+          # BGOS build has no backend for it at all: that backend is BGOS
+          # #1705 and #1704, still open. So it waits for BGOS #1705 and #1704
+          # (changes_rpc) to be deployed (Data's ruling on #24). 0.18.0
+          # carries this code on the train, so it carries this hold too.
           # 0.18.0: adds no hold of its own either. It reports each chat's
           # model and effort to HOAI and declares session_model_control, and
           # an older backend answers the new report route with a 404 the
@@ -114,9 +120,9 @@ jobs:
           # it is promoted no Codex agent shows the row.
           # 0.13.0 is P2 stage 5's release, which merged first and brought its
           # own line here (the entry above); merge order #12, #14, #15, P2
-          # stage 5 (0.13.0), then 0.14.0, then 0.15.0, then 0.18.0. Held for
-          # all seven.
-          HELD_FROM_LATEST="0.10.1 0.11.0 0.12.0 0.13.0 0.14.0 0.15.0 0.18.0"
+          # stage 5 (0.13.0), then 0.14.0, then 0.15.0, then 0.17.0, then
+          # 0.18.0. Held for all eight.
+          HELD_FROM_LATEST="0.10.1 0.11.0 0.12.0 0.13.0 0.14.0 0.15.0 0.17.0 0.18.0"
           DIST_TAG=latest
           for held in $HELD_FROM_LATEST; do
             if [ "$CURRENT" = "$held" ]; then
