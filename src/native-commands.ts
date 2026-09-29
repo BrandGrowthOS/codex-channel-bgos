@@ -2,12 +2,70 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { CodexHost, RunTurnCallbacks } from "./codex-host.js";
+import {
+  checkGitFloor,
+  createFindGit,
+  GIT_FLOOR_MESSAGE,
+  gitReadEnv,
+  GitTooOldError,
+  nodeChangesFs,
+  NO_FSMONITOR,
+  NO_INDEX_REFRESH,
+  topLevelHolds,
+  type FindGit,
+  type GitVersionCache,
+} from "./git-changes.js";
 import { formatGoalSeconds, goalStatusWord, GOAL_DEFAULT_TURN_CAP } from "./goal-lane.js";
 import type { ThreadGoal } from "./goal-protocol.js";
 import type { DispatchArgs } from "./inbound-handler.js";
 import type { Interactions, InteractionContext } from "./interactions.js";
+import { planWaitEnforced } from "./plan-mode.js";
 import type { SessionSettings } from "./session-settings.js";
-import type { RpcObject } from "./app-server.js";
+import { RequestTimeoutError, type RpcObject } from "./app-server.js";
+
+/**
+ * The native command a correction rides, typed or sent by the HOAI app's
+ * follow ups tray (its Send now on a Codex agent, P5 stage 5, C-27). The
+ * catalog registers it under this name and the router answers to it, and the
+ * app offers a steer only to an agent whose catalog lists it.
+ */
+export const STEER_COMMAND_NAME = "steer";
+/**
+ * The first release whose `/steer` with nothing to steer runs the text as a
+ * normal message instead of answering an error and dropping it, and whose
+ * landed steer posts no reply. The app steers only daemons at or past it (its
+ * `CODEX_STEER_FALLBACK_SINCE`); below it, Send now is a plain send. A test
+ * holds package.json at or past this floor.
+ */
+export const STEER_FALLBACK_SINCE = "0.15.0";
+/**
+ * THE CROSS REPO PIN (P5 stage 5, spec section 8). The sha256 of the
+ * canonical steer contract `steer;slash_command;/steer {text};0.15.0`: the
+ * command name, the message type it arrives under, the text shape the router
+ * parses and the floor above. The HOAI app carries the SAME constant in
+ * `frontend/expo-app/src/components/chat/followUpTrayModel.ts`; each side
+ * rebuilds the string from its OWN values in a test (here
+ * test/steer-contract.spec.ts) and compares this hash, so a one sided change
+ * that also updates its own word for word pin still turns the hash pin red.
+ * Change the contract only with the app's PR, and move the hash in both.
+ */
+export const TRAY_STEER_CONTRACT_SHA256 =
+  "04ae44be5ff657f805b13f44cb7919997328387e9caddec8fc2cc422477f7226";
+/**
+ * The one line a steer can still produce: Codex never answered it. It may
+ * have landed, so it is neither run as a message nor sent again (never both),
+ * and the owner is told plainly what to do if it did not.
+ */
+export const STEER_UNCONFIRMED_TEXT =
+  "Codex did not confirm the correction in time, so it was not sent a second time. If Codex does not act on it, send it again as a normal message.";
+
+/**
+ * The line after a saved conversation is bound to the chat, from /resume and
+ * from the Sessions sheet's Resume alike (P6 stage 3, D25). BGOS's Codex
+ * canon quotes it to the model word for word, so it lives in one place.
+ */
+export const RESUMED_SAVED_CONVERSATION =
+  "Resumed the saved Codex conversation. Your HOAI messages remain in place.";
 
 export const NATIVE_COMMAND_DESCRIPTIONS = [
   ["model", "Choose this chat's Codex model and reasoning level"],
@@ -25,7 +83,7 @@ export const NATIVE_COMMAND_DESCRIPTIONS = [
   ["resume", "Resume a saved Codex conversation from this HOAI chat"],
   ["fork", "Continue from a copy of this chat's Codex conversation"],
   ["ps", "Show whether this chat has an active Codex response"],
-  ["steer", "Send a correction to this chat's running response"],
+  [STEER_COMMAND_NAME, "Send a correction to this chat's running response"],
   ["goal", "Set a condition Codex works toward until it is met"],
   ["help", "Show supported Codex controls and how to use them"],
 ] as const;
@@ -75,6 +133,62 @@ export function normalizeNativeCommand(command: {
   return { ...command, name: aliases[name] ?? name };
 }
 const exec = promisify(execFile);
+
+/**
+ * The native /diff's Git command. /diff reads the same folder the Changes
+ * panel reads, so it keeps the collector's rules and its threat model
+ * (git-changes.ts): the fsmonitor a repository names is off, a porcelain
+ * diff never refreshes the index, and Git runs by the absolute path found on
+ * PATH's absolute entries with Git's read environment (the repository
+ * variables dropped, GIT_OPTIONAL_LOCKS=0). Until fix round w4 (R-3) /diff
+ * ran a bare `git` from the agent's folder, which a git.exe in that folder
+ * (one a clone can carry) answered on Windows, with none of those rules: a
+ * gap there since /diff was written. Since fix round w5 its Git also runs
+ * with GIT_NO_LAZY_FETCH=1 (in Git's read environment), which turns lazy
+ * fetching from a promisor remote off on a Git that knows the variable; a
+ * Git from 2.36 that does not know it can still fetch lazily, the gap the
+ * collector's header documents. With a Git below 2.36, or one whose version
+ * cannot be read, it runs nothing after `git version` (W4-N3): the Git found
+ * must meet the floor first, through the cache the panel uses. And its top
+ * level must be the agent's folder or one above it, as real paths, or no
+ * diff runs (W4-N4): until then a core.worktree the agent set posted another
+ * folder's files as its diff. That check covers the top level alone; the
+ * Git directory and the common directory are not checked, on purpose. The
+ * floor, the variable and the top level check are defence in depth against
+ * the agent's own config, as the collector's header explains. A clean
+ * filter the repository names still runs on this diff, as on the panel's:
+ * an accepted limit, whose reasons are in git-changes.ts.
+ */
+const NATIVE_TOPLEVEL_ARGS = [...NO_FSMONITOR, "rev-parse", "--show-toplevel"] as const;
+
+/** The top level is outside the agent's folder (fix round w5, W4-N4). */
+class TopLevelOutside extends Error {}
+const NATIVE_DIFF_ARGS = [
+  ...NO_FSMONITOR,
+  ...NO_INDEX_REFRESH,
+  "--no-pager",
+  "diff",
+  "--no-ext-diff",
+  "--no-textconv",
+  "HEAD",
+  "--",
+] as const;
+
+/** How /diff runs Git: execFile, never a shell (tests inject one). */
+export type ExecGit = (
+  file: string,
+  args: readonly string[],
+  options: {
+    cwd: string;
+    env: Record<string, string | undefined>;
+    windowsHide: boolean;
+    timeout: number;
+    maxBuffer: number;
+  },
+) => Promise<{ stdout: string }>;
+
+const execGitFile: ExecGit = (file, args, options) =>
+  exec(file, [...args], options);
 
 export function parseNativeCommand(
   text: string,
@@ -191,6 +305,48 @@ export class NativeCommands {
        * has to be watching BEFORE the goal is set: setting one starts a turn
        * at once, and a turn nobody is watching is dropped on the floor.
        */
+      /**
+       * `/plan` and `/code` just changed this chat's Codex mode.
+       *
+       * Told to the adapter rather than done here, because two things follow
+       * that are not this file's: BGOS has to be told, so the app can draw the
+       * plan mode chip, and a `/plan <task>` has to leave a DOOR behind, so the
+       * card the task produces says the owner typed for it rather than that
+       * plan mode happened to be on. `typedTask` is that difference.
+       *
+       * `enforced` is the fourth argument because it is a FACT and not a
+       * constant: it says whether the read only sandbox that goes on with the
+       * mode was actually applied. The app words the chip differently for the
+       * two, so passing a hopeful `true` here would be a promise the owner
+       * acts on. It comes back from the host, which is the only thing that
+       * knows whether the runtime took the setting.
+       */
+      onSessionMode?: (
+        args: DispatchArgs,
+        mode: "plan" | "default",
+        typedTask: boolean,
+        enforced: boolean,
+      ) => void | Promise<void>;
+      /**
+       * The LOCK moved without the mode moving.
+       *
+       * `/permissions` inside plan mode is the one way the pair comes apart
+       * by hand: the mode stays `plan`, so the app keeps the chip up, while
+       * the read only sandbox that made the wait real is gone. Reported
+       * separately from `onSessionMode` because the mode has NOT changed and
+       * the typed door must survive: `/plan build the uploader` followed by
+       * `/permissions workspace` is still a plan the owner typed for, and
+       * routing this through `onSessionMode` would clear that door on its
+       * `typedTask: false` arm.
+       *
+       * Without it the owner reads `read only until you answer` off a chat
+       * that has just been handed its files back, which is the exact promise
+       * this whole lane exists to stop making.
+       */
+      onPlanEnforcement?: (
+        args: DispatchArgs,
+        enforced: boolean,
+      ) => void | Promise<void>;
       goalLane: {
         setFromChat(input: {
           assistantId: number;
@@ -201,6 +357,21 @@ export class NativeCommands {
         pauseForChat(chatId: number): Promise<ThreadGoal | null>;
         resumeForChat(chatId: number): Promise<ThreadGoal | null>;
       };
+      /**
+       * `/resume` leaves the context this chat's Stop paused, exactly as
+       * `/new` and the Sessions sheet's Resume do (P6 stage 3, D25, review
+       * F4): the mission lane forgets the chat's Stop pause and discards that
+       * mission, so the owner's next message does not resume it into the
+       * resumed thread. Never throws.
+       */
+      clearStopMarker: (chatId: number, assistantId: number) => Promise<void>;
+      /** /diff's Git lookup, the collector's own by default. */
+      findGit?: FindGit;
+      /** /diff's runner, execFile by default. */
+      execGit?: ExecGit;
+      /** Each Git path's floor verdict, the daemon's one cache by default
+       * (fix round w5, W4-N3). */
+      gitVersions?: GitVersionCache;
     },
   ) {}
 
@@ -351,6 +522,45 @@ export class NativeCommands {
     );
   }
 
+  /**
+   * `/steer <text>`: into the running turn, or else as a normal message.
+   *
+   * A steer that LANDS posts nothing. It used to answer "Correction delivered
+   * to the current response." as an ordinary reply, and HOAI reads any
+   * ordinary reply as the agent being done, so confirming a correction INTO a
+   * running turn marked that turn finished: the working line and Stop went
+   * away for the rest of it. The owner's own `/steer` message and its
+   * delivered tick are the receipt, and the turn's own reply answers it.
+   *
+   * A steer with NOTHING TO STEER runs the text once as a normal message
+   * through `deps.run`, which is the chat's own queue (it waits behind a turn
+   * still publishing, exactly as a message sent then would). That covers no
+   * turn yet (the host has no turn id: the message still waits in the queue,
+   * or `turn/start` has not answered), a turn that ended as the steer went
+   * out (the runtime refuses the id it expected), and a review or compaction
+   * (the runtime refuses to steer those). It used to answer "No response is
+   * ready for a correction" and drop the words, and the HOAI tray's Send now
+   * is pressed exactly near a turn's end, when that race is likeliest.
+   *
+   * Never both, and never an error line for a steer that could be run. The
+   * one exception is a steer Codex never ANSWERED: it may have landed, so
+   * running it as well could deliver it twice. That one is not run, and one
+   * plain line says what to do.
+   *
+   * Only this router's `/steer` falls back. `MissionControlLane` calls
+   * `host.steer` itself and relies on the throw to keep its bulletin queued.
+   */
+  private async steerOrRun(args: DispatchArgs, text: string): Promise<void> {
+    try {
+      await this.deps.host.steer(args.chatId, text);
+      return;
+    } catch (error) {
+      if (error instanceof RequestTimeoutError)
+        throw new Error(STEER_UNCONFIRMED_TEXT);
+    }
+    await this.deps.run(args, text);
+  }
+
   private async runCommand(
     args: DispatchArgs,
     context: InteractionContext,
@@ -386,13 +596,15 @@ export class NativeCommands {
       );
       return;
     }
-    if (name === "steer") {
-      if (!text)
+    if (name === STEER_COMMAND_NAME) {
+      // A slash command frame's args arrive as sent; the text parser trims.
+      // Both reach the same words here.
+      const correction = text.trim();
+      if (!correction)
         throw new Error(
           "Use /steer followed by your correction while Codex is responding.",
         );
-      await host.steer(args.chatId, text);
-      await say("Correction delivered to the current response.");
+      await this.steerOrRun(args, correction);
       return;
     }
     if (name === "goal") {
@@ -494,24 +706,53 @@ export class NativeCommands {
     if (name === "diff") {
       let stdout: string;
       try {
-        ({ stdout } = await exec(
-          "git",
-          [
-            "--no-pager",
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "HEAD",
-            "--",
-          ],
-          {
-            cwd: host.workdir,
-            windowsHide: true,
-            timeout: 15_000,
-            maxBuffer: 512_000,
+        // Looked up per /diff, with the environment Git itself gets; no Git
+        // on an absolute PATH entry runs nothing and reads as not loaded.
+        const env = gitReadEnv(process.env);
+        const git = await (this.deps.findGit ?? createFindGit())(env).catch(
+          () => null,
+        );
+        if (!git) throw new Error("git was not found on an absolute PATH entry");
+        const execGit = this.deps.execGit ?? execGitFile;
+        const options = {
+          cwd: host.workdir,
+          env,
+          windowsHide: true,
+          timeout: 15_000,
+          maxBuffer: 512_000,
+        };
+        // Git 2.36 or later, or nothing (fix round w5, W4-N3). A Git that ran
+        // and failed has no version to read; one that could not start, or
+        // ran out of time, is the diff failing to load.
+        await checkGitFloor(
+          git,
+          async () => {
+            try {
+              return (await execGit(git, ["version"], options)).stdout;
+            } catch (failed) {
+              if (typeof (failed as { code?: unknown }).code === "number") return "";
+              throw failed;
+            }
           },
-        ));
+          this.deps.gitVersions,
+        );
+        // The top level is the agent's folder or above it, or no diff (fix
+        // round w5, W4-N4; the Git directory is not checked, on purpose).
+        const top =
+          (await execGit(git, NATIVE_TOPLEVEL_ARGS, options)).stdout.split(/\r?\n/)[0] ?? "";
+        if (!top) throw new Error("git rev-parse printed no folder");
+        if (!(await topLevelHolds(top, host.workdir, nodeChangesFs.realpath)))
+          throw new TopLevelOutside();
+        ({ stdout } = await execGit(git, NATIVE_DIFF_ARGS, options));
       } catch (error) {
+        if (error instanceof GitTooOldError)
+          throw new Error(
+            `${GIT_FLOOR_MESSAGE}. Update Git on this computer, then retry.`,
+          );
+        if (error instanceof TopLevelOutside)
+          throw new Error(
+            "This agent's repository keeps its working files outside the agent's folder, so its diff is not shown.",
+          );
         const detail = String((error as { stderr?: string }).stderr ?? "");
         if (/not a git repository/i.test(detail))
           throw new Error(
@@ -560,14 +801,22 @@ export class NativeCommands {
         ));
       if (id) {
         await host.resumeSavedThread(args.chatId, id);
-        await say(
-          "Resumed the saved Codex conversation. Your HOAI messages remain in place.",
-        );
+        // After the switch, never before: a switch the runtime refused leaves
+        // the chat in the context the Stop paused (review F4).
+        await this.deps.clearStopMarker(args.chatId, args.assistantId);
+        await say(RESUMED_SAVED_CONVERSATION);
       }
       return;
     }
     const current = await host.sessionSettings(args.chatId);
+    // What this chat RUNS, from the same source the model and effort report
+    // uses: the stored pair, then the runtime's own last value (P5 stage 7,
+    // Phase B, decision 10). Never `current`'s catalog guess, so the row
+    // under the message box and the question its tap opens never name two
+    // different models. Null when nothing is known yet: then the question
+    // names no current at all. Read only by the two questions that show it.
     if (name === "model") {
+      const shown = host.currentSessionReport(args.chatId);
       const models = await host.listModels();
       const words = text ? text.split(/\s+/) : [];
       if (words.length > 2)
@@ -578,7 +827,9 @@ export class NativeCommands {
         words[0] ||
         (await this.choose(
           context,
-          `Choose a model · current: ${safe(current.model)}`,
+          shown?.model
+            ? `Choose a model · current: ${safe(shown.model)}`
+            : "Choose a model",
           models.map((m) => ({ label: m.displayName, value: m.model })),
         ));
       if (!id) return;
@@ -593,7 +844,12 @@ export class NativeCommands {
           ? model.defaultReasoningEffort
           : await this.choose(
               context,
-              `Reasoning level · ${model.displayName}`,
+              // The running effort, named only for the running model: another
+              // model's efforts are not the chat's.
+              shown?.effort &&
+                (shown.model === model.model || shown.model === model.id)
+                ? `Reasoning level · ${model.displayName} · current: ${safe(shown.effort)}`
+                : `Reasoning level · ${model.displayName}`,
               model.supportedReasoningEfforts.map((e) => ({
                 label: e.reasoningEffort,
                 value: e.reasoningEffort,
@@ -614,11 +870,14 @@ export class NativeCommands {
     const models = await host.listModels();
     const model = models.find((m) => m.model === current.model);
     if (name === "effort") {
+      const shown = host.currentSessionReport(args.chatId);
       const effort =
         text ||
         (await this.choose(
           context,
-          `Reasoning level · current: ${safe(current.effort)}`,
+          shown?.effort
+            ? `Reasoning level · current: ${safe(shown.effort)}`
+            : "Reasoning level",
           (model?.supportedReasoningEfforts ?? []).map((e) => ({
             label: e.reasoningEffort,
             value: e.reasoningEffort,
@@ -632,10 +891,26 @@ export class NativeCommands {
     }
     if (name === "plan" || name === "code") {
       const mode = name === "code" || text === "off" ? "default" : "plan";
-      await apply({ mode });
-      await say(mode === "plan" ? "Plan mode is on." : "Coding mode is on.");
-      if (text && !["on", "off"].includes(text))
-        await this.deps.run(args, text);
+      const typedTask = Boolean(text) && !["on", "off"].includes(text);
+      // THE MODE IS NOT THE LOCK, so this does not just write a mode. Plan
+      // mode goes on with the read only sandbox and remembers the permission
+      // the chat had; coding mode gives that permission back. The host owns
+      // the pair (setPlanMode) so `/plan`, `/code` and the card's own buttons
+      // cannot drift apart, and it answers whether the sandbox actually took.
+      context.signal.throwIfAborted();
+      const { enforced } = await host.setPlanMode(args.chatId, mode === "plan");
+      // After the store, before the turn: the app should be drawing the chip
+      // while the agent is still exploring, and a report that lost a race with
+      // the turn would draw it after the plan card had already landed.
+      await this.deps.onSessionMode?.(args, mode, typedTask, enforced);
+      await say(
+        mode === "plan"
+          ? enforced
+            ? "Plan mode is on. This chat is read only until you answer a plan."
+            : "Plan mode is on."
+          : "Coding mode is on.",
+      );
+      if (typedTask) await this.deps.run(args, text);
       return;
     }
     if (name === "permissions") {
@@ -650,7 +925,17 @@ export class NativeCommands {
         throw new Error(
           "Choose workspace or read-only. Broader actions retain their individual approval controls.",
         );
-      await apply({ permission });
+      // The owner choosing an access level SPENDS plan mode's memory of the
+      // old one. Without this, `/permissions read-only` typed inside plan mode
+      // would be undone by the Go ahead that follows, handing back a workspace
+      // the owner had just taken away.
+      const saved = await apply({ permission, permissionBeforePlan: undefined });
+      // And it may have just taken the lock off a chat that is still in plan
+      // mode, or put one on. The mode did not move, so nothing else reports
+      // this, and an unreported change leaves the chip claiming a sandbox the
+      // chat no longer has.
+      if (saved.mode === "plan")
+        await this.deps.onPlanEnforcement?.(args, planWaitEnforced(saved));
       await say(
         permission === "read-only"
           ? "Local files are read-only for this chat. Connected HOAI tools retain their own permissions."

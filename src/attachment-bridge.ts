@@ -269,6 +269,25 @@ export async function publishMediaUrl(
   }
 }
 
+/**
+ * Upload bytes this process already holds, with no path and so no media
+ * guard: the caller vouches for where they came from. Today that is exactly
+ * one caller, a picture the Codex runtime generated, decoded off its own
+ * `imageGeneration` item (stage 4, C-21). Never hand this anything an agent
+ * named by path: that belongs to publishMediaPath, which checks the path
+ * against the allowlist BEFORE reading a byte.
+ *
+ * The same caps, flags, dimensions and inline or S3 split as every other
+ * outbound file, because it is the same function underneath.
+ */
+export function publishMediaBuffer(
+  api: BgosApi,
+  bytes: Buffer,
+  opts: { fileName: string; mimeType: string },
+): Promise<BgosOutboundFileRef> {
+  return publishMediaBytes(api, bytes, opts.fileName, opts.mimeType);
+}
+
 async function publishMediaBytes(
   api: BgosApi,
   bytes: Buffer,

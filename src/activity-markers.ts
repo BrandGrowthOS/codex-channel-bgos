@@ -11,10 +11,17 @@
  *     bandwidth: the backend derives the agent's live working status from the
  *     rows arriving, so a silent plugin looks like an idle agent. The app
  *     decides what to draw.
- *  2. A diff BODY never leaves the machine. `fileChange` carries a full patch
- *     body in `changes[].diff` (required and unbounded by the protocol); the
- *     path, the change word and two line counts are copied out, and the patch
- *     text itself never is.
+ *  2. A diff body leaves the machine in exactly one case: on a file change
+ *     approval card, masked by the redactor, cut to 400 lines a file and
+ *     64 KB in all, and never on an activity row. `fileChange` carries a full
+ *     patch body in `changes[].diff` (required and unbounded by the
+ *     protocol); on a ROW the path, the change word and two line counts are
+ *     copied out and the patch text itself never is, which is what the guard
+ *     in test/activity-markers.spec.ts asserts and why that guard is left
+ *     exactly as it is. The one case is `file-change-wire.ts`, reached only
+ *     from `interactions.approve` on `item/fileChange/requestApproval`: the
+ *     card is the surface where the owner is asked to AUTHORIZE the change,
+ *     and a person cannot answer a question that does not say what it asks.
  *  3. `FileUpdateChange.kind` is an OBJECT in the app server v2 protocol
  *     (`{type:"update", move_path?}`) and a plain string in the older SDK
  *     shape. Both are read here, so a template literal can never ship
@@ -266,6 +273,9 @@ function failed(item: Rec): boolean {
     item.status === "interrupted" ||
     item.success === false ||
     Boolean(item.error) ||
+    // A picture the runtime refused (`usageLimitExceeded`) says so here and
+    // not in its status, whose strings the protocol never enumerates.
+    Boolean(item.failure) ||
     (typeof item.exitCode === "number" && item.exitCode !== 0)
   );
 }
@@ -783,7 +793,15 @@ export function entryFromItem(
   }
 
   if (type === "imageGeneration" || type === "imageView") {
-    const path = shortenPath(item.path, ctx);
+    // Two different items with two different fields: `imageView` (the agent
+    // looked at a local picture) has `path`, and `imageGeneration` has
+    // `savedPath`, where the runtime saved the picture it made. Reading
+    // `path` for both left every generated picture's row without its file.
+    // The base64 `result` is never read here: a picture is not a row field.
+    const path = shortenPath(
+      type === "imageView" ? item.path : item.savedPath,
+      ctx,
+    );
     const card: ActivityCard = {
       icon: TOOL_ICON[type]!,
       name: type === "imageView" ? "view_image" : "image_generation",

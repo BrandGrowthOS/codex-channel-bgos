@@ -34,6 +34,96 @@ jobs:
           else
             echo "publish=false" >> "$GITHUB_OUTPUT"
           fi
+          # Versions that must NOT be advertised as latest on npm. A version
+          # lands in this list when its own source needs a backend that is not
+          # deployed yet, so an install of latest would reach hosts too early.
+          # 0.10.1: the daemon offers APPROVAL_HOLD_SECONDS (1800 s) and relies
+          # on the BGOS backend clamping it to the owner's per agent choice.
+          # Read the RELEASE ORDER comment above APPROVAL_HOLD_SECONDS in
+          # src/interactions.ts. Against a backend without that column, that
+          # clamp and its migration, every Codex approval becomes a thirty
+          # minute card for every owner with no setting anywhere to shorten it.
+          # This list is checked against the HELD-FROM-LATEST: <version> lines
+          # in src/interactions.ts, which are the source side of the same hold
+          # (test/publish-workflow.spec.ts). The two are edited together.
+          # Once that backend is live, drop the version from this list AND its
+          # HELD-FROM-LATEST line, then promote the already published package
+          # by hand:
+          #   npm dist-tag add codex-channel-bgos@<version> latest
+          # 0.11.0: the plan card. The app has to know the `plan_card`
+          # renderable, relabel the three `plan:` chip codes and read a chat's
+          # session mode off a column that ships with the stage 3 backend. It
+          # also inherits 0.10.1's approval hold. Held for both.
+          # 0.12.0: the file change card's `approvalMeta.change_summary` and
+          # `approvalMeta.diff`. The backend's ApprovalMetaDto strips a field
+          # it does not declare, silently, with a 201, so against a backend
+          # without the stage 4 DTO this daemon masks and caps a patch for
+          # nothing and the card still reads "Apply file changes". It also
+          # inherits both holds above. Held for all three.
+          # 0.13.0: the request card's `approvalMeta.reason` and
+          # `approvalMeta.rule_text`. Same mechanism as 0.12.0 and a WORSE
+          # cost: against a backend without the stage 5 DTO both are stripped
+          # with a 201 and no error, and the justification that was the card's
+          # TITLE on 0.12.0 (`text` was `params.reason`) has moved into that
+          # stripped `reason` while the title became `Run <command>`. So this
+          # release says LESS than the one before it, not the same: the
+          # sentence the owner used to read is gone and nothing replaces it,
+          # and the permanent, global rule an Always answer would write is
+          # still unsaid. It inherits all three holds above. Held for all four.
+          # 0.14.0: adds no hold of its own. A picture Codex makes posts
+          # itself as an ordinary image message, which every backend already
+          # accepts. It is held only because it carries the holds of the
+          # releases before it, so it is promoted only after 0.13.0 is on
+          # latest, never before or in the same step: npm dist-tag add points
+          # latest at whichever version ran last, so promoting an older
+          # version after 0.14.0 moves latest back to that older version.
+          # Beside that it waits for one thing no backend
+          # gives: it is promoted only after one logged in live image turn
+          # confirms the real item (result bytes and their form, the result
+          # size (under 12 MiB, the line cap), revisedPrompt, savedPath, the
+          # failure shape; probe.md, decision 7). The offline probe never saw
+          # a real item, and a shape the code does not read turns every
+          # picture into a "could not be shown" line while the served canon
+          # tells the model not to resend it. A picture over the line cap
+          # never posts either: its line is too large to read, and only that
+          # "could not be shown" line reaches the chat.
+          # 0.15.0: adds no hold of its own either. A steer with nothing to
+          # steer runs as an ordinary message and a landed steer posts no
+          # reply, which every backend already accepts (P5 stage 5, the steer
+          # fallback, stacked on 0.14.0). It is held only because it carries
+          # the holds of the releases before it, 0.14.0's included, so it is
+          # promoted only after 0.14.0 is on latest, never before or in the
+          # same step: npm dist-tag add points latest at whichever version ran
+          # last, so promoting an older version after 0.15.0 moves latest back
+          # to that older version. The HOAI app steers only daemons at 0.15.0
+          # or later, so until it is promoted Send now on a Codex agent is a
+          # plain send.
+          # 0.18.0: adds no hold of its own either. It reports each chat's
+          # model and effort to HOAI and declares session_model_control, and
+          # an older backend answers the new report route with a 404 the
+          # daemon swallows and stores the token without reading it (P5
+          # stage 7, the model and effort row, stacked on 0.15.0; 0.16.0 and
+          # 0.17.0 are P6's and P7's releases, #20 and #21, which merged
+          # ahead of it). It is held only because it carries the holds of the
+          # releases before it, 0.14.0's and 0.15.0's included, so it is
+          # promoted only after 0.15.0 is on latest, never before or in the
+          # same step: npm dist-tag add points latest at whichever version ran
+          # last, so promoting an older version after 0.18.0 moves latest back
+          # to that older version. The HOAI app offers the model and effort
+          # row only to a daemon that declares session_model_control, so until
+          # it is promoted no Codex agent shows the row.
+          # 0.13.0 is P2 stage 5's release, which merged first and brought its
+          # own line here (the entry above); merge order #12, #14, #15, P2
+          # stage 5 (0.13.0), then 0.14.0, then 0.15.0, then 0.18.0. Held for
+          # all seven.
+          HELD_FROM_LATEST="0.10.1 0.11.0 0.12.0 0.13.0 0.14.0 0.15.0 0.18.0"
+          DIST_TAG=latest
+          for held in $HELD_FROM_LATEST; do
+            if [ "$CURRENT" = "$held" ]; then
+              DIST_TAG=next
+            fi
+          done
+          echo "dist_tag=$DIST_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Install
         if: steps.ver.outputs.publish == 'true'
@@ -49,9 +139,36 @@ jobs:
 
       - name: Publish
         if: steps.ver.outputs.publish == 'true'
-        run: npm publish --access public
+        run: npm publish --access public --tag "${{ steps.ver.outputs.dist_tag }}"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Held from latest
+        if: steps.ver.outputs.publish == 'true' && steps.ver.outputs.dist_tag != 'latest'
+        # Every held version is held for its OWN reason, so nothing printed
+        # here for every version names one version's backend, and the promote
+        # command comes last, after the condition that gates it
+        # (test/publish-workflow.spec.ts reads what this step prints).
+        run: |
+          VERSION="${{ steps.ver.outputs.current }}"
+          TAG="${{ steps.ver.outputs.dist_tag }}"
+          echo "::warning::$VERSION was published under the npm dist tag $TAG, not latest, so nothing installs it by default. Promote it only when the reason it is held is met: that reason is written beside $VERSION in the HELD_FROM_LATEST comment in this workflow and in the promote block of the README."
+          if [ "$VERSION" = "0.14.0" ]; then
+            echo "::warning::0.14.0 needs no backend of its own. It is promoted only after 0.13.0 is on latest, never before or in the same step, and only after one logged in live image turn confirms the real item (result bytes and their form, the result size (under 12 MiB, the line cap), revisedPrompt, savedPath, the failure shape; probe.md, decision 7)."
+            echo "::warning::npm points latest at whichever version was promoted last: promoting an older version after 0.14.0 moves latest back to that older version."
+          fi
+          if [ "$VERSION" = "0.15.0" ]; then
+            echo "::warning::0.15.0 needs no backend of its own. It is promoted only after 0.14.0 is on latest, never before or in the same step. Until then the HOAI app keeps Send now on a Codex agent a plain send, because it steers only daemons at 0.15.0 or later."
+            echo "::warning::npm points latest at whichever version was promoted last: promoting an older version after 0.15.0 moves latest back to that older version."
+          fi
+          if [ "$VERSION" = "0.18.0" ]; then
+            echo "::warning::0.18.0 needs no backend of its own. It is promoted only after 0.15.0 is on latest, never before or in the same step. Until then no Codex agent offers the model and effort row, because the HOAI app offers it only to a daemon that declares session_model_control."
+            echo "::warning::npm points latest at whichever version was promoted last: promoting an older version after 0.18.0 moves latest back to that older version."
+          fi
+          echo "Only once that reason is met, remove $VERSION from HELD_FROM_LATEST"
+          echo "in this workflow and its HELD-FROM-LATEST line in src/interactions.ts,"
+          echo "then promote the already published package by hand:"
+          echo "  npm dist-tag add codex-channel-bgos@$VERSION latest"
 
       - name: Tag release
         if: steps.ver.outputs.publish == 'true' && github.event_name == 'push'

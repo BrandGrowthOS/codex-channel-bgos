@@ -550,6 +550,7 @@ describe("the adapter's activity wiring", () => {
     });
     Object.assign(adapter, {
       turnControllers: new Map(),
+    planCardFailures: new Set(),
       ownerId: "owner-1",
       missionLane: {
         beginTurn: vi.fn(() => 1),
@@ -874,6 +875,41 @@ describe("the plugin never reads the owner's switch", () => {
     expect(offenders).toEqual([]);
     expect(sourceFiles("src").length).toBeGreaterThan(40);
   });
+
+  it("reads the owner's Show model and effort switch nowhere in src/", () => {
+    // P5 stage 7 (C-26, S10). The daemon reports each chat's model and effort
+    // ALWAYS, and the app alone decides whether to draw the row: the switch
+    // (assistants.show_model_effort) and the derived canShowModelEffort are
+    // app side. A daemon that read either would go quiet exactly when the
+    // owner turns the row on, because nothing it held would be current.
+    const offenders = sourceFiles("src").filter((file) =>
+      /showModelEffort|show_model_effort|canShowModelEffort/.test(
+        readFileSync(file, "utf8"),
+      ),
+    );
+    expect(offenders).toEqual([]);
+    expect(sourceFiles("src").length).toBeGreaterThan(40);
+  });
+
+  it("reads the owner's approval wait nowhere in src/", () => {
+    // The same rule, on the setting that decides how long a request stays
+    // answerable. The daemon OFFERS the longest it can hold its own side open
+    // (APPROVAL_HOLD_SECONDS) on every request; the server stores the smaller
+    // of that and the owner's per-agent choice and sends the stored number
+    // back on the created message. A GET of the agent here buys nothing and
+    // costs a round trip in front of a person waiting to see the card, which
+    // is exactly what a first pass at this shipped and then removed.
+    // Case-insensitive on purpose: `getApprovalWaitSeconds` was the name it
+    // had, and a guard that only catches the lower-case spelling would have
+    // let that exact method back in.
+    const offenders = sourceFiles("src").filter((file) =>
+      /approvalWaitSeconds|approval_wait_seconds/i.test(
+        readFileSync(file, "utf8"),
+      ),
+    );
+    expect(offenders).toEqual([]);
+    expect(sourceFiles("src").length).toBeGreaterThan(40);
+  });
 });
 
 /**
@@ -892,8 +928,14 @@ describe("an adopted turn's card carries everything an ordinary turn's does", ()
     Object.assign(adapter, {
       ownerId: "owner-1",
       identityReady: false,
+      planCardFailures: new Set<number>(),
+      // The chat's stop generation, which an adopted turn reads (Round 7).
+      generations: new Map<number, number>(),
       chatToAssistant: new Map<number, number>([[20, 10]]),
       assistantToRoute: new Map<number, string>(),
+      // The real constructor makes it: an owner Stop marks the continuation
+      // turn running in a chat (D35).
+      adoptedTurns: new Map<number, AbortController>(),
       goalLane: {
         owns: () => true,
         noteTurnStarted: vi.fn(),

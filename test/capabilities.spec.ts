@@ -1,9 +1,13 @@
 /**
  * Capability bootstrap: the pure validate-and-choose logic + the BgosApi GET.
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 
-import { BgosApi } from "../src/bgos-api.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { BGOS_AGENT_HINTS } from "../src/agent-hints.js";
+import { BgosApi, capabilitiesQueryParam } from "../src/bgos-api.js";
+import { DECLARED_CAPABILITIES } from "../src/declared-capabilities.js";
 import {
   BUNDLED_CAPABILITIES,
   MAX_CANON_BYTES,
@@ -130,9 +134,95 @@ describe("BgosApi.getCapabilities", () => {
     expect(server.requests.at(-1)!.url).toContain("channel=codex");
   });
 
+  it("carries the declared list as one comma separated capabilities query", async () => {
+    // The canon tells the request reason clause only to a daemon that
+    // declares request_reason, and trusts the pairing's stored list only when
+    // the SAME version wrote it. This fetch runs at connect, before the first
+    // heartbeat of a new release, so without the query a freshly upgraded
+    // daemon is told none of its declared sentences for its whole process.
+    server.stage("GET", "/api/v1/integrations/capabilities", 200, {
+      channel: "codex",
+      version: "v",
+      text: "# BGOS Channel Agent Capabilities",
+      core: "",
+      channelSyntax: "",
+    });
+    await makeApi(baseUrl).getCapabilities("codex", "0.13.0", DECLARED_CAPABILITIES);
+    const url = new URL(server.requests.at(-1)!.url, "http://x");
+    expect(url.searchParams.get("channel")).toBe("codex");
+    expect(url.searchParams.get("daemonVersion")).toBe("0.13.0");
+    expect(url.searchParams.get("capabilities")).toBe(DECLARED_CAPABILITIES.join(","));
+    expect(url.searchParams.get("capabilities")!.split(",")).toContain("request_reason");
+    // One key, not the capabilities[]= array axios would send by default,
+    // which the backend does not read.
+    expect(url.searchParams.getAll("capabilities")).toHaveLength(1);
+    expect(url.search).not.toContain("capabilities%5B%5D");
+  });
+
+  it("leaves the capabilities key off when nothing is declared", async () => {
+    server.stage("GET", "/api/v1/integrations/capabilities", 200, {
+      channel: "codex",
+      version: "v",
+      text: "# BGOS Channel Agent Capabilities",
+      core: "",
+      channelSyntax: "",
+    });
+    await makeApi(baseUrl).getCapabilities("codex", "0.13.0");
+    expect(server.requests.at(-1)!.url).not.toContain("capabilities=");
+  });
+
   it("rejects when the endpoint 404s (old backend) so the caller keeps the fallback", async () => {
     // No stage -> mock returns 404; getCapabilities must reject (caught upstream).
     await expect(makeApi(baseUrl).getCapabilities("codex")).rejects.toBeTruthy();
+  });
+});
+
+describe("capabilitiesQueryParam", () => {
+  it("keeps only tokens in the backend's grammar, at most 32, comma joined", () => {
+    expect(capabilitiesQueryParam([])).toEqual({});
+    expect(capabilitiesQueryParam(["request_reason"])).toEqual({
+      capabilities: "request_reason",
+    });
+    expect(
+      capabilitiesQueryParam(["mission_events", "Bad", "a,b", "", "request_reason"]),
+    ).toEqual({ capabilities: "mission_events,request_reason" });
+    const many = Array.from({ length: 40 }, (_, i) => `t${i}`);
+    expect(capabilitiesQueryParam(many).capabilities!.split(",")).toHaveLength(32);
+  });
+});
+
+/**
+ * The fetch at connect is WIRED to the declared list, not merely able to
+ * carry one: the real loadServedCapabilities against a daemon made of stubs.
+ *
+ * MUTATION PROOF (recorded 2026-09-24, restored byte for byte): deleting the
+ * DECLARED_CAPABILITIES argument from the getCapabilities call in adapter.ts
+ * loadServedCapabilities turns this case red, 1 of 41 in this file.
+ */
+describe("the daemon's canon fetch at connect", () => {
+  it("sends DECLARED_CAPABILITIES, request_reason included", async () => {
+    const { CodexAdapter } = await import("../src/adapter.js");
+    const { getPackageVersion } = await import("../src/version.js");
+    const adapter = Object.create(CodexAdapter.prototype) as any;
+    const getCapabilities = vi.fn(async () =>
+      served("# BGOS Channel Agent Capabilities\n(channel: codex)\nbody"),
+    );
+    const applyAgentHints = vi.fn();
+    Object.assign(adapter, {
+      capabilitiesLoaded: false,
+      api: { getCapabilities },
+      host: { applyAgentHints },
+    });
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    await adapter.loadServedCapabilities();
+    expect(getCapabilities).toHaveBeenCalledWith(
+      "codex",
+      getPackageVersion(),
+      DECLARED_CAPABILITIES,
+    );
+    expect(DECLARED_CAPABILITIES).toContain("request_reason");
+    expect(applyAgentHints).toHaveBeenCalledTimes(1);
+    vi.restoreAllMocks();
   });
 });
 
@@ -273,5 +363,202 @@ describe("BUNDLED_CAPABILITIES helper rows paragraph", () => {
 
   it("carries no em dash and no en dash", () => {
     expect(BUNDLED_CAPABILITIES).not.toMatch(/[\u2013\u2014]/);
+  });
+});
+
+/**
+ * Stage 5: the one field on a request card the MODEL fills, and the sentence
+ * that had to sit beside "You fill none of these fields" without contradicting
+ * it.
+ *
+ * `exec_command`'s `justification` is a tool ARGUMENT, not a card field, and
+ * the runtime passes it through to the approval request as `params.reason`,
+ * which this daemon now draws as the card's reason line. Until this stage
+ * nothing anywhere told the model that: the hints never used the word, so
+ * whether an owner was told WHY a command needed escalated permissions came
+ * down to whether the model felt like filling an optional argument.
+ *
+ * The placement is the assertion. Both sentences are pinned in ONE string, in
+ * order, because the hazard is not the wording of either: it is a later edit
+ * moving the new sentence somewhere the "you fill none of these fields" line
+ * reads as denying it.
+ *
+ * MUTATION PROOF: move the justification sentence out of that paragraph, or
+ * reword one clause of it, and this case goes red. Put "word for word" back
+ * in front of "as the card's reason line" in agent-hints.ts and "never
+ * promises the justification reaches the owner word for word" goes red too.
+ */
+describe("BUNDLED_CAPABILITIES justification sentence", () => {
+  const flat = BUNDLED_CAPABILITIES.replace(/\s+/g, " ");
+
+  it("tells the model to write the justification, beside the line that says it fills no card field", () => {
+    expect(flat).toContain(
+      "You fill none of these fields. One thing on an approval card IS yours to write, and it is a tool argument rather than a card field: when you ask to run a command with escalated permissions, exec_command's justification is shown to your owner as the card's reason line, so write it as one plain sentence of at most 280 characters saying why this command is needed, for a reader who cannot see your reasoning; a longer one is cut short.",
+    );
+  });
+
+  it("never promises the justification reaches the owner word for word", () => {
+    // It does not: the daemon clips it at 280 units with an ellipsis, and
+    // holds it back entirely when it is the same sentence as the card's
+    // title (`differingReason`). This sentence read "passed to your owner word
+    // for word" until the stage 5 codex review, a promise the code breaks on
+    // the first long justification.
+    expect(flat).not.toMatch(/word for word|verbatim/i);
+  });
+
+  it("says it in the sentence's own words: a tool argument, not a card field", () => {
+    // The clause that carries the whole distinction, asserted on its own so a
+    // reword of it fails here and not only inside the paragraph above.
+    expect(flat).toContain(
+      "it is a tool argument rather than a card field",
+    );
+    // What is NOT asserted, deliberately: that this text lacks the tokens
+    // `send reason` or `rule_text`. Both were tried during stage 5 and both
+    // could only ever pass. Neither string has appeared in agent-hints.ts,
+    // and BUNDLED_CAPABILITIES is this daemon's offline MIRROR of the served
+    // canon, whose approvals core owns exactly those words ("send reason (at
+    // most 280)", "send rule_text (at most 500)"). Refreshing the bundled
+    // copy from the served canon is the standard practice, so a test
+    // forbidding them would go red on the first correct refresh and the
+    // repair would be to delete the test or to leave the fallback stale.
+  });
+});
+
+/**
+ * Stage 4 (C-21): the generated picture sentence, word for word.
+ *
+ * The host now posts a picture the runtime's image generation tool made, with
+ * its revised prompt as the caption, when the turn finishes (never mid turn,
+ * see gap 04). A model that ALSO sends it with MEDIA: or the reply tool would
+ * post it twice, and a model that never heard of the post would describe a
+ * picture the owner has not seen yet as missing. The served canon's Codex
+ * sentence (stage 4's BGOS PR) is copied from THIS text. This describe only
+ * compares the plugin with itself; the cross repo pin below is what holds the
+ * two repos together.
+ *
+ * MUTATION PROOF: change one word of the sentence in src/agent-hints.ts and
+ * this goes red; put an em dash back in and the dash case goes red.
+ */
+describe("BUNDLED_CAPABILITIES generated picture sentence", () => {
+  /**
+   * Review findings 3 and 5. The picture posts itself from a CHAT turn only:
+   * a meeting takes text only (meeting_reply and the meeting reply tool
+   * refuse files), and a voice task runs detached and its result goes to
+   * the call, so neither posts one. The first sentence therefore names the
+   * chat turn, and the last says what to do in the others, because an
+   * unscoped promise told a model in a meeting that the room could see a
+   * picture it could not, and told a model in a voice task not to use the one
+   * tool that would deliver it. The middle sentence keeps the model's view
+   * honest when a picture cannot be shown: the chat says so.
+   *
+   * Re-review item 6: a voice CONSULT is a third place. It runs with no HOAI
+   * tools at all and is told to send nothing, so "send it with the reply
+   * tool" was an instruction it could not follow. A consult is told the
+   * picture stays saved on this machine (the runtime's own copy, under the
+   * Codex home, never in the workspace) and to describe it. A voice task
+   * (a dispatch) keeps the reply tool, which its tool context really has.
+   */
+  const SERVED_TRUTH =
+    "In a chat turn, a picture you make with image generation posts itself to the chat when the turn finishes, with its prompt as the caption; do not send it again with MEDIA: or the reply tool. If it cannot be shown, the chat says so in one plain line. In a meeting, a voice task or a consult nothing posts it: a meeting takes text only, so describe the picture there; in a voice task copy it into the workspace and send it with the reply tool; and a consult sends nothing, so say the picture is saved on this machine and describe it.";
+  const flat = BUNDLED_CAPABILITIES.replace(/\s+/g, " ");
+
+  it("says, word for word, the sentences the served canon copies", () => {
+    expect(flat).toContain(SERVED_TRUTH);
+  });
+
+  it("never promises the post outside a chat turn", () => {
+    expect(flat).not.toMatch(
+      /(^|[.;:] )A picture you make with image generation posts itself/,
+    );
+  });
+
+  it("never tells a consult to use a tool it does not have, or that the picture is in the workspace", () => {
+    const consult = SERVED_TRUTH.slice(SERVED_TRUTH.indexOf("a consult sends"));
+    expect(consult).not.toContain("reply tool");
+    expect(consult).not.toContain("workspace");
+    expect(flat).toContain("a consult sends nothing");
+  });
+
+  it("says when the turn finishes, never the instant the picture is made", () => {
+    expect(flat).not.toMatch(/the instant (the|a|your) (tool call|picture|image)/i);
+  });
+
+  it("carries no em dash and no en dash", () => {
+    expect(SERVED_TRUTH).not.toMatch(/[\u2013\u2014]/);
+    expect(BUNDLED_CAPABILITIES).not.toMatch(/[\u2013\u2014]/);
+  });
+});
+
+/**
+ * Cross repo pin: the generated picture sentence, by sha256, from BOTH sides.
+ *
+ * The BGOS served canon carries this sentence as CODEX_GENERATED_IMAGES_SENTENCE
+ * (backend/src/integrations/capability-canon.ts) and its markdown mirror
+ * carries it again. Every agent reads the served canon first and this bundled
+ * text after it, so the two must say the same thing. The word for word case
+ * above compares this repo only with itself: change the hint and SERVED_TRUTH
+ * together and it stays green while the canon says something else. So the
+ * sentence is also pinned by ONE sha256, the same hex string in both repos.
+ *
+ * THE TWIN TEST. BrandGrowthOS/BGOS,
+ * backend/src/integrations/capability-canon.codex-images.spec.ts, describe
+ * "the generated picture sentence, pinned across repos", pins the same
+ * GENERATED_PICTURE_SENTENCE_SHA256 against CODEX_GENERATED_IMAGES_SENTENCE
+ * (after its "- ") and the mirror's line. Either repo drifting turns its own
+ * test red.
+ *
+ * THE RULE. Change this sentence on this side only together with the BGOS PR
+ * that changes the canon constant and the mirror to the same words, and
+ * update the pinned hash in BOTH tests, in those two PRs. A red here is that
+ * reminder: never make it green by moving one side's hash alone.
+ *
+ * WHAT IS HASHED. The paragraph exactly as src/agent-hints.ts exports it in
+ * BGOS_AGENT_HINTS: from the line that opens "In a chat turn, a picture" up to
+ * the line that opens "ask_user_input asks", with each line break turned into
+ * one space, because the hint file wraps the paragraph over seven lines and
+ * the canon holds it on one. That is the only normalisation. Spaces are not
+ * collapsed, so a doubled space is a change too. UTF-8, 530 bytes.
+ */
+describe("the generated picture sentence, pinned across repos", () => {
+  /** The same hex string as the BGOS twin test. Update both or neither. */
+  const GENERATED_PICTURE_SENTENCE_SHA256 =
+    "fe528db206e5ac09a296e624695e368f87bfb9fe904111305b0a889da436db98";
+
+  function sha256(text: string): string {
+    return createHash("sha256").update(text, "utf8").digest("hex");
+  }
+
+  /** The paragraph as the hint file holds it, with its line wrapping undone. */
+  function heldSentence(hints: string): string {
+    const opens = hints.indexOf("\nIn a chat turn, a picture ");
+    expect(
+      opens,
+      'src/agent-hints.ts has no line opening "In a chat turn, a picture "',
+    ).toBeGreaterThanOrEqual(0);
+    const next = hints.indexOf("\nask_user_input asks ", opens + 1);
+    expect(
+      next,
+      'src/agent-hints.ts has no "ask_user_input asks" line after the picture paragraph',
+    ).toBeGreaterThan(opens);
+    return hints.slice(opens + 1, next).replace(/\n/g, " ");
+  }
+
+  it("hashes to the sha256 the BGOS canon pins too", () => {
+    const held = heldSentence(BGOS_AGENT_HINTS);
+    expect(
+      sha256(held),
+      "The generated picture sentence in src/agent-hints.ts no longer matches the sha256 " +
+        "BrandGrowthOS/BGOS pins for CODEX_GENERATED_IMAGES_SENTENCE. Change it only together " +
+        "with the BGOS PR that moves the canon and its mirror to the same words, and update " +
+        "GENERATED_PICTURE_SENTENCE_SHA256 in both repos. The hashed text was: " +
+        held,
+    ).toBe(GENERATED_PICTURE_SENTENCE_SHA256);
+  });
+
+  it("is not vacuous: one changed character changes the hash", () => {
+    const held = heldSentence(BGOS_AGENT_HINTS);
+    const drifted = held.replace("chat turn,", "chat turn;");
+    expect(drifted).not.toBe(held);
+    expect(sha256(drifted)).not.toBe(GENERATED_PICTURE_SENTENCE_SHA256);
   });
 });

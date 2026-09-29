@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { resolve, join, dirname as dirnameOf } from "node:path";
 import { homedir } from "node:os";
 import { AppServer, codexEnvironment, type RpcObject } from "./app-server.js";
+import { clipCharacters } from "./clip-text.js";
 import { type TodoListSignal } from "./event-mapper.js";
 import {
   childRowsFromCollabItem,
@@ -47,6 +48,27 @@ import {
   type SessionSettings,
   type CodexModel,
 } from "./session-settings.js";
+import {
+  planModeOff,
+  planModeOn,
+  planWaitEnforced,
+} from "./plan-mode.js";
+import { collectGeneratedImage } from "./generated-images.js";
+import {
+  SESSION_BRANCH_MAX,
+  SESSION_PREVIEW_MAX,
+  SESSION_TITLE_MAX,
+  type SessionAbilities,
+  type SessionErrorCode,
+} from "./session-controls-contract.js";
+import {
+  reportFromReroute,
+  reportFromStored,
+  reportFromThreadResponse,
+  reportFromThreadSettings,
+  reportRetraction,
+  type SessionReport,
+} from "./session-report.js";
 
 export interface DynamicTool {
   type: "function";
@@ -100,6 +122,36 @@ export interface CodexHostOptions {
    * Answering null leaves the turn unadopted, exactly as before.
    */
   onAdoptedTurn?: (chatId: number) => AdoptedTurn | null;
+  /**
+   * What a chat is REALLY running changed, or was learned (P5 stage 7, C-26).
+   * One listener, the adapter's, which dedupes, orders and sends it. Fired
+   * from five places (S11): (a) every successful `updateSettings`, and (P5
+   * stage 7, Phase B, decision 5) the value a failed one ROLLS BACK to; (b)
+   * the runtime's `thread/settings/updated`; (c) the runtime's
+   * `model/rerouted`, flagged; (d) the `thread/start` and `thread/resume`
+   * responses inside `ensureThread`; (e) the end of the first turn after a
+   * reroute that COMPLETES with no reroute of its own, unflagged again
+   * (Phase B, decision 2: never at `turn/started`, when nobody knows yet
+   * whether that turn reroutes too). (b), (c) and (e) sit ABOVE the turn
+   * guard, beside markers and goals, because the runtime says these things
+   * between turns as often as inside one. A thread that maps to no chat (a
+   * detached or ephemeral run) reports nothing.
+   *
+   * And a RETRACTION (Phase B, decision 4, `model: null`) on /new with
+   * nothing stored and when the adapter first binds a chat this host holds
+   * nothing for (`noteChatBound`), so a value another host or an older
+   * thread reported is cleared rather than drawn as what runs.
+   *
+   * S12, store first: a chat with a STORED model reports the store, because
+   * `run()` re-asserts it as `turn/start` overrides on every turn, so it is
+   * what the next turn runs; a chat with nothing stored reports the runtime's
+   * own value. `sessionSettings()`'s catalog fallback is never reported on
+   * its own, because the runtime's default comes from config.toml.
+   */
+  onSessionSettings?: (
+    chatId: number,
+    report: SessionReport,
+  ) => void | Promise<void>;
 }
 /** What the adapter hands back to take ownership of a continuation turn. */
 export interface AdoptedTurn {
@@ -120,6 +172,75 @@ export interface PlanSignal {
   turnId: string | null;
   plan: PlanItem[];
 }
+/**
+ * A finished plan the model PROPOSED, which is a different thing from the
+ * `turn/plan/updated` checklist above and arrives on a different wire.
+ *
+ * In Codex's plan mode the runtime asks the model to wrap its final plan in a
+ * `<proposed_plan>` block, PARSES that block out of the agent message and
+ * re-emits it as its own item: `item/completed` with `item.type === "plan"` and
+ * the whole markdown in `item.text`. The block is REMOVED from the message, so
+ * before this callback existed the plan reached nobody: `entryFromItem` returns
+ * null for a plan item and `result()` only ever sees the sentence that came
+ * before the block. Settled by a live probe on 2026-09-23, see
+ * docs/learnings/codex-plan-mode-wire.md.
+ *
+ * `item/plan/delta` carries the same text as it streams and is deliberately
+ * ignored: the card is posted once, when the plan is finished.
+ */
+export interface PlanProposalSignal {
+  turnId: string | null;
+  itemId: string;
+  /** The plan, as markdown. Already finalized; never a partial. */
+  text: string;
+  /**
+   * The pictures this turn finished BEFORE the plan, in order (stage 4,
+   * C-21, review finding 2). The card is posted from inside the turn and is
+   * read as blocked; a picture posted after it would be read as done and run
+   * over it, so the adapter posts these first. Absent when there are none.
+   */
+  images?: GeneratedImage[];
+}
+/**
+ * Why the runtime refused a picture. The 0.154.0 schema has one variant,
+ * `usageLimitExceeded {limitId, resetsAt}`; anything else is kept by its type
+ * so the adapter can still say something plain.
+ */
+export interface GeneratedImageFailure {
+  type: string;
+  limitId?: string;
+  /** Epoch seconds on this protocol. Absent when the runtime gave none. */
+  resetsAt?: number;
+}
+/**
+ * A picture the runtime's image generation tool finished this turn, as the
+ * turn keeps it (stage 4, C-21). Decoded when its `imageGeneration` item
+ * completes (generated-images.ts), so a turn holds the BYTES and never the
+ * base64 string, and posted by the adapter when the turn finishes, first in
+ * the reply. Never mid turn: a standard post mid turn marks a Codex agent
+ * done for the whole rest of the turn (gap 04).
+ */
+export interface GeneratedImage {
+  itemId: string;
+  /** The picture, capped at the 10 MB image limit. Absent when there is
+   *  nothing to post: a refusal, an empty result, or bytes that are not an
+   *  image. */
+  bytes?: Buffer;
+  mimeType?: string;
+  fileName?: string;
+  /** The prompt the image model actually used, for the caption. */
+  revisedPrompt?: string;
+  /** Where the runtime saved its own copy, when the save worked. Only ever
+   *  compared against `MEDIA:` lines and shown on the row; never read. */
+  savedPath?: string;
+  /** The runtime handed back a non empty `result`, whether or not it decoded
+   *  (not a picture, over the cap), or one on a line too large to read at all
+   *  (`tooLarge`, src/app-server.ts, Round 8). Codex MADE something then, so a
+   *  picture that cannot be shown says "made" and never "tried". The string
+   *  itself is never kept. */
+  returnedOutput?: true;
+  failure?: GeneratedImageFailure;
+}
 export interface RunTurnCallbacks {
   signal?: AbortSignal;
   onTool?: (card: ActivityCard, id: string) => void | Promise<void>;
@@ -132,6 +253,13 @@ export interface RunTurnCallbacks {
   onTodoList?: (signal: TodoListSignal) => void | Promise<void>;
   /** Raw plan snapshot for the live Steps lane. Never touches the mission. */
   onPlan?: (signal: PlanSignal) => void | Promise<void>;
+  /**
+   * The model proposed a plan and is waiting to be told to go ahead. Fired at
+   * most once per turn, from the runtime's own `plan` item. A sibling of
+   * `onPlan` and never a caller of it: the Steps lane is scratch paper for
+   * work in flight, this is a card the owner answers.
+   */
+  onPlanProposal?: (signal: PlanProposalSignal) => void | Promise<void>;
   onTick?: () => void;
   onRequest?: (method: string, params: RpcObject) => Promise<unknown>;
   onUsage?: (usage: RpcObject) => void;
@@ -166,6 +294,20 @@ export interface RunTurnResult {
    * to settle a child of a turn that was cut short.
    */
   helpersStillRunning?: boolean;
+  /**
+   * The runtime emitted a finished `plan` item this turn, so `onPlanProposal`
+   * has already fired and the adapter's `<proposed_plan>` fallback must stay
+   * out of the way. Absent and false both mean no plan item was seen.
+   */
+  sawPlanProposal?: boolean;
+  /**
+   * The pictures this turn made, in the order their items completed, one per
+   * item id. Filled by `result()`, the one constructor every outcome goes
+   * through, so a failed turn, a stopped turn and the watchdog's result all
+   * carry the pictures that finished first. Optional so a hand built result
+   * compiles; absent means none.
+   */
+  images?: GeneratedImage[];
 }
 interface ActiveTurn {
   id?: string;
@@ -182,6 +324,23 @@ interface ActiveTurn {
   rowIdentity: Map<string, KnownRow>;
   /** `startedAtMs` per item id, so a completed item can carry a duration. */
   rowStartedAt: Map<string, number>;
+  /**
+   * The `changes[{path, kind, diff}]` array a `fileChange` item announced,
+   * per item id, so the approval request that follows it can say WHICH files
+   * it is asking about. Written on `item/started` (and on
+   * `item/fileChange/patchUpdated` should it ever fire; a live probe on app
+   * server 0.154.0 never saw it), dropped on `item/completed`, and gone with
+   * the turn.
+   *
+   * It lives HERE and not beside `cwdByThread`, and never on disk, for one
+   * reason each: on the turn it is cleared with the turn and the adopted goal
+   * turn gets the join for free, while a host level map would hold patch
+   * BODIES for the life of the process; and a restart takes the child app
+   * server, the turn and the RPC together, so there is nothing a disk store
+   * could ever replay. Bounded at ROW_CHANGES_MAX with the oldest evicted,
+   * because the one thing a cache of patch bodies must not do is grow.
+   */
+  rowChanges: Map<string, unknown[]>;
   /**
    * This host's FIRST sight of each child agent, keyed on the CHILD's own
    * thread id and never on the collab item's, because the spawn call, the
@@ -203,14 +362,121 @@ interface ActiveTurn {
    * the runtime never nicknamed would lose the name it was first drawn with.
    */
   childBaseName: Map<string, string>;
+  /**
+   * The pictures this turn finished, keyed on the item id, which is the
+   * dedupe: a second `item/completed` for the same picture is still one
+   * picture. REQUIRED, not optional, so the compiler makes BOTH constructors
+   * (`execute` and `adoptTurn`) start one; the second constructor is the one
+   * that gets forgotten.
+   */
+  images: Map<string, GeneratedImage>;
+  /**
+   * The ids of the pictures this turn already handed to `onPlanProposal`
+   * (re-review item 4). The adapter deals with every one of them before the
+   * card, by posting it or by posting its line, so when an owner turn takes
+   * this thread over, `execute` must not copy them into that turn as well:
+   * its picture record starts empty and would post them a second time.
+   * REQUIRED for the same reason `images` is.
+   */
+  handedOff: Set<string>;
+  /**
+   * The runtime already handed this turn a finished `plan` item, so the
+   * adapter's `<proposed_plan>` fallback must not post a second card. Read on
+   * the result, never inside the notification loop.
+   */
+  sawPlanProposal?: boolean;
   finish: (result: RunTurnResult) => void;
+  /**
+   * Stop and restart this turn's watchdog around a request that is parked in
+   * front of the owner. Only a turn this host RUNS owns a watchdog, so an
+   * adopted turn carries neither and both call sites are optional.
+   */
+  parkWatchdog?: () => void;
+  resumeWatchdog?: () => void;
   /**
    * Present only on an ADOPTED turn: drop its bookkeeping without delivering
    * anything. A turn the owner asks for takes the same thread key (the app
    * server steers a running turn rather than starting a second one), and the
-   * outcome then belongs to the turn that replaced it.
+   * outcome then belongs to the turn that replaced it. That includes the
+   * pictures it already finished: `execute` copies `images` across before it
+   * calls this, because nothing else would ever post them, except the ones in
+   * `handedOff`, which its plan card already dealt with.
    */
   release?: () => void;
+}
+
+/**
+ * The HOAI tools that BLOCK on a PERSON, i.e. an `item/tool/call` whose answer
+ * is an owner's tap rather than the model's own work.
+ *
+ * Today that is exactly one: `ask_user_input`, BGOS's blocking modal carousel.
+ * It holds for up to 600 s (`Interactions.ask` clamps `timeout_seconds` to
+ * that, see interactions.ts), and it is the highest traffic owner facing wait
+ * this daemon has, so leaving it off the park list below is the difference
+ * between the turn waiting with the owner and the turn expiring with the modal
+ * still open in front of them.
+ *
+ * It is a NAME list because the runtime hands the park gate a tool name and
+ * nothing else. The list is enforced rather than trusted: a case in
+ * test/codex-host.spec.ts reads hoai-tools.ts and fails if a tool there
+ * delegates to `this.interactions` without appearing here.
+ */
+export const OWNER_BLOCKING_TOOLS = new Set(["ask_user_input"]);
+
+/**
+ * Does this app server request put a question in front of a PERSON?
+ *
+ * Four shapes do: an approval card (any method ending `/requestApproval`), the
+ * runtime's native ask carousel (`item/tool/requestUserInput`), an MCP
+ * elicitation, and a call to one of the OWNER_BLOCKING_TOOLS above. In all
+ * four the app server child is blocked on the RPC for as long as the answer
+ * takes, so the turn is not stalled, it is waiting on its owner, and that time
+ * is not the watchdog's to spend (see execute).
+ *
+ * Every OTHER tool call is the model talking to itself, and a call that never
+ * comes back is exactly the silence the watchdog exists to end.
+ */
+export function waitsForOwner(method: string, params: RpcObject): boolean {
+  if (
+    method.endsWith("/requestApproval") ||
+    method === "item/tool/requestUserInput" ||
+    method === "mcpServer/elicitation/request"
+  )
+    return true;
+  return (
+    method === "item/tool/call" &&
+    typeof params.tool === "string" &&
+    OWNER_BLOCKING_TOOLS.has(params.tool)
+  );
+}
+
+/**
+ * Item ids whose change list one turn keeps in hand at a time. Sixteen is far
+ * past any real patch burst and small enough that a forgotten delete cannot
+ * turn into a leak: each entry holds a full patch body.
+ */
+export const ROW_CHANGES_MAX = 16;
+
+/**
+ * Remember what a `fileChange` item said it would change, so the approval
+ * request that follows it by about ten milliseconds can name the files.
+ *
+ * Nothing here reads the diff. The body is held exactly as the runtime sent
+ * it and is masked and cut in `file-change-wire.ts`, at the one gate, on the
+ * way to the card.
+ */
+export function rememberChanges(
+  turn: { rowChanges: Map<string, unknown[]> },
+  itemId: string,
+  changes: unknown,
+): void {
+  if (!itemId || !Array.isArray(changes) || changes.length === 0) return;
+  turn.rowChanges.set(itemId, changes);
+  while (turn.rowChanges.size > ROW_CHANGES_MAX) {
+    const oldest = turn.rowChanges.keys().next();
+    if (oldest.done) break;
+    turn.rowChanges.delete(oldest.value);
+  }
 }
 
 /**
@@ -264,6 +530,67 @@ function workerStatesOf(
  * end), and a slow one must never hold up the owner's answer.
  */
 const CHILD_READ_TIMEOUT_MS = 5_000;
+
+/**
+ * PAST_TURNS_NOTE: no request this host sends brings a thread's past turns
+ * back in its reply (stage 4, C-21, review finding 4).
+ *
+ * The runtime keeps every generated picture's full base64 `result` in the
+ * rollout, and `thread/resume`, `thread/fork` and `thread/read
+ * {includeTurns:true}` all hydrate `thread.turns` unless told not to. A chat
+ * with about six pictures then answers ONE resume with a single line over the
+ * 16 MiB cap in src/app-server.ts. That used to close the connection and fail
+ * every live turn on this daemon, for every chat; since Round 7 the reader
+ * drops only that line and fails only that resume, which is still the chat's
+ * turn, again on every later resume of that chat. Measured on the vendored
+ * 0.154.0 binary: 14.23 MiB for five pictures without the flag, 3.9 KB with
+ * it.
+ *
+ * The 0.154.0 schema (`codex app-server generate-ts --experimental`) offers
+ * the cure in so many words. ThreadResumeParams.excludeTurns and
+ * ThreadForkParams.excludeTurns: "When true, return only thread metadata ...
+ * without populating `thread.turns` ... Full-history hydration is deprecated
+ * for paginated threads; use this with `thread/turns/list` and
+ * `thread/items/list` instead." ThreadReadParams.includeTurns: "prefer a
+ * metadata-only read and page with `thread/turns/list`". So both resumes and
+ * the fork pass `excludeTurns: true` (none of them reads a turn), every
+ * metadata read passes `includeTurns: false`, and the one reader that needs
+ * old text, the legacy tool upgrade below, pages `thread/turns/list` a few
+ * turns at a time instead: cold first, and only a thread the runtime's history
+ * index has not seen is resumed (metadata only) to be paged, then let go
+ * (Round 7, recentThreadMessages).
+ */
+/** How much recent conversation a legacy tool upgrade carries over. */
+const LEGACY_CONTEXT_CHARS = 60_000;
+/**
+ * Turns per `thread/turns/list` page for that upgrade, newest first. Small, so
+ * that even a page whose summary view did carry pictures (not seen on the
+ * 0.154.0 probe, where a summary turn holds its userMessage and agentMessage)
+ * stays far below the line cap.
+ */
+const LEGACY_HISTORY_PAGE_TURNS = 4;
+/** The most pages one upgrade reads (100 turns): the budget ends it sooner. */
+const LEGACY_HISTORY_MAX_PAGES = 25;
+
+/** The user and agent text of one turn, in the turn's own order. */
+function turnMessages(turn: RpcObject): Array<{ role: string; text: string }> {
+  const items: RpcObject[] = Array.isArray(turn?.items) ? turn.items : [];
+  return items.flatMap((item) =>
+    item.type === "agentMessage"
+      ? [{ role: "assistant", text: String(item.text ?? "") }]
+      : item.type === "userMessage"
+        ? [
+            {
+              role: "user",
+              text: (Array.isArray(item.content) ? item.content : [])
+                .filter((c: RpcObject) => c.type === "text")
+                .map((c: RpcObject) => c.text)
+                .join("\n"),
+            },
+          ]
+        : [],
+  );
+}
 
 /**
  * The child's readable name off its own thread: its nickname, else its role.
@@ -323,14 +650,25 @@ export function friendlyCodexError(error: unknown): string {
   return raw.slice(0, 1200);
 }
 
+/**
+ * What an owner message looks like once the routing envelope is off. The
+ * envelope carries internal ids (the sender's user id among them), so it
+ * never reaches a title, a preview or a search.
+ */
+function withoutEnvelope(text: string): string {
+  if (!/^HOAI event:/i.test(text)) return text;
+  const marker = /\nMessage:\s*\n/.exec(text);
+  return marker ? text.slice(marker.index + marker[0].length) : "";
+}
+
 /** Native previews can start with our routing envelope, which is not a title. */
 export function conversationLabel(thread: RpcObject): string {
-  let label = String(thread.name || thread.preview || "").trim();
-  if (/^HOAI event:/i.test(label)) {
-    const marker = /\nMessage:\s*\n/.exec(label);
-    label = marker ? label.slice(marker.index + marker[0].length) : "";
-  }
-  if (label) return label.replace(/\s+/g, " ").slice(0, 120);
+  const label = withoutEnvelope(
+    String(thread.name || thread.preview || "").trim(),
+  );
+  // In characters, as the backend reads a row: a name the rename accepted
+  // (80 characters, any of them an emoji) comes back whole.
+  if (label) return clipCharacters(label.replace(/\s+/g, " "), SESSION_TITLE_MAX);
   const timestamp = Number(thread.createdAt);
   const date = new Date(timestamp * 1000);
   return Number.isFinite(timestamp) &&
@@ -338,6 +676,87 @@ export function conversationLabel(thread: RpcObject): string {
     !Number.isNaN(date.getTime())
     ? `Conversation · ${date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`
     : "Saved conversation";
+}
+
+/**
+ * The one line under a saved thread's title in the Sessions sheet: the
+ * thread's first message, envelope stripped. Only for a thread with its own
+ * name: an unnamed thread's title IS that message (conversationLabel), and
+ * the same words twice on one row say nothing.
+ */
+export function conversationPreview(thread: RpcObject): string | null {
+  if (!thread.name) return null;
+  const text = withoutEnvelope(String(thread.preview ?? "").trim())
+    .replace(/\s+/g, " ")
+    .trim();
+  return text ? clipCharacters(text, SESSION_PREVIEW_MAX) : null;
+}
+
+/** Unix seconds as the runtime records them, as ISO 8601, or null. */
+function isoFromSeconds(value: unknown): string | null {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  const date = new Date(seconds * 1000);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+/** Case and accent insensitive, so "cafe" finds "Café". */
+function foldForSearch(text: string): string {
+  return text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
+}
+
+/** The most saved threads one list shows: the set /resume has always offered. */
+export const SAVED_THREADS_MAX = 30;
+
+/**
+ * A search reads at most this many of the chat's newest threads, one
+ * thread/read each, so a chat that has used /new for months still answers
+ * inside the backend's list timeout. Past it the answer says truncated.
+ */
+export const SAVED_THREADS_SEARCH_MAX = 200;
+
+/** One thread this HOAI chat has used, as the Sessions sheet and /resume read it. */
+export interface SavedThread {
+  id: string;
+  /** conversationLabel: its own name, else its first message, else a dated fallback. */
+  name: string;
+  /** conversationPreview: the first message, only under a thread's own name. */
+  preview: string | null;
+  /** ISO 8601 from the runtime's updatedAt, else createdAt, else null. */
+  lastActivityAt: string | null;
+  /** The git branch the runtime recorded for the thread, when it recorded one. */
+  branch: string | null;
+  /** The thread this chat is bound to right now. */
+  current: boolean;
+}
+
+/**
+ * A control the host refused, with the contract's refusal code (P6 stage 3).
+ * The message is the sentence the owner has always read for it, so the
+ * native commands that show it are unchanged; the Sessions ops read the code.
+ */
+export class ControlRefusal extends Error {
+  constructor(
+    readonly code: SessionErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ControlRefusal";
+  }
+}
+
+/**
+ * Did the runtime answer that it does not know this method? The app-server
+ * keeps only the error's message. Codex 0.154.0 says "Invalid request:
+ * unknown variant `<method>`, expected one of ..." (probe recorded in the
+ * stage 3 evidence); "method not found" is the plain JSON-RPC wording.
+ */
+function isUnknownMethod(error: unknown, method: string): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return (
+    message.includes(`unknown variant \`${method}\``) ||
+    /method not found/i.test(message)
+  );
 }
 
 export class CodexHost {
@@ -349,6 +768,13 @@ export class CodexHost {
   private readonly toolVersions: ThreadMap;
   private readonly toolVersionsFile: string;
   private readonly loaded = new Set<string>();
+  /**
+   * Legacy threads resumed ONLY to read their history (Round 7, see
+   * recentThreadMessages). Nothing such a thread says reaches a chat: the chat
+   * still maps to it while the read runs, so a goal notification or a turn
+   * would otherwise be routed to the chat that is leaving it.
+   */
+  private readonly historyReads = new Set<string>();
   private readonly active = new Map<string, ActiveTurn>();
   private readonly queues = new Map<number, Promise<unknown>>();
   private hints = BGOS_AGENT_HINTS;
@@ -380,6 +806,48 @@ export class CodexHost {
    * the state arrived, never after a network read.
    */
   private readonly childNameKnown = new Map<string, string>();
+  /**
+   * thread/name/set works on this runtime, until it answers that it does not
+   * know the method. Then false for the life of the process (D19): the app
+   * hides Rename rather than offer a control that always fails.
+   */
+  private renameAvailable = true;
+  /**
+   * The last report fired per chat, so a reroute (which names only the
+   * model) can carry the effort the chat was on. Bounded, like every per
+   * chat cache here: the chats this process has actually served.
+   */
+  private readonly lastSessionReport = new Map<number, SessionReport>();
+  /**
+   * The last value the RUNTIME gave for a chat with nothing stored, so the
+   * turn after a reroute can report it again, unflagged (S14).
+   */
+  private readonly lastRuntimeReport = new Map<number, SessionReport>();
+  /**
+   * Chats whose last report was a reroute, cleared only when a turn
+   * COMPLETES with no reroute of its own (Phase B, decision 2).
+   */
+  private readonly reroutedChats = new Set<number>();
+  /**
+   * Chats with a settings change in flight, and whether the runtime said
+   * `thread/settings/updated` for the chat while it was (P5 stage 7, round
+   * C, decision 6). Only a change the runtime reported moving is rolled
+   * back with a report; one it refused outright changed nothing anyone was
+   * told. One entry per chat at most: withIdleControl runs one change per
+   * chat at a time, and the entry goes when the request settles.
+   *
+   * An entry is also the mark of a change IN FLIGHT, and the connect sweep's
+   * source reads it (round D): storedSessionReport answers nothing for the
+   * chat while the entry is there.
+   */
+  private readonly runtimeMovedDuringChange = new Map<number, boolean>();
+  /**
+   * Threads that said `model/rerouted` since their last `turn/completed`.
+   * Turns on one thread run one after another, so "since the last
+   * completion" is "in the turn now ending", whichever of `turn/started` and
+   * `model/rerouted` the runtime sends first.
+   */
+  private readonly reroutedSinceCompletion = new Set<string>();
   constructor(private opts: CodexHostOptions) {
     this.authMode = opts.auth.mode;
     this.workdir = resolve(
@@ -426,8 +894,24 @@ export class CodexHost {
       if (method === "currentTime/read")
         return { currentTimeAt: Math.floor(Date.now() / 1000) };
       const turn = this.active.get(params.threadId);
-      if (turn?.callbacks.onRequest)
-        return turn.callbacks.onRequest(method, params);
+      if (turn?.callbacks.onRequest) {
+        // Only the requests that put a question in front of a PERSON park the
+        // turn's watchdog: an approval card, an ask carousel (the runtime's
+        // native one AND the `ask_user_input` HOAI tool, which arrives as an
+        // ordinary `item/tool/call`), an MCP elicitation. See waitsForOwner.
+        // An ordinary tool call is deliberately NOT parked. Nobody is holding
+        // it, so a call that never comes back is exactly the silence the
+        // watchdog exists to end.
+        const forwarded = this.withFileChanges(turn, method, params);
+        if (!waitsForOwner(method, params))
+          return turn.callbacks.onRequest(method, forwarded);
+        turn.parkWatchdog?.();
+        try {
+          return await turn.callbacks.onRequest(method, forwarded);
+        } finally {
+          turn.resumeWatchdog?.();
+        }
+      }
       // Missing handlers never authorize a request by default.
       if (method.endsWith("/requestApproval"))
         return method.includes("permissions")
@@ -460,6 +944,31 @@ export class CodexHost {
     const threadId = this.map[String(chatId)];
     if (threadId) this.rememberThread(chatId, threadId);
     resetChat(this.threadsFile, this.map, chatId);
+    // The old thread's runtime value and its reroute are not this chat's any
+    // more (P5 stage 7, Phase B, decision 4). With a stored pair nothing
+    // changes (the store survives /new and runs on the next thread); with
+    // nothing stored this host now holds nothing, so it RETRACTS the value:
+    // the next thread's own is reported when that thread starts.
+    this.lastRuntimeReport.delete(chatId);
+    this.reroutedChats.delete(chatId);
+    if (threadId) this.reroutedSinceCompletion.delete(threadId);
+    if (!reportFromStored(this.settings.get(chatId)))
+      this.fireSessionReport(chatId, reportRetraction());
+  }
+  /**
+   * The adapter bound this chat to its agent for the first time in this
+   * process (P5 stage 7, Phase B, decision 4). A chat this host holds
+   * NOTHING for (no stored pair, no thread, nothing reported here yet) may
+   * still carry a value another host reported (a re-pair to a new machine, a
+   * reset CODEX_BGOS_HOME), so it is retracted. The backend's no op makes a
+   * retraction free for a chat that never had one.
+   */
+  noteChatBound(chatId: number): void {
+    if (!Number.isSafeInteger(chatId) || chatId <= 0) return;
+    if (reportFromStored(this.settings.get(chatId))) return;
+    if (this.map[String(chatId)]) return;
+    if (this.lastSessionReport.has(chatId)) return;
+    this.fireSessionReport(chatId, reportRetraction());
   }
   isBusy(chatId: number): boolean {
     return this.queues.has(chatId) || this.active.has(this.map[String(chatId)]);
@@ -541,6 +1050,74 @@ export class CodexHost {
     }
     throw new Error("Codex model catalog exceeded its page limit.");
   }
+  /**
+   * Every chat this daemon has stored in plan mode.
+   *
+   * Read at connect so BGOS can draw the chip for a chat the owner left in
+   * plan mode before the daemon last stopped. The STORE is the truth, not the
+   * running threads: a chat with no thread yet still has a mode.
+   */
+  planModeChats(): number[] {
+    return this.settings
+      .entries()
+      .filter(([, value]) => value.mode === "plan")
+      .map(([chatId]) => chatId)
+      .filter((chatId) => Number.isSafeInteger(chatId) && chatId > 0);
+  }
+  /**
+   * Is this chat's plan wait actually ENFORCED right now?
+   *
+   * Read straight off the store, synchronously, because every caller needs the
+   * answer at the moment it posts a card or reports a mode and none of them
+   * can afford `sessionSettings()`, which awaits the model catalog. The store
+   * is also the honest source: `ensureThread` builds the sandbox from it and
+   * `run()` spreads `nativeSettings()` of it onto every `turn/start`, so what
+   * is stored is what the NEXT turn will run under.
+   */
+  planWaitEnforcedIn(chatId: number): boolean {
+    return planWaitEnforced(this.settings.get(chatId));
+  }
+  /**
+   * Turn plan mode on or off for one chat, with the sandbox that makes it mean
+   * something, and say whether the lock actually took.
+   *
+   * ONE SEAM ON PURPOSE. `/plan`, `/code` and the owner answering a plan card
+   * all move the same pair of settings, and a second place to compute the pair
+   * is a second place to restore the wrong permission. It returns what the
+   * daemon may honestly report as `enforced`, which is never an assumption:
+   * `planWaitEnforced` reads the settings that were actually SAVED, after the
+   * runtime accepted them.
+   *
+   * A REFUSED SANDBOX STILL LEAVES THE MODE ON. `updateSettings` rolls the
+   * whole patch back and throws if the runtime rejects it, and losing plan
+   * mode because a sandbox could not be applied would be worse than a plan
+   * mode with no lock, which is exactly what this channel had until today. So
+   * the pair is retried as the mode alone, and the honest `enforced: false`
+   * that comes back is the same one the app already knows how to word.
+   *
+   * THE SAME RETRY ON THE WAY OFF leaves the chat read only with the mode
+   * already default, which is the one state where the app shows no chip over a
+   * chat that still refuses writes. It is deliberately not worse than that: the
+   * retry does not carry `permissionBeforePlan`, so the memory survives and the
+   * next `/code` or Go ahead restores the access, and `/permissions workspace`
+   * gets there in one step. Reporting is still truthful throughout, because
+   * `planWaitEnforced` needs the mode too and answers false.
+   */
+  async setPlanMode(
+    chatId: number,
+    on: boolean,
+  ): Promise<{ enforced: boolean }> {
+    const stored = this.settings.get(chatId);
+    const both = on ? planModeOn(stored) : planModeOff(stored);
+    try {
+      return { enforced: planWaitEnforced(await this.updateSettings(chatId, both)) };
+    } catch {
+      const modeOnly = await this.updateSettings(chatId, {
+        mode: on ? "plan" : "default",
+      });
+      return { enforced: planWaitEnforced(modeOnly) };
+    }
+  }
   async sessionSettings(chatId: number): Promise<SessionSettings> {
     const settings = { model: this.opts.model, ...this.settings.get(chatId) };
     const models = await this.listModels();
@@ -578,6 +1155,7 @@ export class CodexHost {
       // Persist before acknowledgement. Roll back if the runtime rejects the policy/model.
       const saved = this.settings.get(chatId);
       this.settings.set(chatId, next);
+      this.runtimeMovedDuringChange.set(chatId, false);
       try {
         if (threadId)
           await this.server.request("thread/settings/update", {
@@ -586,10 +1164,84 @@ export class CodexHost {
           });
       } catch (error) {
         this.settings.set(chatId, saved);
+        // THE ROLLBACK IS REPORTED (P5 stage 7, Phase B, decision 5). The
+        // runtime may have APPLIED the change before the request failed (a
+        // timeout), and said so with thread/settings/updated, which was
+        // reported store first while the store held `next`. So the value
+        // restored is reported too: the stored pair when there is one (it is
+        // re-asserted on the next turn), else what the runtime last said it
+        // runs.
+        //
+        // ONLY WHEN THE RUNTIME MOVED (round C, decision 6). A change it
+        // refused outright was never reported, so there is nothing to roll
+        // back, and a report here is not free: in a REROUTED chat the
+        // restored value is unflagged, which cleared the reroute and drew a
+        // model no turn had run until the next turn rerouted again.
+        if (this.runtimeMovedDuringChange.get(chatId))
+          this.fireSessionReport(
+            chatId,
+            reportFromStored(saved) ??
+              this.lastRuntimeReport.get(chatId) ??
+              null,
+          );
         throw error;
+      } finally {
+        this.runtimeMovedDuringChange.delete(chatId);
       }
+      // (a) Only once it LANDED: stored and, when the chat has a thread,
+      // taken by the runtime.
+      this.fireSessionReport(chatId, reportFromStored(next));
       return next;
     });
+  }
+  /**
+   * Every chat whose store holds a model: the chats the adapter reports at
+   * connect (S15). A chat with nothing stored has a value only the runtime
+   * knows, learned the next time its thread is started or resumed (S16).
+   */
+  storedSessionChats(): number[] {
+    const out: number[] = [];
+    for (const [chatId, value] of this.settings.entries()) {
+      if (!Number.isSafeInteger(chatId) || chatId <= 0) continue;
+      if (reportFromStored(value)) out.push(chatId);
+    }
+    return out;
+  }
+  /**
+   * One chat's stored pair as a report, built from the store as it is NOW
+   * (P5 stage 7, Phase B, decision 1): the connect sweep asks for it when
+   * the chat's turn comes, never from a snapshot taken at boot, so a /model
+   * that landed mid sweep is what the sweep sends. Null when nothing is
+   * stored.
+   *
+   * AND NULL WHILE A SETTINGS CHANGE FOR THE CHAT IS IN FLIGHT (P5 stage 7,
+   * round D). updateSettings stores the change's value BEFORE the runtime
+   * takes it, so a sweep that read the store then (an in process re pair's,
+   * say) sent a value no turn had run yet, forced; when the runtime then
+   * refused the change outright, the store went back and nothing corrected
+   * the row, because a refusal reports a rollback only when the runtime moved
+   * (round C, decision 6). The change's own landing report, or no report at
+   * all, decides instead. The chat stays in storedSessionChats: the sweep asks
+   * again only on its next run.
+   */
+  storedSessionReport(chatId: number): SessionReport | null {
+    if (this.runtimeMovedDuringChange.has(chatId)) return null;
+    return reportFromStored(this.settings.get(chatId));
+  }
+  /**
+   * What this chat runs, as far as this host knows it, from the SAME source
+   * the report uses (P5 stage 7, Phase B, decision 10): the stored pair
+   * first, then the runtime's own last value, and never
+   * `sessionSettings()`'s catalog guess. The /model question's "current"
+   * reads this, so the row under the message box and the card its tap opens
+   * never name two different models. Null when nothing is known yet.
+   */
+  currentSessionReport(chatId: number): SessionReport | null {
+    return (
+      reportFromStored(this.settings.get(chatId)) ??
+      this.lastRuntimeReport.get(chatId) ??
+      null
+    );
   }
   private withIdleControl<T>(
     chatId: number,
@@ -597,7 +1249,8 @@ export class CodexHost {
   ): Promise<T> {
     if (this.isBusy(chatId))
       return Promise.reject(
-        new Error(
+        new ControlRefusal(
+          "busy",
           "Stop the current response before changing this conversation.",
         ),
       );
@@ -652,44 +1305,133 @@ export class CodexHost {
     const previous = loadThreadMap(file);
     setThreadId(file, previous, `${chatId}:${threadId}`, threadId);
   }
-  async savedThreads(
-    chatId: number,
-  ): Promise<Array<{ id: string; name: string }>> {
-    await this.server.start();
+  /**
+   * Every thread this HOAI chat has used, newest first: the live one, then
+   * the saved ones (previous-threads.json, keyed `${chatId}:`) from the last
+   * left. Never another chat's (D16): two chats on one native thread would
+   * interleave their turns on it. No thread is read here.
+   */
+  private chatThreadIds(chatId: number): string[] {
     const previous = loadThreadMap(
       join(dirnameOf(this.threadsFile), "previous-threads.json"),
     );
-    const ids = new Set(
-      Object.entries(previous)
-        .filter(([key]) => key.startsWith(`${chatId}:`))
-        .map(([, id]) => id),
-    );
-    if (this.map[String(chatId)]) ids.add(this.map[String(chatId)]);
-    const rows: Array<{ id: string; name: string }> = [];
-    for (const id of [...ids].slice(-30).reverse()) {
-      try {
-        const { thread } = await this.server.request("thread/read", {
-          threadId: id,
-          includeTurns: false,
-        });
-        rows.push({
-          id,
-          name: conversationLabel(thread),
-        });
-      } catch {
-        /* A deleted native session is no longer resumable. */
-      }
-    }
-    return rows;
+    const ids = new Set<string>();
+    const live = this.map[String(chatId)];
+    if (live) ids.add(live);
+    for (const id of Object.entries(previous)
+      .filter(([key]) => key.startsWith(`${chatId}:`))
+      .map(([, id]) => id)
+      .reverse())
+      ids.add(id);
+    return [...ids];
   }
-  async resumeSavedThread(chatId: number, threadId: string): Promise<void> {
+  /** The thread's metadata, or null when it is gone from disk. */
+  private async readThread(threadId: string): Promise<RpcObject | null> {
+    try {
+      const { thread } = await this.server.request("thread/read", {
+        threadId,
+        includeTurns: false,
+      });
+      return thread && typeof thread === "object" ? thread : null;
+    } catch {
+      /* A deleted native session is no longer resumable. */
+      return null;
+    }
+  }
+  private savedThreadRow(
+    chatId: number,
+    id: string,
+    thread: RpcObject,
+  ): SavedThread {
+    const branch =
+      typeof thread.gitInfo?.branch === "string"
+        ? clipCharacters(thread.gitInfo.branch.trim(), SESSION_BRANCH_MAX)
+        : "";
+    return {
+      id,
+      name: conversationLabel(thread),
+      preview: conversationPreview(thread),
+      lastActivityAt:
+        isoFromSeconds(thread.updatedAt) ?? isoFromSeconds(thread.createdAt),
+      branch: branch || null,
+      current: this.map[String(chatId)] === id,
+    };
+  }
+  /**
+   * The chat's threads as the Sessions sheet lists them (spec 5.6): the
+   * latest SAVED_THREADS_MAX, or with a query the first SAVED_THREADS_MAX
+   * that match it on title or first message, searched BEFORE the cap so an
+   * older thread can still be found. `truncated` says the chat has more than
+   * the answer holds.
+   */
+  async listSavedThreads(
+    chatId: number,
+    query?: string,
+  ): Promise<{ threads: SavedThread[]; truncated: boolean }> {
+    await this.server.start();
+    const ids = this.chatThreadIds(chatId);
+    const needle = foldForSearch((query ?? "").trim());
+    const threads: SavedThread[] = [];
+    if (!needle) {
+      for (const id of ids.slice(0, SAVED_THREADS_MAX)) {
+        const thread = await this.readThread(id);
+        if (thread) threads.push(this.savedThreadRow(chatId, id, thread));
+      }
+      return { threads, truncated: ids.length > SAVED_THREADS_MAX };
+    }
+    for (const id of ids.slice(0, SAVED_THREADS_SEARCH_MAX)) {
+      const thread = await this.readThread(id);
+      if (!thread) continue;
+      const row = this.savedThreadRow(chatId, id, thread);
+      const text = `${row.name}\n${withoutEnvelope(String(thread.preview ?? "").trim())}`;
+      if (!foldForSearch(text).includes(needle)) continue;
+      // One match past the cap is enough to know the answer is cut.
+      if (threads.length === SAVED_THREADS_MAX)
+        return { threads, truncated: true };
+      threads.push(row);
+    }
+    return { threads, truncated: ids.length > SAVED_THREADS_SEARCH_MAX };
+  }
+  async savedThreads(chatId: number, query?: string): Promise<SavedThread[]> {
+    return (await this.listSavedThreads(chatId, query)).threads;
+  }
+  /**
+   * One thread, only when it is this chat's and still on disk. Any of the
+   * chat's threads, not only the latest 30: a search can list an older one,
+   * and "does not belong" would be untrue of it.
+   */
+  private async ownSavedThread(
+    chatId: number,
+    threadId: string,
+  ): Promise<{ row: SavedThread; thread: RpcObject } | null> {
+    await this.server.start();
+    if (!this.chatThreadIds(chatId).includes(threadId)) return null;
+    const thread = await this.readThread(threadId);
+    return thread
+      ? { row: this.savedThreadRow(chatId, threadId, thread), thread }
+      : null;
+  }
+  /** What the Sessions sheet may offer on this runtime (D19). */
+  sessionAbilities(): SessionAbilities {
+    return { resume: true, rename: this.renameAvailable };
+  }
+  async resumeSavedThread(
+    chatId: number,
+    threadId: string,
+  ): Promise<SavedThread> {
     return this.withIdleControl(chatId, async () => {
-      if (!(await this.savedThreads(chatId)).some((t) => t.id === threadId))
-        throw new Error("That conversation does not belong to this HOAI chat.");
+      const saved = await this.ownSavedThread(chatId, threadId);
+      if (!saved)
+        throw new ControlRefusal(
+          "not_found",
+          "That conversation does not belong to this HOAI chat.",
+        );
       const result = await this.server.request("thread/resume", {
         threadId,
         cwd: this.workdir,
         developerInstructions: this.hints,
+        // Only the identity is read below. See PAST_TURNS_NOTE.
+        excludeTurns: true,
       });
       if (result.thread?.id !== threadId)
         throw new Error("Codex returned a different conversation.");
@@ -697,7 +1439,44 @@ export class CodexHost {
       setThreadId(this.threadsFile, this.map, chatId, threadId);
       // ensureThread still applies the existing tool-version migration check.
       this.loaded.delete(threadId);
+      return { ...saved.row, current: true };
     });
+  }
+  /**
+   * Give one of this chat's threads a new name, through the runtime's own
+   * `thread/name/set` ({threadId, name}, confirmed on Codex 0.154.0), so the
+   * Codex CLI's own list shows it too. A name is metadata, not the
+   * conversation, so this does not wait for the chat to be idle.
+   */
+  async renameThread(
+    chatId: number,
+    threadId: string,
+    name: string,
+  ): Promise<SavedThread> {
+    if (!this.renameAvailable)
+      throw new ControlRefusal(
+        "unsupported",
+        "Renaming is not available on this Codex runtime.",
+      );
+    const saved = await this.ownSavedThread(chatId, threadId);
+    if (!saved)
+      throw new ControlRefusal(
+        "not_found",
+        "That conversation does not belong to this HOAI chat.",
+      );
+    try {
+      await this.server.request("thread/name/set", { threadId, name });
+    } catch (error) {
+      if (isUnknownMethod(error, "thread/name/set")) {
+        this.renameAvailable = false;
+        throw new ControlRefusal(
+          "unsupported",
+          "Renaming is not available on this Codex runtime.",
+        );
+      }
+      throw new Error(friendlyCodexError(error));
+    }
+    return this.savedThreadRow(chatId, threadId, { ...saved.thread, name });
   }
   async forkThread(chatId: number): Promise<string> {
     return this.withIdleControl(chatId, async () => {
@@ -705,6 +1484,9 @@ export class CodexHost {
       const result = await this.server.request("thread/fork", {
         threadId: parent,
         cwd: this.workdir,
+        // The fork still copies every turn; only its REPLY leaves them out,
+        // and only the new id is read below. See PAST_TURNS_NOTE.
+        excludeTurns: true,
       });
       const id = result.thread?.id;
       if (typeof id !== "string" || !id || id === parent)
@@ -730,6 +1512,13 @@ export class CodexHost {
         turnId: turn.id,
       });
   }
+  /**
+   * Add `text` to the chat's running turn. Throws when there is no turn to
+   * steer or the runtime refuses, and callers decide what that means: the
+   * `/steer` router runs the text as a normal message instead
+   * (native-commands.ts, `steerOrRun`), and MissionControlLane keeps its
+   * bulletin queued for the next turn.
+   */
   async steer(chatId: number, text: string): Promise<void> {
     const threadId = this.map[String(chatId)];
     const turnId = this.active.get(threadId)?.id;
@@ -945,6 +1734,111 @@ export class CodexHost {
       relay,
     );
   }
+  /**
+   * A thread's recent user and agent text, oldest first, read a few summary
+   * turns at a time from the newest, until `budget` characters are in hand or
+   * the history ends. Best effort: a page that cannot be read ends the walk
+   * with what was read, and the upgrade goes ahead without it rather than
+   * failing the turn.
+   *
+   * COLD FIRST (Round 7; the probes are in the stage 4 red-proofs.md). The
+   * runtime pages a thread's turns out of its thread history index, and that
+   * index knows every thread the app server made, loaded or not: on the
+   * vendored 0.154.0 binary a second app server on the same home paged two
+   * such threads cold, with no resume and nothing loaded. A thread the index
+   * has never seen (a rollout older than the index, or one copied in) pages
+   * nothing until something loads it: `turns=0 nextCursor=null` cold, the turn
+   * once resumed. So only a first page that comes back empty with no cursor,
+   * or fails, resumes the thread, metadata only (see PAST_TURNS_NOTE), pages
+   * it again, and lets it go.
+   *
+   * NEVER A THREAD WHOSE GOAL IS ACTIVE. A cold resume of a stored thread with
+   * an active goal started the goal's continuation turn by itself within
+   * seconds, on the same binary. Here that would be model spend on a thread
+   * being retired, with its old tools, in a turn this host would adopt into
+   * the chat. So an active goal, or a goal read that fails, skips the resume,
+   * and the upgrade carries no old text, as it did before.
+   */
+  private async recentThreadMessages(
+    threadId: string,
+    budget: number,
+  ): Promise<Array<{ role: string; text: string }>> {
+    const cold = await this.pageThreadMessages(threadId, budget);
+    if (!cold.unread) return cold.messages;
+    try {
+      const { goal } = await this.server.request("thread/goal/get", {
+        threadId,
+      });
+      if (goal?.status === "active") return [];
+    } catch {
+      return [];
+    }
+    this.historyReads.add(threadId);
+    try {
+      try {
+        await this.server.request("thread/resume", {
+          threadId,
+          cwd: this.workdir,
+          excludeTurns: true,
+        });
+      } catch {
+        return [];
+      }
+      try {
+        return (await this.pageThreadMessages(threadId, budget)).messages;
+      } finally {
+        await this.server
+          .request("thread/unsubscribe", { threadId })
+          .catch(() => {});
+      }
+    } finally {
+      this.historyReads.delete(threadId);
+    }
+  }
+  /**
+   * The paging walk itself. `unread` is true when the FIRST page failed or
+   * came back with no turns and no cursor: the answer a thread the history
+   * index has not seen gives, and the one reason to resume it and look again.
+   */
+  private async pageThreadMessages(
+    threadId: string,
+    budget: number,
+  ): Promise<{
+    messages: Array<{ role: string; text: string }>;
+    unread: boolean;
+  }> {
+    const newestFirst: Array<{ role: string; text: string }> = [];
+    let collected = 0;
+    let cursor: string | null = null;
+    for (let page = 0; page < LEGACY_HISTORY_MAX_PAGES; page += 1) {
+      let result: RpcObject;
+      try {
+        result = await this.server.request("thread/turns/list", {
+          threadId,
+          itemsView: "summary",
+          sortDirection: "desc",
+          limit: LEGACY_HISTORY_PAGE_TURNS,
+          ...(cursor ? { cursor } : {}),
+        });
+      } catch {
+        return { messages: newestFirst.reverse(), unread: page === 0 };
+      }
+      const turns: RpcObject[] = Array.isArray(result?.data) ? result.data : [];
+      for (const turn of turns)
+        for (const message of turnMessages(turn).reverse()) {
+          newestFirst.push(message);
+          collected += message.text.length;
+        }
+      cursor =
+        typeof result?.nextCursor === "string" && result.nextCursor
+          ? result.nextCursor
+          : null;
+      if (page === 0 && turns.length === 0 && !cursor)
+        return { messages: [], unread: true };
+      if (!cursor || collected >= budget) break;
+    }
+    return { messages: newestFirst.reverse(), unread: false };
+  }
   private async ensureThread(chatId: number): Promise<string> {
     await this.server.start();
     let threadId: string | undefined = this.map[String(chatId)];
@@ -979,29 +1873,13 @@ export class CodexHost {
         // Dynamic tools are fixed at thread creation. Keep the old native
         // transcript intact and carry recent attributed text to a new thread.
         // Never silently resume a legacy thread that cannot call HOAI tools.
-        const previous = await this.server.request("thread/read", {
+        // Never `thread/read {includeTurns:true}`: that is the whole history
+        // in one line, pictures and all. See PAST_TURNS_NOTE.
+        const messages = await this.recentThreadMessages(
           threadId,
-          includeTurns: true,
-        });
-        const messages = (previous.thread.turns ?? []).flatMap(
-          (turn: RpcObject) =>
-            (turn.items ?? []).flatMap((item: RpcObject) =>
-              item.type === "agentMessage"
-                ? [{ role: "assistant", text: item.text }]
-                : item.type === "userMessage"
-                  ? [
-                      {
-                        role: "user",
-                        text: (item.content ?? [])
-                          .filter((c: RpcObject) => c.type === "text")
-                          .map((c: RpcObject) => c.text)
-                          .join("\n"),
-                      },
-                    ]
-                  : [],
-            ),
+          LEGACY_CONTEXT_CHARS,
         );
-        let budget = 60_000;
+        let budget = LEGACY_CONTEXT_CHARS;
         const recent: RpcObject[] = [];
         for (const message of messages.slice().reverse()) {
           if (budget <= 0) break;
@@ -1019,7 +1897,12 @@ export class CodexHost {
         threadId = undefined;
       }
       const result = threadId
-        ? await this.server.request("thread/resume", { ...params, threadId })
+        ? await this.server.request("thread/resume", {
+            ...params,
+            threadId,
+            // Only the identity is read below. See PAST_TURNS_NOTE.
+            excludeTurns: true,
+          })
         : await this.server.request("thread/start", {
             ...params,
             developerInstructions: this.hints + priorContext,
@@ -1036,6 +1919,9 @@ export class CodexHost {
       );
       setThreadId(this.threadsFile, this.map, chatId, threadId);
       this.loaded.add(threadId);
+      // (d) The runtime's own answer for the thread it just started or
+      // resumed. Once per load, not per turn.
+      this.reportRuntimeValue(chatId, reportFromThreadResponse(result));
     }
     return threadId!;
   }
@@ -1050,7 +1936,29 @@ export class CodexHost {
     return new Promise<RunTurnResult>((resolveTurn) => {
       let finished = false;
       const tick = setInterval(() => callbacks.onTick?.(), 4000);
-      const watchdog = setTimeout(() => {
+      /**
+       * THE WATCHDOG DOES NOT COUNT TIME THE OWNER IS HOLDING.
+       *
+       * This clock exists for a turn that has stopped making progress, and a
+       * request parked in front of a person is the opposite of that: the app
+       * server child is blocked on the RPC, waiting for an answer this daemon
+       * offers to hold for up to APPROVAL_HOLD_SECONDS (interactions.ts). Left
+       * running, this timer always won that race, so the longest wait the card
+       * advertises could never actually be served: the turn was interrupted,
+       * `approve()` took its aborted branch and the owner's yes arrived at a
+       * turn that had already declined on their behalf.
+       *
+       * So the budget is PAUSED while any request of this turn is open and
+       * re-armed with what is left when the last one ends. It is a budget for
+       * the model's own silence, and nothing else. A request that is never
+       * answered cannot wedge the turn forever either: the daemon's own
+       * backstop ends the wait at the stored number plus slack, the request
+       * returns decline, and the remaining budget starts running again.
+       */
+      let remainingMs = timeoutMs;
+      let armedAt = Date.now();
+      let parked = 0;
+      const expire = () => {
         if (turn.id)
           void this.server
             .request("turn/interrupt", { threadId: id, turnId: turn.id })
@@ -1058,16 +1966,35 @@ export class CodexHost {
         turn.finish(
           this.result(id, turn, false, "Codex timed out. Retry your message."),
         );
-      }, timeoutMs);
+      };
+      let watchdog = setTimeout(expire, remainingMs);
+      // Counted, not a flag: a turn can hold an approval and an ask carousel at
+      // the same time, and the first one to come back must not restart the
+      // clock while the other is still in front of the owner.
+      const parkWatchdog = () => {
+        if (finished || parked++ > 0) return;
+        clearTimeout(watchdog);
+        remainingMs = Math.max(0, remainingMs - (Date.now() - armedAt));
+      };
+      const resumeWatchdog = () => {
+        if (finished || parked === 0 || --parked > 0) return;
+        armedAt = Date.now();
+        watchdog = setTimeout(expire, remainingMs);
+      };
       const turn: ActiveTurn = {
         callbacks,
         messages: new Map(),
         pending: [],
         rowIdentity: new Map(),
         rowStartedAt: new Map(),
+        rowChanges: new Map(),
         childFirstSeen: new Map(),
         childState: new Map(),
         childBaseName: new Map(),
+        images: new Map(),
+        handedOff: new Set(),
+        parkWatchdog,
+        resumeWatchdog,
         finish: (result) => {
           if (finished) return;
           finished = true;
@@ -1093,7 +2020,18 @@ export class CodexHost {
       // A continuation turn this process adopted holds the same thread key.
       // Drop its bookkeeping before taking the thread, or its tick outlives
       // it and its result is delivered for work this turn now owns.
-      this.active.get(id)?.release?.();
+      //
+      // The pictures it already finished come across first. The release
+      // delivers nothing, and the app server steers the same runtime turn, so
+      // this turn's result is the only place those pictures can still reach
+      // the chat: they exist and the quota is spent. Not the ones its plan
+      // card was handed (re-review item 4): those were posted before the
+      // card, and this turn's fresh picture record would post them again.
+      const prior = this.active.get(id);
+      if (prior?.release)
+        for (const [itemId, image] of prior.images)
+          if (!prior.handedOff.has(itemId)) turn.images.set(itemId, image);
+      prior?.release?.();
       this.active.set(id, turn);
       void this.server
         .request(
@@ -1141,10 +2079,13 @@ export class CodexHost {
       finalAgentMessageText: finalText,
       turnCompleted: completed,
       error,
+      ...(turn.sawPlanProposal ? { sawPlanProposal: true } : {}),
+      ...(turn.images.size > 0 ? { images: [...turn.images.values()] } : {}),
       ...turnClock(reported),
     };
   }
   private notification(method: string, params: RpcObject): void {
+    if (this.historyReads.has(String(params.threadId ?? ""))) return;
     if (method === "thread/tokenUsage/updated")
       this.usage.set(params.threadId, params.tokenUsage);
     // Markers sit ABOVE the active-turn guard on purpose: the owner's own
@@ -1158,6 +2099,16 @@ export class CodexHost {
     // its own continuation turns.
     const goalSignal = goalFromNotification(method, params);
     if (goalSignal) this.routeGoal(goalSignal.threadId, goalSignal.goal);
+    // What the chat is really running: above the guard for the same reason.
+    // `thread/settings/updated` answers a change made between turns, and a
+    // reroute's clearing belongs to the END of a turn that ran clean
+    // (Phase B, decision 2), which may be a continuation turn nobody holds.
+    if (method === "thread/settings/updated")
+      this.routeThreadSettings(String(params.threadId ?? ""), params);
+    if (method === "model/rerouted")
+      this.routeReroute(String(params.threadId ?? ""), params);
+    if (method === "turn/completed")
+      this.settleReroute(String(params.threadId ?? ""), params.turn?.status);
     // And the continuation turn itself, which nobody here asked for.
     if (method === "turn/started")
       this.adoptTurn(String(params.threadId ?? ""));
@@ -1263,8 +2214,66 @@ export class CodexHost {
         this.cwdByThread.set(String(params.threadId ?? ""), item.cwd);
       const started = method === "item/started";
       const itemKey = typeof item.id === "string" ? item.id : "";
+      // THE PLAN THE MODEL PROPOSED, before entryFromItem drops it.
+      //
+      // A plan item is not an activity row and never was: `entryFromItem`
+      // returns null for it and it vanished with no log line, which is why a
+      // Codex owner in plan mode got the sentence before the plan and never the
+      // plan itself. Taken on `item/completed` only, because `item/started`
+      // carries an empty text and `item/plan/delta` carries a partial.
+      if (item.type === "plan") {
+        if (!started && typeof item.text === "string" && item.text.trim()) {
+          turn.sawPlanProposal = true;
+          // The pictures finished BEFORE this plan, taken now rather than a
+          // microtask later, and recorded as handed off when a card is there
+          // to take them (re-review item 4): the adapter posts them ahead of
+          // the card, so a turn that takes this thread over must not.
+          const images = [...turn.images.values()];
+          if (turn.callbacks.onPlanProposal)
+            for (const image of images) turn.handedOff.add(image.itemId);
+          turn.pending.push(
+            Promise.resolve()
+              .then(() =>
+                turn.callbacks.onPlanProposal?.({
+                  turnId: params.turnId ?? null,
+                  itemId: itemKey,
+                  text: String(item.text),
+                  ...(images.length > 0 ? { images } : {}),
+                }),
+              )
+              .catch(() => {}),
+          );
+        }
+        return;
+      }
+      // A PICTURE THE MODEL MADE, kept for the end of the turn (stage 4,
+      // C-21). On `item/completed` only: `item/started` opens the row and
+      // carries no finished picture. Decoded now and the base64 dropped, so
+      // the turn holds bytes and not a string a third bigger. Keyed on the
+      // item id, which is the dedupe.
+      //
+      // It FALLS THROUGH, unlike the plan branch above: this item is still a
+      // tool row, and the row below must be built on both phases. Never posted
+      // from here: a standard post mid turn marks a Codex agent done for the
+      // rest of the turn (gap 04), so the adapter posts it with the reply.
+      if (
+        !started &&
+        item.type === "imageGeneration" &&
+        itemKey &&
+        !turn.images.has(itemKey)
+      ) {
+        const image = collectGeneratedImage(item);
+        if (image) turn.images.set(itemKey, image);
+      }
       if (started && itemKey && typeof params.startedAtMs === "number")
         turn.rowStartedAt.set(itemKey, params.startedAtMs);
+      // The change list, for the approval that may be ten milliseconds behind
+      // this notification. Dropped the moment the item settles: by then the
+      // owner has answered or nobody ever asked them.
+      if (itemKey && item.type === "fileChange") {
+        if (started) rememberChanges(turn, itemKey, item.changes);
+        else turn.rowChanges.delete(itemKey);
+      }
       const phase: ItemPhase = started ? "started" : "completed";
       const ctx: ItemContext = {
         ...this.itemContext(String(params.threadId ?? "")),
@@ -1303,6 +2312,13 @@ export class CodexHost {
       method === "item/fileChange/patchUpdated" ||
       method === "item/mcpToolCall/progress"
     ) {
+      // Should `patchUpdated` ever fire, the newer change list replaces the
+      // one `item/started` left. It did not fire once across four live probe
+      // runs on app server 0.154.0 (the schema lists
+      // `apply_patch_streaming_events` as under development), so NOTHING here
+      // may depend on it: the join's only proven source is `item/started`.
+      if (method === "item/fileChange/patchUpdated")
+        rememberChanges(turn, String(params.itemId ?? ""), params.changes);
       const row = rowFromProgressNotification(
         method,
         params,
@@ -1311,6 +2327,19 @@ export class CodexHost {
       );
       if (row) this.deliverRow(turn, row);
     }
+    // TWO NOTIFICATIONS DELIBERATELY LEFT UNHANDLED, both seen on the live
+    // probe and both easy to mistake for this stage's business.
+    //
+    // `turn/diff/updated` carries a whole turn `diff --git` document with
+    // index hashes and absolute paths, and it fired three times in the probe
+    // AFTER the owner had already answered. It is a bigger leak surface than
+    // the per item diff and it arrives too late to help anyone decide, so it
+    // belongs to the "here is what this turn changed" card and not to a
+    // question. `thread/status/changed` carries the runtime's own
+    // `activeFlags: ["waitingOnApproval"]`, raised at the ask and cleared at
+    // the answer, which is a cheaper and more honest source for the status
+    // line than this daemon's own bookkeeping, and changing where that line
+    // comes from is its own decision and not a side effect of a diff panel.
   }
 
   /**
@@ -1544,6 +2573,41 @@ export class CodexHost {
     return { cwd: this.cwdByThread.get(threadId) ?? this.workdir };
   }
 
+  /**
+   * A file change approval, joined to the item that announced it.
+   *
+   * THE HOST enriches the params, rather than handing `interactions.approve` a
+   * lookup through its context, because that is ONE edit here against three at
+   * the `onRequest` call sites in adapter.ts, and three call sites that have
+   * to stay in step is the exact failure the comment beside them already
+   * warns about. It also covers the adopted goal turn for free.
+   *
+   * The join TOLERATES A MISS and never waits for one. `item/started` arrived
+   * about ten milliseconds ahead of the request in every live probe run, on
+   * the same pipe from the same process, but nothing in the protocol orders a
+   * notification in front of a request, so a missing entry simply leaves the
+   * params alone and the card posts exactly as it did before stage 4.
+   *
+   * Nothing the runtime itself sent is overwritten: if a later protocol
+   * version starts carrying `changes` or `cwd` on the request, its own values
+   * win.
+   */
+  private withFileChanges(
+    turn: ActiveTurn,
+    method: string,
+    params: RpcObject,
+  ): RpcObject {
+    if (method !== "item/fileChange/requestApproval") return params;
+    const itemId = typeof params.itemId === "string" ? params.itemId : "";
+    const changes = itemId ? turn.rowChanges.get(itemId) : undefined;
+    if (!changes) return params;
+    const enriched: RpcObject = { ...params };
+    if (!Array.isArray(enriched.changes)) enriched.changes = changes;
+    if (typeof enriched.cwd !== "string" || enriched.cwd.length === 0)
+      enriched.cwd = this.itemContext(String(params.threadId ?? "")).cwd;
+    return enriched;
+  }
+
   /** True when the marker reached a sink. False means nobody took it. */
   private deliverMarker(turn: ActiveTurn, marker: ActivityMarker): boolean {
     const handler = turn.callbacks.onActivityMarker;
@@ -1599,6 +2663,93 @@ export class CodexHost {
   }
 
   /**
+   * Tell the listener, straight away and never inside a turn's drain: a slow
+   * or failing listener must never hold a turn open. Remembers the value for
+   * a later reroute, and whether the chat is now flagged.
+   */
+  private fireSessionReport(chatId: number, report: SessionReport | null): void {
+    if (!report) return;
+    remember(this.lastSessionReport, chatId, report);
+    if (report.rerouted) this.reroutedChats.add(chatId);
+    else this.reroutedChats.delete(chatId);
+    if (!this.opts.onSessionSettings) return;
+    void Promise.resolve()
+      .then(() => this.opts.onSessionSettings?.(chatId, report))
+      .catch(() => {});
+  }
+
+  /**
+   * A value the RUNTIME gave, reported under S12: the store wins for a chat
+   * with a stored model; otherwise the runtime's value is the truth, and is
+   * kept for the turn after a reroute.
+   */
+  private reportRuntimeValue(chatId: number, runtime: SessionReport | null): void {
+    if (runtime) remember(this.lastRuntimeReport, chatId, runtime);
+    this.fireSessionReport(
+      chatId,
+      reportFromStored(this.settings.get(chatId)) ?? runtime,
+    );
+  }
+
+  /** (b) `thread/settings/updated {threadId, threadSettings}`. */
+  private routeThreadSettings(threadId: string, params: RpcObject): void {
+    const chatId = this.chatForThread(threadId);
+    if (chatId === null) return;
+    // A change in flight for this chat now has something to roll back
+    // (round C, decision 6).
+    if (this.runtimeMovedDuringChange.has(chatId))
+      this.runtimeMovedDuringChange.set(chatId, true);
+    this.reportRuntimeValue(chatId, reportFromThreadSettings(params.threadSettings));
+  }
+
+  /**
+   * (c) `model/rerouted {threadId, turnId, fromModel, toModel, reason}`: the
+   * model that RAN, flagged (S14). Reported whatever is stored, because the
+   * store is what was ASKED for and this is what the runtime did instead.
+   * The thread is marked, so the end of this turn does not clear the flag.
+   */
+  private routeReroute(threadId: string, params: RpcObject): void {
+    const chatId = this.chatForThread(threadId);
+    if (chatId === null) return;
+    this.reroutedSinceCompletion.add(threadId);
+    if (this.reroutedSinceCompletion.size > 500) {
+      const oldest = this.reroutedSinceCompletion.values().next().value;
+      if (oldest !== undefined) this.reroutedSinceCompletion.delete(oldest);
+    }
+    this.fireSessionReport(
+      chatId,
+      reportFromReroute(params, this.lastSessionReport.get(chatId) ?? null),
+    );
+  }
+
+  /**
+   * (e) A turn ENDED (P5 stage 7, Phase B, decision 2). The flag comes off
+   * only when a turn COMPLETES with no reroute of its own: only then did a
+   * turn provably run the stored pair (`run()` re-asserts it on every
+   * `turn/start`), or the runtime's own last value when nothing is stored.
+   * Never at `turn/started`, which comes before anyone knows whether that
+   * turn reroutes too: a chat whose model the runtime reroutes on every
+   * turn would draw the stored model for a turn that ran on another one,
+   * then flip back, two writes and two sidebar refetches per turn. An
+   * interrupted or failed turn proves nothing and leaves the flag. A turn in
+   * a chat that was never rerouted reports nothing.
+   */
+  private settleReroute(threadId: string, status: unknown): void {
+    const sawReroute = this.reroutedSinceCompletion.delete(threadId);
+    const chatId = this.chatForThread(threadId);
+    if (chatId === null || sawReroute || status !== "completed") return;
+    if (!this.reroutedChats.has(chatId)) return;
+    const runtime = this.lastRuntimeReport.get(chatId);
+    this.fireSessionReport(
+      chatId,
+      reportFromStored(this.settings.get(chatId)) ??
+        (runtime
+          ? { ...runtime, rerouted: false, reportedAt: new Date().toISOString() }
+          : null),
+    );
+  }
+
+  /**
    * Take ownership of a turn this process never started, so the existing
    * branch table can do the rest of the work for it.
    *
@@ -1638,9 +2789,12 @@ export class CodexHost {
       pending: [],
       rowIdentity: new Map(),
       rowStartedAt: new Map(),
+      rowChanges: new Map(),
       childFirstSeen: new Map(),
       childState: new Map(),
       childBaseName: new Map(),
+      images: new Map(),
+      handedOff: new Set(),
       finish: (result) => {
         if (!forget()) return;
         void Promise.allSettled(turn.pending)
@@ -1672,4 +2826,14 @@ export class CodexHost {
     }
     return null;
   }
+}
+
+/**
+ * A bounded per chat memory: the chats this process has actually served, the
+ * oldest dropped first. A cache, never the source of truth.
+ */
+function remember<T>(map: Map<number, T>, chatId: number, value: T): void {
+  map.delete(chatId);
+  map.set(chatId, value);
+  if (map.size > 500) map.delete(map.keys().next().value!);
 }

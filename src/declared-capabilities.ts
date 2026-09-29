@@ -11,6 +11,29 @@
  * token that fails either is a 400 on the whole heartbeat, which would take
  * daemon liveness down with it.
  */
+import {
+  SESSIONS_LIBRARY,
+  STOP_PAUSES_MISSION,
+} from "./session-controls-contract.js";
+
+import { REQUEST_REASON } from "./codex-capability-tokens.js";
+
+/**
+ * This daemon fills `approvalMeta.reason` from the model's `exec_command`
+ * justification and `approvalMeta.rule_text` from the exec policy amendment
+ * (P2 stage 5). Declared from the release that carries that code.
+ *
+ * The BGOS canon tells this daemon's agent "the host fills reason ... so
+ * write the justification for the owner" ONLY when the daemon declares this
+ * token, never by version: PR #16 of this repo is numbered 0.14.0 on the same
+ * base without stage 5, and no PR can reserve a number, so a 0.13.0 floor
+ * would have told a 0.14.0 daemon built from #16 something false. The
+ * spelling lives in `codex-capability-tokens.ts`, a file copied byte for byte
+ * from BGOS `backend/src/integrations/`, and both repos pin its sha256
+ * (here: test/codex-capability-tokens.pin.spec.ts). Re-exported so the
+ * declared list and its tests read one name.
+ */
+export { REQUEST_REASON };
 
 /** This daemon hears the eight mission events and tells its model in band. */
 export const MISSION_EVENTS = "mission_events";
@@ -53,8 +76,74 @@ export const MISSION_GOAL_CHECKS = "mission_goal_checks";
  */
 export const MISSION_PAUSE = "mission_pause";
 
+/**
+ * `stop_pauses_mission`, spelled by the contract file shared with BGOS and the
+ * Claude plugin (P6 stage 3, C-32). Declared from 0.16.0.
+ *
+ * An owner Stop, the app's Stop button or `/stop`, PAUSES the chat's open
+ * mission with the reason "Stopped by you" instead of failing it, and the
+ * owner's next message in that chat resumes it. The abort carries its cause
+ * (abort-cause.ts) and the mission lane does the pause and the resume.
+ * BGOS serves the Codex canon's Stop sentence only to a daemon that declares
+ * this, so the token ships in the same release as the code that keeps it.
+ */
+export { STOP_PAUSES_MISSION };
+
+/**
+ * `sessions_library`, spelled by the same contract file (P6 stage 3, C-32).
+ * Declared from 0.16.0.
+ *
+ * This daemon answers list_sessions, resume_session and rename_session on
+ * the control lane: the threads THIS HOAI chat has used (the set /resume
+ * offers), resumed into the chat or renamed through the runtime's own
+ * thread/name/set. BGOS shows the Sessions circle, and forwards a Sessions
+ * request, only for a pairing that declares it, so the token ships in the
+ * same release as the answers.
+ */
+export { SESSIONS_LIBRARY };
+
+/**
+ * This daemon answers `changes_rpc` (op `diff`, scope `uncommitted`) with
+ * read only Git in its working folder. Declared from the release that ships
+ * the handler (src/changes-handler.ts).
+ *
+ * The owner's Changes panel sends a frame only to a pairing that declared
+ * this token, and shows "Update its BGOS connector" to one that has not. The
+ * owner's per agent switch is enforced by the backend, never read here.
+ */
+export const CHANGES_RPC = "changes_rpc";
+
+/**
+ * This daemon REPORTS each chat's model and reasoning effort as its runtime
+ * really runs them, and its own `/model` changes them between turns from the
+ * account's own list. Declared from 0.18.0 (P5 stage 7, C-26).
+ *
+ * The promise to the person holding the phone: the quiet row under a Codex
+ * chat's message box shows what the runtime is running in THAT chat, never a
+ * value asked for and not yet applied. The reports go through the per chat
+ * session-settings rail (`BgosApi.reportSessionSettings`), from every change
+ * that lands, the runtime's own `thread/settings/updated` and `model/rerouted`,
+ * the thread's start and resume answers, and a sweep of the stored chats at
+ * connect. A tap on the row sends the ordinary `/model`, whose question lists
+ * the account's own models and then that model's own efforts, and a change is
+ * refused while a turn is running, which is why the row says "changes apply
+ * between turns".
+ *
+ * The backend reads this token and nothing else to offer the owner's "Show
+ * model and effort" switch; the switch itself is app side and this daemon
+ * never reads it (test/agent-activity.spec.ts). The name is the backend's own
+ * `SESSION_MODEL_CONTROL` and is pinned by one hash in both repos
+ * (SESSION_SETTINGS_RAIL_SHA256, test/session-rail-contract.spec.ts).
+ */
+export const SESSION_MODEL_CONTROL = "session_model_control";
+
 export const DECLARED_CAPABILITIES: readonly string[] = Object.freeze([
   MISSION_EVENTS,
   MISSION_GOAL_LOOP,
   MISSION_PAUSE,
+  REQUEST_REASON,
+  STOP_PAUSES_MISSION,
+  SESSIONS_LIBRARY,
+  CHANGES_RPC,
+  SESSION_MODEL_CONTROL,
 ]);

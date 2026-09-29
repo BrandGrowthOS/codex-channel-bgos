@@ -304,6 +304,7 @@ describe("the adapter's steps wiring", () => {
     };
     Object.assign(adapter, {
       turnControllers: new Map(),
+    planCardFailures: new Set(),
       ownerId: "owner-1",
       missionLane: {
         beginTurn: vi.fn(() => 1),

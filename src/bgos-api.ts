@@ -13,6 +13,12 @@ import {
 } from "./types.js";
 import type { VoiceRpcResultBody } from "./voice-rpc.js";
 import type { HeartbeatDto } from "./heartbeat.js";
+import {
+  CHANGES_ACK_TIMEOUT_MS,
+  CHANGES_RESULT_TIMEOUT_MS,
+} from "./changes-handler.js";
+import type { ChangesResultBody } from "./git-changes.js";
+import { reportBody, type SessionReport } from "./session-report.js";
 
 const SKILLS_RPC_POST_TIMEOUT_MS = 3_000;
 
@@ -185,6 +191,28 @@ function messagesRouteBody(
   return body as Omit<OutboundMessagePayload, "assistantId">;
 }
 
+/** The capability token grammar BGOS accepts (pair-exchange.dto.ts). */
+const CAPABILITY_TOKEN = /^[a-z][a-z0-9_]{0,63}$/;
+/** BGOS reads at most this many tokens from one capabilities fetch. */
+const MAX_DECLARED_ON_FETCH = 32;
+
+/**
+ * The capabilities fetch's `capabilities` query: the declared tokens that
+ * match the backend's grammar, at most 32, joined with commas (the backend
+ * splits on commas; axios would otherwise send an array as `capabilities[]`,
+ * which the backend does not read). Empty when nothing is declared, so the
+ * key is left off rather than sent blank. The same shape the Claude Code
+ * plugin's `capabilitiesFetchPath` sends.
+ */
+export function capabilitiesQueryParam(
+  declared: readonly string[],
+): { capabilities?: string } {
+  const tokens = declared
+    .filter((t) => CAPABILITY_TOKEN.test(t))
+    .slice(0, MAX_DECLARED_ON_FETCH);
+  return tokens.length ? { capabilities: tokens.join(",") } : {};
+}
+
 /**
  * Thin typed wrapper around the BGOS integration endpoints. All methods
  * attach the X-BGOS-Pairing header from cfg.pairingToken.
@@ -291,10 +319,22 @@ export class BgosApi {
    * `text` is header + shared core + the codex channel delta, ready to inject.
    * Any non-2xx (including a 404 from an older backend that predates the
    * endpoint) throws, and the caller keeps the bundled fallback.
+   *
+   * `declared` is this daemon's own capability tokens, sent as the fetch's
+   * `capabilities` query (a comma list, see `capabilitiesQueryParam`). The
+   * canon tells some sentences only to a daemon that declares their token
+   * (`request_reason` for the request reason clause), reading the union of
+   * the pairing's stored list and this query, and it trusts the stored list
+   * only when it was written by the SAME daemon version. This fetch runs at
+   * connect, before the first heartbeat of a new release stores its list, and
+   * the answer is kept for the whole process: without the query a freshly
+   * upgraded daemon would be told none of its declared sentences until it
+   * restarted.
    */
   async getCapabilities(
     channel = "codex",
     daemonVersion?: string,
+    declared: readonly string[] = [],
   ): Promise<{
     channel: string;
     version: string;
@@ -308,7 +348,11 @@ export class BgosApi {
     // (disk/memory DoS). axios rejects past maxContentLength and the caller
     // keeps the bundled fallback.
     const r = await this.http.get("integrations/capabilities", {
-      params: { channel, ...(daemonVersion ? { daemonVersion } : {}) },
+      params: {
+        channel,
+        ...(daemonVersion ? { daemonVersion } : {}),
+        ...capabilitiesQueryParam(declared),
+      },
       maxContentLength: 1024 * 1024,
       maxBodyLength: 1024 * 1024,
     });
@@ -381,6 +425,55 @@ export class BgosApi {
     );
   }
 
+  /**
+   * Report this chat's session mode to BGOS, so the app can draw the plan mode
+   * chip and the gold pill without guessing.
+   *
+   * Per CHAT, not per assistant: Codex's mode lives in `SessionSettingsStore`
+   * keyed on chatId, and a daemon serving several chats can be planning in one
+   * and coding in another. `enforced` says whether anything other than the
+   * agent's goodwill holds the wait.
+   *
+   * Additive route: an older backend answers 404 and every caller swallows it,
+   * because a chip the app cannot draw must never cost a turn.
+   */
+  async reportSessionMode(
+    assistantId: number,
+    chatId: number,
+    body: { mode: "plan" | "default"; enforced: boolean },
+  ): Promise<void> {
+    await this.http.patch(
+      `integrations/assistants/${assistantId}/chats/${chatId}/session-mode`,
+      body,
+    );
+  }
+
+  /**
+   * Report the model and reasoning effort this chat's runtime is REALLY
+   * running (P5 stage 7, C-26), so the app can draw the quiet row under the
+   * message box. A report, never a command: nothing on HOAI's side can
+   * change the value, and the row moves only when one of these lands.
+   *
+   * The ONE place the route is built. Its method, path and body order are a
+   * contract with the BGOS backend, pinned by one sha256 in both repos
+   * (SESSION_SETTINGS_RAIL_SHA256, test/session-rail-contract.spec.ts). The
+   * body is built from the five named fields only, in the rail's order.
+   *
+   * Additive route: an older backend answers 404, and the adapter swallows
+   * every failure, because a row the app cannot draw never costs a turn.
+   */
+  async reportSessionSettings(
+    assistantId: number,
+    chatId: number,
+    report: SessionReport,
+  ): Promise<void> {
+    await this.http.request({
+      method: "PATCH",
+      url: `integrations/assistants/${assistantId}/chats/${chatId}/session-settings`,
+      data: reportBody(report),
+    });
+  }
+
   async mergeCommands(
     assistantId: number,
     commands: CommandManifestEntry[],
@@ -401,15 +494,30 @@ export class BgosApi {
     return r.data;
   }
 
-  /** Fetch the recent message history for a chat - used by the daemon to
-   *  rebuild conversation context before dispatching to a stateless
-   *  gateway. Backend returns up to 100 entries ASC by created_at. */
+  /**
+   * Fetch the recent message history for a chat - used by the daemon to
+   * rebuild conversation context before dispatching to a stateless gateway.
+   *
+   * `cursor` pins the page to a row the caller already knows about. With no
+   * cursor the route answers with the NEWEST 50 rows, which is right for a
+   * transcript read and wrong for a poll waiting on ONE row: `beforeId` filters
+   * id < beforeId and the page is taken newest first, so beforeId = id + 1 puts
+   * that row first whatever else has landed since. `Interactions.readPending`
+   * is why this exists; see the trap written out there.
+   */
   async getMessages(
     chatId: number,
     userId: string,
+    cursor?: { beforeId?: number; limit?: number },
   ): Promise<BgosMessageEnvelope[]> {
     const r = await this.http.get(`chats/${chatId}/messages`, {
-      params: { userId },
+      params: {
+        userId,
+        ...(cursor?.beforeId === undefined
+          ? {}
+          : { beforeId: cursor.beforeId }),
+        ...(cursor?.limit === undefined ? {} : { limit: cursor.limit }),
+      },
     });
     const rows = r.data?.messages;
     return Array.isArray(rows) ? (rows as BgosMessageEnvelope[]) : [];
@@ -600,6 +708,47 @@ export class BgosApi {
   }
 
   /**
+   * Pause a mission, with an optional reason (P6 stage 3, C-32).
+   *
+   * An owner Stop pauses the chat's open mission with STOP_PAUSE_REASON
+   * rather than failing it. The answer is the snapshot the lane reads: a
+   * mission the owner had already paused comes back UNCHANGED, with the
+   * owner's own reason, and then it is not this daemon's pause to undo.
+   * The body carries `reason` only when there is one (PauseMissionDto
+   * declares nothing else).
+   */
+  async pauseMission(
+    assistantId: number,
+    missionId: number,
+    body: { reason?: string } = {},
+    options?: { timeout?: number },
+  ): Promise<MissionSnapshot> {
+    const r = await this.http.patch(
+      `integrations/assistants/${assistantId}/missions/${missionId}/pause`,
+      typeof body.reason === "string" ? { reason: body.reason } : {},
+      options,
+    );
+    return r.data.mission;
+  }
+
+  /**
+   * Resume a paused mission (P6 stage 3, C-32). The daemon calls this only
+   * for a mission its own owner Stop paused, on the owner's next message.
+   */
+  async resumeMission(
+    assistantId: number,
+    missionId: number,
+    options?: { timeout?: number },
+  ): Promise<MissionSnapshot> {
+    const r = await this.http.patch(
+      `integrations/assistants/${assistantId}/missions/${missionId}/resume`,
+      {},
+      options,
+    );
+    return r.data.mission;
+  }
+
+  /**
    * Report that this daemon's own goal loop stopped itself.
    *
    * The mission stays open on purpose: the answer belongs to the owner, so
@@ -667,7 +816,16 @@ export class BgosApi {
    */
   async setStatus(
     assistantId: number,
-    body: { statusText: string | null; statusEmoji?: string | null },
+    body: {
+      statusText: string | null;
+      statusEmoji?: string | null;
+      /**
+       * How long the line survives if nothing clears it, 1 to 1440 minutes.
+       * The server's own default is two hours, which is the wrong number for a
+       * plan waiting on an owner who may answer tomorrow.
+       */
+      ttlMinutes?: number;
+    },
   ): Promise<void> {
     await this.http.patch(
       `integrations/assistants/${assistantId}/status`,
@@ -769,6 +927,35 @@ export class BgosApi {
       `integrations/skills-rpc/${encodeURIComponent(rpcId)}/result`,
       body,
       { timeout: SKILLS_RPC_POST_TIMEOUT_MS },
+    );
+    return r.data;
+  }
+
+  // -------------------------------------------------------------------
+  // The owner's Changes panel (changes_rpc, see changes-handler.ts)
+  // -------------------------------------------------------------------
+
+  /** ACK a changes_rpc frame: cancels the backend's one 1.5 s re emit. */
+  async changesRpcAck(rpcId: string): Promise<unknown> {
+    const r = await this.http.post(
+      `integrations/changes-rpc/${encodeURIComponent(rpcId)}/ack`,
+      {},
+      { timeout: CHANGES_ACK_TIMEOUT_MS },
+    );
+    return r.data;
+  }
+
+  /** Settle a changes_rpc frame. The body can carry a whole patch, so its
+   *  post gets longer than the control posts; the handler retries once only
+   *  while a retry can still land inside the backend's 20 s hold. */
+  async changesRpcResult(
+    rpcId: string,
+    body: ChangesResultBody,
+  ): Promise<unknown> {
+    const r = await this.http.post(
+      `integrations/changes-rpc/${encodeURIComponent(rpcId)}/result`,
+      body,
+      { timeout: CHANGES_RESULT_TIMEOUT_MS },
     );
     return r.data;
   }
