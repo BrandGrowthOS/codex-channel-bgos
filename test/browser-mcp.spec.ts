@@ -330,8 +330,12 @@ function shimClient(env: Record<string, string>) {
  * auth header is used, and the global ValidationPipe answers 400 without it.
  * This is the endpoint the shipped branch could not authenticate against.
  */
-async function fakeRelayBackend() {
+async function fakeRelayBackend({ hostOnline = true }: { hostOnline?: boolean } = {}) {
   const seen: { assistantId: unknown; pairing: unknown; method?: string }[] = [];
+  // Every host probe, as the query it carried: the probe names the agent, so an
+  // agent placed on its own machine is not read as offline while the owner's
+  // desktop app is closed.
+  const hostProbes: string[] = [];
   let rpcSeq = 0;
   const server = createServer((req, res) => {
     let body = "";
@@ -343,8 +347,12 @@ async function fakeRelayBackend() {
         res.end(JSON.stringify(obj));
       };
       const url = new URL(req.url ?? "/", "http://127.0.0.1");
-      if (url.pathname.endsWith("/browser/host"))
-        return json(200, { online: true, hostLabel: "Kc's MacBook Pro" });
+      if (url.pathname.endsWith("/browser/host")) {
+        hostProbes.push(url.search);
+        return hostOnline
+          ? json(200, { online: true, hostLabel: "Kc's MacBook Pro" })
+          : json(200, { online: false, hostLabel: null });
+      }
       if (!url.pathname.endsWith("/browser/mcp"))
         return json(404, { message: "unknown route" });
       const parsed = body ? JSON.parse(body) : {};
@@ -397,6 +405,7 @@ async function fakeRelayBackend() {
   return {
     url: `http://127.0.0.1:${port}`,
     seen,
+    hostProbes,
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
 }
@@ -483,12 +492,14 @@ describe("the vendored shim, offline but with relay credentials", () => {
     rmSync(temp, { recursive: true, force: true });
   });
 
+  // The relay is up and answers the probe for THIS agent: no host is online.
+  // That, and only that, is the owner's desktop app being the missing thing.
   it("says the owner's desktop app is the thing that is missing, not this machine's", async () => {
-    const port = await deadPort();
+    const backend = await fakeRelayBackend({ hostOnline: false });
     const client = shimClient({
       // A home with no ~/.hoai/agent-browser.json, so there is no local door.
       HOAI_HOME: temp,
-      HOAI_RELAY_BACKEND_URL: `http://127.0.0.1:${port}`,
+      HOAI_RELAY_BACKEND_URL: backend.url,
       HOAI_RELAY_PAIRING_TOKEN: TOKEN,
       HOAI_RELAY_ASSISTANT_ID: String(ASSISTANT),
       HOAI_RELAY_PROBE_MS: "60000",
@@ -516,6 +527,56 @@ describe("the vendored shim, offline but with relay credentials", () => {
         /owner's Home of Agents desktop app/,
       );
       // Offline is not a reason to invent a browser: a real call is an error.
+      const nav = await client.request("tools/call", {
+        name: "browser_navigate",
+        arguments: { url: "https://example.test/" },
+      });
+      expect(nav.result.isError).toBe(true);
+      // The probe asked for this agent's host, not the owner's desktop alone.
+      expect(backend.hostProbes.length).toBeGreaterThan(0);
+      expect(
+        backend.hostProbes.every((q) => q === `?assistantId=${ASSISTANT}`),
+      ).toBe(true);
+      // Nothing was relayed: the shim never initializes against no host.
+      expect(backend.seen).toEqual([]);
+      expect(client.stderr()).not.toContain(TOKEN);
+    } finally {
+      client.close();
+      await backend.close();
+    }
+  }, 20_000);
+
+  // A relay that cannot be reached says NOTHING about the desktop app, so the
+  // agent must not be told the app "is not running or not signed in".
+  it("says the relay is unreachable, never that the desktop app is down, when the relay itself cannot be reached", async () => {
+    const port = await deadPort();
+    const client = shimClient({
+      HOAI_HOME: temp,
+      HOAI_RELAY_BACKEND_URL: `http://127.0.0.1:${port}`,
+      HOAI_RELAY_PAIRING_TOKEN: TOKEN,
+      HOAI_RELAY_ASSISTANT_ID: String(ASSISTANT),
+      HOAI_RELAY_PROBE_MS: "60000",
+    });
+    try {
+      const init = await client.request("initialize", {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "codex", version: "test" },
+      });
+      expect(init.result.serverInfo.name).toBe("hoai-agent-browser");
+      expect(init.result.instructions).toMatch(/HOAI relay is unreachable/);
+      expect(init.result.instructions).not.toMatch(/not running or not signed in/);
+      const list = await client.request("tools/list");
+      expect(list.result.tools.map((t: { name: string }) => t.name)).toEqual([
+        "hoai_browser_status",
+      ]);
+      const status = await client.request("tools/call", {
+        name: "hoai_browser_status",
+        arguments: {},
+      });
+      expect(status.result.isError).toBe(false);
+      expect(status.result.content[0].text).toMatch(/HOAI relay is unreachable/);
+      expect(status.result.content[0].text).not.toMatch(/not running or not signed in/);
       const nav = await client.request("tools/call", {
         name: "browser_navigate",
         arguments: { url: "https://example.test/" },

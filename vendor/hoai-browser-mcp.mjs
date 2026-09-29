@@ -53,11 +53,61 @@ const OFFLINE_TEXT_LOCAL = "The HOAI Agent Browser is not available: the Home of
 const OFFLINE_TEXT_RELAY = "The HOAI Agent Browser is not available: your owner's Home of Agents desktop app is not running or not signed in, and there is no desktop app on this machine. Ask them to open Home of Agents on their computer (Cmd or Ctrl+Shift+B opens the Agent Browser); the browser tools appear here as soon as it is online.";
 const RELAY_ERROR_TEXT = {
   host_offline: OFFLINE_TEXT_RELAY,
+  // The host was there and its connection dropped mid call (the backend's hostGone). The relay rides the desktop
+  // window's socket, so a window reload does exactly this while the app keeps running; "not running or not signed
+  // in" was false here, and it said nothing about the call that may already have happened. The host may be the
+  // owner's desktop app OR the browser host on the agent's own machine (daemon placement), so these words name
+  // neither: the relay's own sentence, appended by relayErrorText, says which one dropped.
+  host_disconnected: "The browser's host dropped its connection while this call was running, so the call may or may not have run. Check the page with browser_snapshot before you retry, and never repeat a click, a purchase or a message without checking first. HOAI cannot tell a reload or a restart from a shutdown: if the host reconnects, the browser tools carry on; if it was shut down, they come back when it runs again.",
   host_timeout: "The owner's desktop app did not answer the browser call within 50 seconds. Say so and retry once; if it happens again, tell the owner their Home of Agents app looks stuck.",
-  rate_limited: "Too many browser calls in flight for this agent. Wait for the previous call to finish, then retry.",
+  // The relay refuses BEFORE it sends anything to the host (agent-browser-relay.service.ts: assertInFlightRoom and
+  // stampMinute run ahead of electHost), so nothing ran. It also refuses before any host is ELECTED, so the refusal
+  // says nothing about the host: "your owner's desktop app is fine" was a claim the shim cannot know. The limits
+  // themselves are the backend's, and its own sentence naming the one that was hit is appended (relayErrorText).
+  rate_limited: "The HOAI relay refused this browser call because this agent made too many browser calls at once or in the last minute. Nothing ran. This refusal says nothing about whether the browser is online. Wait for your other browser calls to finish, or a minute after a burst, then retry.",
+  // A 429 WITHOUT the relay's own code comes from a limit in front of the relay (the backend's global request
+  // throttler, which sends a Retry-After, or the machine credential lookup ceiling), so it is not this agent's browser
+  // calls that were counted. It runs earlier still, so it too says nothing about the host. Not a backend code: the
+  // shim's own name.
+  throttled: "The HOAI backend refused this browser call because too many requests came from this agent's connection in a short time (a general request limit, not the browser's own). Nothing ran. This refusal says nothing about whether the browser is online. Wait a little, then retry.",
+  // A 429 on the COLLECT of a pending call (GET .../mcp/:rpcId, throttled by the global request guard) comes AFTER
+  // the call was sent to the browser, so "Nothing ran" would be false: it may have run, or may still be running.
+  // Not a backend code: the shim's own name.
+  collect_throttled: "This browser call was sent to the browser, but the HOAI backend refused the request that collects its result because too many requests came from this agent's connection in a short time (a general request limit). The call may have run, or may still be running. Wait a little, then check the page with browser_snapshot before you retry, and never repeat a click, a purchase or a message without checking first.",
   browser_disabled: "The owner switched the Agent Browser off for this agent. Ask them before trying again.",
   payload_too_large: "That browser call was too large for the relay (the limit is 256 KB). Send less at once.",
   call_lost: "The relay lost track of that browser call (the result was not collected in time). Retry it once.",
+};
+
+const RELAY_UNSUPPORTED_TEXT = "This HOAI backend does not have the browser relay yet. Tell the owner to update Home of Agents.";
+
+// A collect (GET .../mcp/:rpcId) that fails AFTER the call went pending: the call WAS SENT, so it may already have
+// run (a click, a purchase, a message), and "Retry in a moment" or "Retry it once" invited a blind repeat.
+const SENT_CALL_ADVICE = "The call may or may not have run, or may still be running. Check the page with browser_snapshot before you retry, and never repeat a click, a purchase or a message without checking first; if the page cannot tell you, ask your owner.";
+function sentCallText(code, status, detail, error) {
+  if (code === "relay_unreachable") return `This browser call was sent to the browser, but the HOAI relay could not be reached to collect its result (${error}). ${SENT_CALL_ADVICE}`;
+  if (code === "call_lost") return `This browser call was sent to the browser, but the HOAI relay lost track of it before its result was collected. ${SENT_CALL_ADVICE}`;
+  return `This browser call was sent to the browser, but the HOAI relay answered ${status}${detail ? `: ${detail}` : ""} when asked for its result. ${SENT_CALL_ADVICE}`;
+}
+// The collect failures that get the sent call's words; every other code keeps its own (collect_throttled already
+// says the call was sent, host_disconnected that it may or may not have run).
+const SENT_CALL_CODES = new Set(["relay_unreachable", "call_lost", "relay_error"]);
+
+// A refusal met while CONNECTING: the shim's OWN initialize was refused, so the agent's call never left the shim.
+// The call's own words ("while this call was running", "This browser call was sent", "did not answer the browser
+// call") were false there; each code gets a reason true for a connection that could not be set up.
+const CONNECT_LEAD = "The HOAI Agent Browser could not set up its connection to the browser, so your call was not sent. Nothing ran.";
+const CONNECT_LEAD_INSTRUCTIONS = "The HOAI Agent Browser could not set up its connection to the browser.";
+const CONNECT_REASON_TEXT = {
+  rate_limited: "The HOAI relay refused the connection because this agent made too many browser calls at once or in the last minute. This says nothing about whether the browser is online. Wait for your other browser calls to finish, or a minute after a burst, then retry.",
+  throttled: "The HOAI backend refused the connection because too many requests came from this agent's connection in a short time (a general request limit, not the browser's own). This says nothing about whether the browser is online. Wait a little, then retry.",
+  // A pending answer proves only that the backend emitted the frame, not that the host received it (review round 3).
+  collect_throttled: "The connection request was sent to the browser's host, but the HOAI backend refused the request that collects its answer because too many requests came from this agent's connection in a short time (a general request limit, not the browser's own). This says nothing about whether the browser is online. Wait a little, then retry.",
+  host_disconnected: "The browser's host dropped its connection while the connection was being set up. HOAI cannot tell a reload or a restart from a shutdown: retry in a moment; if it keeps failing, the host was probably shut down, and the browser tools come back when it runs again.",
+  host_timeout: "The browser's host did not answer the connection request in time. Retry once; if it happens again, tell your owner the browser looks stuck.",
+  browser_disabled: RELAY_ERROR_TEXT.browser_disabled,
+  relay_unsupported: RELAY_UNSUPPORTED_TEXT,
+  call_lost: "The HOAI relay lost track of the connection request before its answer was collected. Retry in a moment; if it keeps happening, tell your owner.",
 };
 
 const CLIENT_ID = crypto.randomUUID(); // the MCP session key on the desktop side
@@ -82,7 +132,16 @@ let initSeq = 0;
  * leaves it out is answered 400 and never reaches the desktop app.
  */
 function readRelayCredentials(env) {
-  const url = String(env.HOAI_RELAY_BACKEND_URL || "").trim().replace(/\/+$/, "");
+  // The daemon's backend URL is accepted with or without the /api/v1 suffix
+  // (server.ts normalises it), and the launcher hands us whatever it holds.
+  // Every relay path below carries /api/v1 itself, so strip a trailing copy
+  // here: with it left in, every probe went to /api/v1/api/v1/... and was
+  // answered 404, which read as "host offline" for every Claude Code agent
+  // whose config carried the suffix (all of them on 2026-09-13).
+  const url = String(env.HOAI_RELAY_BACKEND_URL || "")
+    .trim()
+    .replace(/\/+$/, "")
+    .replace(/\/api\/v1$/i, "");
   if (!url) return null;
   const assistantId = String(env.HOAI_RELAY_ASSISTANT_ID || "").trim();
   const pairing = String(env.HOAI_RELAY_PAIRING_TOKEN || "").trim();
@@ -104,7 +163,9 @@ function write(msg) {
   process.stdout.write(JSON.stringify(msg) + "\n");
 }
 
-function offlineText() {
+// With a refusal (the relay answered the connect with a limit, not an absence), its words; else the absence.
+function offlineText(refusal) {
+  if (refusal && refusal.text) return refusal.text;
   return RELAY ? OFFLINE_TEXT_RELAY : OFFLINE_TEXT_LOCAL;
 }
 
@@ -177,7 +238,7 @@ async function relayFetch(method, pathname, body) {
       payload = JSON.parse(text);
     } catch {}
   }
-  return { status: res.status, payload };
+  return { status: res.status, payload, retryAfter: res.headers.get("retry-after") };
 }
 
 function relayErrorCode(status, payload) {
@@ -185,17 +246,73 @@ function relayErrorCode(status, payload) {
   if (typeof code === "string" && RELAY_ERROR_TEXT[code]) return code;
   if (status === 409) return "host_offline";
   if (status === 504) return "host_timeout";
-  if (status === 429) return "rate_limited";
+  // Only a body that says rate_limited is the relay's own per agent limit (returned above); a bare 429 is not.
+  if (status === 429) return "throttled";
   if (status === 403) return "browser_disabled";
   if (status === 413) return "payload_too_large";
   if (status === 404) return "call_lost";
   return "relay_error";
 }
 
-function relayErrorText(code, status, payload) {
-  if (RELAY_ERROR_TEXT[code]) return RELAY_ERROR_TEXT[code];
-  const detail = payload && typeof payload.message === "string" ? payload.message : "";
+// The codes whose text is followed by the relay's own sentence: it names the limit that was hit with the backend's
+// numbers, or whether a desktop app or an agent's own browser host dropped.
+const RELAY_DETAIL_CODES = new Set(["rate_limited", "throttled", "host_disconnected"]);
+// The codes whose text is followed by the backend's Retry-After, when it sends one.
+const RETRY_AFTER_CODES = new Set(["rate_limited", "throttled", "collect_throttled"]);
+
+/** Retry-After in whole seconds (the delta form; an HTTP date is ignored), or null. */
+function retryAfterSeconds(value) {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (!/^\d+(\.\d+)?$/.test(raw)) return null;
+  return Math.ceil(Number(raw));
+}
+
+function relayDetail(payload) {
+  return payload && typeof payload.message === "string" ? payload.message.slice(0, 300) : "";
+}
+
+// The relay's own sentence (for the codes that carry one) and its Retry-After (for the codes that honour one).
+function relaySuffix(code, payload, retryAfter, saidAbout = "") {
+  const detail = relayDetail(payload);
+  let text = "";
+  if (detail && RELAY_DETAIL_CODES.has(code)) text += ` The relay said${saidAbout}: "${detail}"`;
+  const wait = RETRY_AFTER_CODES.has(code) ? retryAfterSeconds(retryAfter) : null;
+  if (wait !== null) text += ` The relay asks you to wait ${wait} seconds before you retry.`;
+  return text;
+}
+
+function relayErrorText(code, status, payload, retryAfter) {
+  if (RELAY_ERROR_TEXT[code]) return RELAY_ERROR_TEXT[code] + relaySuffix(code, payload, retryAfter);
+  const detail = relayDetail(payload);
   return `The HOAI relay answered ${status}${detail ? `: ${detail}` : ""}. Retry once; if it persists, tell the owner.`;
+}
+
+/**
+ * The reason a refusal met while CONNECTING gets, from the failed relaySend of the shim's own initialize (or the
+ * host's JSON-RPC error to it). Without the lead: the tool result and the initialize instructions each put their own
+ * in front.
+ */
+function connectReason(res) {
+  if (res.hostError) return `The browser's host answered the connection request with an error: ${String(res.hostError).slice(0, 300)}. Retry in a moment; if it keeps happening, tell your owner.`;
+  const base = CONNECT_REASON_TEXT[res.code];
+  if (base && res.code === "host_disconnected") return base + droppedHostSuffix(res.payload);
+  if (base) return base + relaySuffix(res.code, res.payload, res.retryAfter, " about the connection request");
+  if (res.code === "relay_unreachable") return `The HOAI relay could not be reached (${res.error}). Retry in a moment.`;
+  const detail = relayDetail(res.payload);
+  return `The HOAI relay answered ${res.status}${detail ? `: ${detail}` : ""} to the connection request. Retry in a moment; if it keeps happening, tell your owner.`;
+}
+
+/**
+ * Who dropped, for a host_disconnected met while CONNECTING. The backend's hostGone sentence ("... disconnected while
+ * running this call.") was written for a call in flight, and while connecting the agent's call never left the shim, so
+ * it is not passed on (review round 3). Only the host it names is: the owner's desktop app, or the browser host on the
+ * agent's own machine (daemon placement). A sentence that names neither adds nothing.
+ */
+function droppedHostSuffix(payload) {
+  const detail = relayDetail(payload);
+  if (/browser host for this agent/i.test(detail)) return " The relay reported that the host that dropped was the browser host on this agent's own machine.";
+  if (/desktop app/i.test(detail)) return " The relay reported that the host that dropped was the Home of Agents desktop app.";
+  return "";
 }
 
 function sleep(ms) {
@@ -212,13 +329,15 @@ async function relaySend(message) {
   const body = { clientId: CLIENT_ID, message, waitMs: RELAY_WAIT_MS };
   if (RELAY.assistantId) body.assistantId = RELAY.assistantId;
   const startedAt = Date.now();
+  let collecting = false; // true once the call went pending: from then on it was SENT, whatever the answer
   let r;
   try {
     r = await relayFetch("POST", RELAY_MCP_PATH, body);
   } catch (e) {
-    return { ok: false, code: "relay_unreachable", transport: true, text: `The HOAI relay is unreachable (${String(e?.message || e)}). Retry in a moment.` };
+    const error = String(e?.message || e);
+    return { ok: false, code: "relay_unreachable", transport: true, error, text: `The HOAI relay is unreachable (${error}). Retry in a moment.` };
   }
-  if (r.status === 404) return { ok: false, code: "relay_unsupported", text: "This HOAI backend does not have the browser relay yet. Tell the owner to update Home of Agents." };
+  if (r.status === 404) return { ok: false, code: "relay_unsupported", text: RELAY_UNSUPPORTED_TEXT };
   for (;;) {
     // The ANSWER is the body's `status`, not the HTTP code: a NestJS POST
     // answers 201 by default, so a relayed message that worked comes back
@@ -234,42 +353,86 @@ async function relaySend(message) {
       if (Date.now() - startedAt > RELAY_TOTAL_MS) return { ok: false, code: "host_timeout", text: RELAY_ERROR_TEXT.host_timeout };
       await sleep(Math.max(250, Number(r.payload.pollAfterMs) || 2000));
       try {
+        collecting = true;
         r = await relayFetch("GET", `${RELAY_MCP_PATH}/${encodeURIComponent(r.payload.rpcId)}`);
       } catch (e) {
-        return { ok: false, code: "relay_unreachable", transport: true, text: `The HOAI relay is unreachable (${String(e?.message || e)}). Retry in a moment.` };
+        // The collect never came back, but the call it collects WAS SENT.
+        const error = String(e?.message || e);
+        return { ok: false, code: "relay_unreachable", transport: true, sent: true, error, text: sentCallText("relay_unreachable", 0, "", error) };
       }
       continue;
     }
-    const code = relayErrorCode(r.status, r.payload);
-    return { ok: false, code, text: relayErrorText(code, r.status, r.payload) };
+    // Any 429 on the collect is a limit on COLLECTING, never the relay refusing to send: the call already went.
+    const code = collecting && r.status === 429 ? "collect_throttled" : relayErrorCode(r.status, r.payload);
+    const text = collecting && SENT_CALL_CODES.has(code) ? sentCallText(code, r.status, relayDetail(r.payload), "") : relayErrorText(code, r.status, r.payload, r.retryAfter);
+    return { ok: false, code, sent: collecting, text, status: r.status, payload: r.payload, retryAfter: r.retryAfter };
   }
 }
 
 async function relayHostOnline() {
   try {
-    const r = await relayFetch("GET", RELAY_HOST_PATH);
-    if (r.status !== 200 || !r.payload) return null;
+    // With an assistant configured, ask for THAT agent's host: the backend then answers with the agent's own
+    // machine when the owner placed it there (hostKind "agent"), and only otherwise with the owner's desktop.
+    // The plain probe answers for the desktop alone, so an agent on its own machine read as offline whenever the
+    // owner's app was closed, which is the one time that placement exists for (Mission 25 goal 6, 2026-09-25).
+    const probePath = RELAY.assistantId ? `${RELAY_HOST_PATH}?assistantId=${encodeURIComponent(RELAY.assistantId)}` : RELAY_HOST_PATH;
+    const r = await relayFetch("GET", probePath);
+    // A refused probe (a 429 from the global request throttler, a 5xx, a 401) says NOTHING about the desktop app:
+    // it used to read as "no host", and the agent was told the app "is not running or not signed in".
+    if (r.status !== 200) return { failed: probeFailure(r.status, r.retryAfter) };
+    if (!r.payload) return null;
     return { online: !!r.payload.online, hostLabel: r.payload.hostLabel || null };
-  } catch {
-    return null;
+  } catch (e) {
+    return { failed: { code: "relay_unreachable", text: `The HOAI relay is unreachable (${String(e?.message || e)}), so the browser's status could not be checked. Retry in a moment.` } };
   }
 }
 
+function probeFailure(status, retryAfter) {
+  if (status === 404) return { code: "relay_unsupported", text: RELAY_UNSUPPORTED_TEXT };
+  const wait = retryAfterSeconds(retryAfter);
+  return {
+    code: "host_probe_failed",
+    text: `The HOAI Agent Browser could not check whether your browser is online: the HOAI backend answered ${status} to the status check, so this says nothing about whether it is running. Nothing ran. Try again in a moment; if it keeps happening, tell your owner.` + (wait !== null ? ` The backend asks you to wait ${wait} seconds first.` : ""),
+  };
+}
+
+/**
+ * Resolves { relay } when the relay session is up, else { relay: null, refusal }. `refusal` is the relay's own
+ * answer to the initialize ({ code, text }) whenever the host WAS online and the relay said something other than
+ * host_offline: a rate limit, a dropped connection, a switched off browser. It used to be swallowed into offline,
+ * so a fresh shim whose initialize met the 60 a minute limit told its agent the owner's desktop app "is not running
+ * or not signed in" while the app was up and driving (P3 stage 4 rig, R3 attempt 2).
+ *
+ * A connect refusal carries `reason`, a sentence true for a connection that could not be set up: the agent's call
+ * has not left the shim, so the call's own words ("while this call was running", "was sent to the browser") were
+ * false here (review round 2). `text` is the reason behind CONNECT_LEAD, which a tool result shows; the initialize
+ * instructions put CONNECT_LEAD_INSTRUCTIONS in front instead, because no call of the agent's exists yet.
+ */
 async function ensureRelay() {
-  if (relay && relay.initialized) return relay;
+  if (relay && relay.initialized) return { relay };
   const host = await relayHostOnline();
-  if (!host || !host.online) return null;
+  if (host && host.failed) return { relay: null, refusal: host.failed };
+  if (!host || !host.online) return { relay: null, refusal: null };
   const init = await relaySend({ jsonrpc: "2.0", id: `shim-init-${++initSeq}`, method: "initialize", params: initializeParams() });
-  if (!init.ok || !init.message || init.message.error) return null;
+  if (!init.ok) return { relay: null, refusal: init.code === "host_offline" ? null : connectRefusal(init) };
+  if (init.message && init.message.error) return { relay: null, refusal: connectRefusal({ code: "host_init_error", hostError: init.message.error.message || JSON.stringify(init.message.error) }) };
+  if (!init.message) return { relay: null, refusal: null };
   await relaySend({ jsonrpc: "2.0", method: "notifications/initialized" }).catch(() => {});
   relay = { initialized: true, instructions: init.message.result?.instructions || "", hostLabel: host.hostLabel };
-  return relay;
+  return { relay };
+}
+
+function connectRefusal(res) {
+  const reason = connectReason(res);
+  return { code: res.code, connecting: true, reason, text: `${CONNECT_LEAD} ${reason}` };
 }
 
 function dropRelay(code) {
-  // An honest host_offline (or a dead relay) means the session on the desktop
-  // is gone; the next call re-elects through a fresh initialize.
-  if (code === "host_offline" || code === "relay_unreachable" || code === "relay_unsupported" || code === "call_lost") relay = null;
+  // An honest host_offline, a dropped host (host_disconnected: the window
+  // reloaded, so the desktop's session died with its socket) or a dead relay
+  // means the session on the desktop is gone; the next call re-elects through
+  // a fresh initialize.
+  if (code === "host_offline" || code === "host_disconnected" || code === "relay_unreachable" || code === "relay_unsupported" || code === "call_lost") relay = null;
 }
 
 // ─── Mode resolution: local, then relay, then offline ────────────────────────
@@ -292,16 +455,18 @@ async function doResolveMode() {
     }
   }
   upstream = null;
+  let refusal = null;
   if (RELAY) {
     const r = await ensureRelay();
-    if (r) {
+    if (r.relay) {
       setMode("relay");
-      return { mode: "relay", relay: r };
+      return { mode: "relay", relay: r.relay };
     }
+    refusal = r.refusal;
   }
   relay = null;
   setMode("offline");
-  return { mode: "offline" };
+  return { mode: "offline", refusal };
 }
 
 // While a host is missing, look for it so the tools appear without a request.
@@ -327,7 +492,7 @@ async function handle(msg) {
       protocolVersion: clientProtocol,
       capabilities: { tools: { listChanged: true } },
       serverInfo: { name: "hoai-agent-browser", version: "shim-2" },
-      instructions: instructions || "HOAI Agent Browser: your default browser once the Home of Agents desktop app is reachable. " + offlineText(),
+      instructions: instructions || "HOAI Agent Browser: your default browser once the Home of Agents desktop app is reachable. " + (r.refusal && r.refusal.connecting ? `${CONNECT_LEAD_INSTRUCTIONS} ${r.refusal.reason}` : offlineText(r.refusal)),
     });
   }
   if (method && method.startsWith("notifications/")) return; // no reply to notifications
@@ -353,7 +518,7 @@ async function handle(msg) {
   }
   if (method === "tools/call") {
     const r = await resolveMode();
-    if (r.mode === "offline") return reply({ content: [{ type: "text", text: offlineText() }], isError: params?.name !== "hoai_browser_status" });
+    if (r.mode === "offline") return reply({ content: [{ type: "text", text: offlineText(r.refusal) }], isError: params?.name !== "hoai_browser_status" });
     if (r.mode === "local") {
       const res = await post({ jsonrpc: "2.0", id, method, params }, r.up).catch(() => null);
       if (!res?.payload) {
