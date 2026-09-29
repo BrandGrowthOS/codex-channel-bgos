@@ -6,6 +6,7 @@ import { formatGoalSeconds, goalStatusWord, GOAL_DEFAULT_TURN_CAP } from "./goal
 import type { ThreadGoal } from "./goal-protocol.js";
 import type { DispatchArgs } from "./inbound-handler.js";
 import type { Interactions, InteractionContext } from "./interactions.js";
+import { planWaitEnforced } from "./plan-mode.js";
 import type { SessionSettings } from "./session-settings.js";
 import type { RpcObject } from "./app-server.js";
 
@@ -191,6 +192,48 @@ export class NativeCommands {
        * has to be watching BEFORE the goal is set: setting one starts a turn
        * at once, and a turn nobody is watching is dropped on the floor.
        */
+      /**
+       * `/plan` and `/code` just changed this chat's Codex mode.
+       *
+       * Told to the adapter rather than done here, because two things follow
+       * that are not this file's: BGOS has to be told, so the app can draw the
+       * plan mode chip, and a `/plan <task>` has to leave a DOOR behind, so the
+       * card the task produces says the owner typed for it rather than that
+       * plan mode happened to be on. `typedTask` is that difference.
+       *
+       * `enforced` is the fourth argument because it is a FACT and not a
+       * constant: it says whether the read only sandbox that goes on with the
+       * mode was actually applied. The app words the chip differently for the
+       * two, so passing a hopeful `true` here would be a promise the owner
+       * acts on. It comes back from the host, which is the only thing that
+       * knows whether the runtime took the setting.
+       */
+      onSessionMode?: (
+        args: DispatchArgs,
+        mode: "plan" | "default",
+        typedTask: boolean,
+        enforced: boolean,
+      ) => void | Promise<void>;
+      /**
+       * The LOCK moved without the mode moving.
+       *
+       * `/permissions` inside plan mode is the one way the pair comes apart
+       * by hand: the mode stays `plan`, so the app keeps the chip up, while
+       * the read only sandbox that made the wait real is gone. Reported
+       * separately from `onSessionMode` because the mode has NOT changed and
+       * the typed door must survive: `/plan build the uploader` followed by
+       * `/permissions workspace` is still a plan the owner typed for, and
+       * routing this through `onSessionMode` would clear that door on its
+       * `typedTask: false` arm.
+       *
+       * Without it the owner reads `read only until you answer` off a chat
+       * that has just been handed its files back, which is the exact promise
+       * this whole lane exists to stop making.
+       */
+      onPlanEnforcement?: (
+        args: DispatchArgs,
+        enforced: boolean,
+      ) => void | Promise<void>;
       goalLane: {
         setFromChat(input: {
           assistantId: number;
@@ -632,10 +675,26 @@ export class NativeCommands {
     }
     if (name === "plan" || name === "code") {
       const mode = name === "code" || text === "off" ? "default" : "plan";
-      await apply({ mode });
-      await say(mode === "plan" ? "Plan mode is on." : "Coding mode is on.");
-      if (text && !["on", "off"].includes(text))
-        await this.deps.run(args, text);
+      const typedTask = Boolean(text) && !["on", "off"].includes(text);
+      // THE MODE IS NOT THE LOCK, so this does not just write a mode. Plan
+      // mode goes on with the read only sandbox and remembers the permission
+      // the chat had; coding mode gives that permission back. The host owns
+      // the pair (setPlanMode) so `/plan`, `/code` and the card's own buttons
+      // cannot drift apart, and it answers whether the sandbox actually took.
+      context.signal.throwIfAborted();
+      const { enforced } = await host.setPlanMode(args.chatId, mode === "plan");
+      // After the store, before the turn: the app should be drawing the chip
+      // while the agent is still exploring, and a report that lost a race with
+      // the turn would draw it after the plan card had already landed.
+      await this.deps.onSessionMode?.(args, mode, typedTask, enforced);
+      await say(
+        mode === "plan"
+          ? enforced
+            ? "Plan mode is on. This chat is read only until you answer a plan."
+            : "Plan mode is on."
+          : "Coding mode is on.",
+      );
+      if (typedTask) await this.deps.run(args, text);
       return;
     }
     if (name === "permissions") {
@@ -650,7 +709,17 @@ export class NativeCommands {
         throw new Error(
           "Choose workspace or read-only. Broader actions retain their individual approval controls.",
         );
-      await apply({ permission });
+      // The owner choosing an access level SPENDS plan mode's memory of the
+      // old one. Without this, `/permissions read-only` typed inside plan mode
+      // would be undone by the Go ahead that follows, handing back a workspace
+      // the owner had just taken away.
+      const saved = await apply({ permission, permissionBeforePlan: undefined });
+      // And it may have just taken the lock off a chat that is still in plan
+      // mode, or put one on. The mode did not move, so nothing else reports
+      // this, and an unreported change leaves the chip claiming a sandbox the
+      // chat no longer has.
+      if (saved.mode === "plan")
+        await this.deps.onPlanEnforcement?.(args, planWaitEnforced(saved));
       await say(
         permission === "read-only"
           ? "Local files are read-only for this chat. Connected HOAI tools retain their own permissions."

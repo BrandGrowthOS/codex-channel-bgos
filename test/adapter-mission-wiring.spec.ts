@@ -42,6 +42,7 @@ function fixture(control: MissionControlLane) {
   const beginTurn = vi.fn(() => 1);
   Object.assign(adapter, {
     turnControllers: new Map(),
+    planCardFailures: new Set(),
     lastInput: new Map<number, Input>(),
     ownerId: "owner-1",
     missionLane: { beginTurn, finalizeTurn: vi.fn(async () => {}) },
@@ -237,6 +238,7 @@ describe("adopting a turn the app server started by itself", () => {
     Object.assign(adapter, {
       ownerId: "owner-1",
       identityReady: false,
+      planCardFailures: new Set<number>(),
       chatToAssistant: new Map<number, number>([[20, 10]]),
       assistantToRoute: new Map<number, string>(),
       goalLane,

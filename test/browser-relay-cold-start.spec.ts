@@ -119,6 +119,7 @@ function adapterFixture(overrides: Record<string, unknown> = {}) {
     chatToAssistant: new Map<number, number>(),
     ownerId: "user_1",
     turnControllers: new Map(),
+    planCardFailures: new Set(),
     generations: new Map(),
     replyQueues: new Map(),
     rpcSeen: new Set<string>(),

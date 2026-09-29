@@ -4,7 +4,6 @@ import type { AddressInfo } from "node:net";
 interface StagedResponse {
   status: number;
   body: unknown;
-  delayMs?: number;
 }
 
 interface RecordedRequest {
@@ -52,9 +51,6 @@ export class MockBgosServer {
         res.writeHead(404, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "not staged", path: key }));
         return;
-      }
-      if (staged.delayMs) {
-        await new Promise((r) => setTimeout(r, staged.delayMs));
       }
       res.writeHead(staged.status, { "Content-Type": "application/json" });
       res.end(JSON.stringify(staged.body ?? null));

@@ -47,6 +47,11 @@ import {
   type SessionSettings,
   type CodexModel,
 } from "./session-settings.js";
+import {
+  planModeOff,
+  planModeOn,
+  planWaitEnforced,
+} from "./plan-mode.js";
 
 export interface DynamicTool {
   type: "function";
@@ -120,6 +125,28 @@ export interface PlanSignal {
   turnId: string | null;
   plan: PlanItem[];
 }
+/**
+ * A finished plan the model PROPOSED, which is a different thing from the
+ * `turn/plan/updated` checklist above and arrives on a different wire.
+ *
+ * In Codex's plan mode the runtime asks the model to wrap its final plan in a
+ * `<proposed_plan>` block, PARSES that block out of the agent message and
+ * re-emits it as its own item: `item/completed` with `item.type === "plan"` and
+ * the whole markdown in `item.text`. The block is REMOVED from the message, so
+ * before this callback existed the plan reached nobody: `entryFromItem` returns
+ * null for a plan item and `result()` only ever sees the sentence that came
+ * before the block. Settled by a live probe on 2026-09-23, see
+ * docs/learnings/codex-plan-mode-wire.md.
+ *
+ * `item/plan/delta` carries the same text as it streams and is deliberately
+ * ignored: the card is posted once, when the plan is finished.
+ */
+export interface PlanProposalSignal {
+  turnId: string | null;
+  itemId: string;
+  /** The plan, as markdown. Already finalized; never a partial. */
+  text: string;
+}
 export interface RunTurnCallbacks {
   signal?: AbortSignal;
   onTool?: (card: ActivityCard, id: string) => void | Promise<void>;
@@ -132,6 +159,13 @@ export interface RunTurnCallbacks {
   onTodoList?: (signal: TodoListSignal) => void | Promise<void>;
   /** Raw plan snapshot for the live Steps lane. Never touches the mission. */
   onPlan?: (signal: PlanSignal) => void | Promise<void>;
+  /**
+   * The model proposed a plan and is waiting to be told to go ahead. Fired at
+   * most once per turn, from the runtime's own `plan` item. A sibling of
+   * `onPlan` and never a caller of it: the Steps lane is scratch paper for
+   * work in flight, this is a card the owner answers.
+   */
+  onPlanProposal?: (signal: PlanProposalSignal) => void | Promise<void>;
   onTick?: () => void;
   onRequest?: (method: string, params: RpcObject) => Promise<unknown>;
   onUsage?: (usage: RpcObject) => void;
@@ -166,6 +200,12 @@ export interface RunTurnResult {
    * to settle a child of a turn that was cut short.
    */
   helpersStillRunning?: boolean;
+  /**
+   * The runtime emitted a finished `plan` item this turn, so `onPlanProposal`
+   * has already fired and the adapter's `<proposed_plan>` fallback must stay
+   * out of the way. Absent and false both mean no plan item was seen.
+   */
+  sawPlanProposal?: boolean;
 }
 interface ActiveTurn {
   id?: string;
@@ -203,7 +243,20 @@ interface ActiveTurn {
    * the runtime never nicknamed would lose the name it was first drawn with.
    */
   childBaseName: Map<string, string>;
+  /**
+   * The runtime already handed this turn a finished `plan` item, so the
+   * adapter's `<proposed_plan>` fallback must not post a second card. Read on
+   * the result, never inside the notification loop.
+   */
+  sawPlanProposal?: boolean;
   finish: (result: RunTurnResult) => void;
+  /**
+   * Stop and restart this turn's watchdog around a request that is parked in
+   * front of the owner. Only a turn this host RUNS owns a watchdog, so an
+   * adopted turn carries neither and both call sites are optional.
+   */
+  parkWatchdog?: () => void;
+  resumeWatchdog?: () => void;
   /**
    * Present only on an ADOPTED turn: drop its bookkeeping without delivering
    * anything. A turn the owner asks for takes the same thread key (the app
@@ -211,6 +264,51 @@ interface ActiveTurn {
    * outcome then belongs to the turn that replaced it.
    */
   release?: () => void;
+}
+
+/**
+ * The HOAI tools that BLOCK on a PERSON, i.e. an `item/tool/call` whose answer
+ * is an owner's tap rather than the model's own work.
+ *
+ * Today that is exactly one: `ask_user_input`, BGOS's blocking modal carousel.
+ * It holds for up to 600 s (`Interactions.ask` clamps `timeout_seconds` to
+ * that, see interactions.ts), and it is the highest traffic owner facing wait
+ * this daemon has, so leaving it off the park list below is the difference
+ * between the turn waiting with the owner and the turn expiring with the modal
+ * still open in front of them.
+ *
+ * It is a NAME list because the runtime hands the park gate a tool name and
+ * nothing else. The list is enforced rather than trusted: a case in
+ * test/codex-host.spec.ts reads hoai-tools.ts and fails if a tool there
+ * delegates to `this.interactions` without appearing here.
+ */
+export const OWNER_BLOCKING_TOOLS = new Set(["ask_user_input"]);
+
+/**
+ * Does this app server request put a question in front of a PERSON?
+ *
+ * Four shapes do: an approval card (any method ending `/requestApproval`), the
+ * runtime's native ask carousel (`item/tool/requestUserInput`), an MCP
+ * elicitation, and a call to one of the OWNER_BLOCKING_TOOLS above. In all
+ * four the app server child is blocked on the RPC for as long as the answer
+ * takes, so the turn is not stalled, it is waiting on its owner, and that time
+ * is not the watchdog's to spend (see execute).
+ *
+ * Every OTHER tool call is the model talking to itself, and a call that never
+ * comes back is exactly the silence the watchdog exists to end.
+ */
+export function waitsForOwner(method: string, params: RpcObject): boolean {
+  if (
+    method.endsWith("/requestApproval") ||
+    method === "item/tool/requestUserInput" ||
+    method === "mcpServer/elicitation/request"
+  )
+    return true;
+  return (
+    method === "item/tool/call" &&
+    typeof params.tool === "string" &&
+    OWNER_BLOCKING_TOOLS.has(params.tool)
+  );
 }
 
 /**
@@ -426,8 +524,23 @@ export class CodexHost {
       if (method === "currentTime/read")
         return { currentTimeAt: Math.floor(Date.now() / 1000) };
       const turn = this.active.get(params.threadId);
-      if (turn?.callbacks.onRequest)
-        return turn.callbacks.onRequest(method, params);
+      if (turn?.callbacks.onRequest) {
+        // Only the requests that put a question in front of a PERSON park the
+        // turn's watchdog: an approval card, an ask carousel (the runtime's
+        // native one AND the `ask_user_input` HOAI tool, which arrives as an
+        // ordinary `item/tool/call`), an MCP elicitation. See waitsForOwner.
+        // An ordinary tool call is deliberately NOT parked. Nobody is holding
+        // it, so a call that never comes back is exactly the silence the
+        // watchdog exists to end.
+        if (!waitsForOwner(method, params))
+          return turn.callbacks.onRequest(method, params);
+        turn.parkWatchdog?.();
+        try {
+          return await turn.callbacks.onRequest(method, params);
+        } finally {
+          turn.resumeWatchdog?.();
+        }
+      }
       // Missing handlers never authorize a request by default.
       if (method.endsWith("/requestApproval"))
         return method.includes("permissions")
@@ -540,6 +653,74 @@ export class CodexHost {
       seen.add(cursor);
     }
     throw new Error("Codex model catalog exceeded its page limit.");
+  }
+  /**
+   * Every chat this daemon has stored in plan mode.
+   *
+   * Read at connect so BGOS can draw the chip for a chat the owner left in
+   * plan mode before the daemon last stopped. The STORE is the truth, not the
+   * running threads: a chat with no thread yet still has a mode.
+   */
+  planModeChats(): number[] {
+    return this.settings
+      .entries()
+      .filter(([, value]) => value.mode === "plan")
+      .map(([chatId]) => chatId)
+      .filter((chatId) => Number.isSafeInteger(chatId) && chatId > 0);
+  }
+  /**
+   * Is this chat's plan wait actually ENFORCED right now?
+   *
+   * Read straight off the store, synchronously, because every caller needs the
+   * answer at the moment it posts a card or reports a mode and none of them
+   * can afford `sessionSettings()`, which awaits the model catalog. The store
+   * is also the honest source: `ensureThread` builds the sandbox from it and
+   * `run()` spreads `nativeSettings()` of it onto every `turn/start`, so what
+   * is stored is what the NEXT turn will run under.
+   */
+  planWaitEnforcedIn(chatId: number): boolean {
+    return planWaitEnforced(this.settings.get(chatId));
+  }
+  /**
+   * Turn plan mode on or off for one chat, with the sandbox that makes it mean
+   * something, and say whether the lock actually took.
+   *
+   * ONE SEAM ON PURPOSE. `/plan`, `/code` and the owner answering a plan card
+   * all move the same pair of settings, and a second place to compute the pair
+   * is a second place to restore the wrong permission. It returns what the
+   * daemon may honestly report as `enforced`, which is never an assumption:
+   * `planWaitEnforced` reads the settings that were actually SAVED, after the
+   * runtime accepted them.
+   *
+   * A REFUSED SANDBOX STILL LEAVES THE MODE ON. `updateSettings` rolls the
+   * whole patch back and throws if the runtime rejects it, and losing plan
+   * mode because a sandbox could not be applied would be worse than a plan
+   * mode with no lock, which is exactly what this channel had until today. So
+   * the pair is retried as the mode alone, and the honest `enforced: false`
+   * that comes back is the same one the app already knows how to word.
+   *
+   * THE SAME RETRY ON THE WAY OFF leaves the chat read only with the mode
+   * already default, which is the one state where the app shows no chip over a
+   * chat that still refuses writes. It is deliberately not worse than that: the
+   * retry does not carry `permissionBeforePlan`, so the memory survives and the
+   * next `/code` or Go ahead restores the access, and `/permissions workspace`
+   * gets there in one step. Reporting is still truthful throughout, because
+   * `planWaitEnforced` needs the mode too and answers false.
+   */
+  async setPlanMode(
+    chatId: number,
+    on: boolean,
+  ): Promise<{ enforced: boolean }> {
+    const stored = this.settings.get(chatId);
+    const both = on ? planModeOn(stored) : planModeOff(stored);
+    try {
+      return { enforced: planWaitEnforced(await this.updateSettings(chatId, both)) };
+    } catch {
+      const modeOnly = await this.updateSettings(chatId, {
+        mode: on ? "plan" : "default",
+      });
+      return { enforced: planWaitEnforced(modeOnly) };
+    }
   }
   async sessionSettings(chatId: number): Promise<SessionSettings> {
     const settings = { model: this.opts.model, ...this.settings.get(chatId) };
@@ -1050,7 +1231,29 @@ export class CodexHost {
     return new Promise<RunTurnResult>((resolveTurn) => {
       let finished = false;
       const tick = setInterval(() => callbacks.onTick?.(), 4000);
-      const watchdog = setTimeout(() => {
+      /**
+       * THE WATCHDOG DOES NOT COUNT TIME THE OWNER IS HOLDING.
+       *
+       * This clock exists for a turn that has stopped making progress, and a
+       * request parked in front of a person is the opposite of that: the app
+       * server child is blocked on the RPC, waiting for an answer this daemon
+       * offers to hold for up to APPROVAL_HOLD_SECONDS (interactions.ts). Left
+       * running, this timer always won that race, so the longest wait the card
+       * advertises could never actually be served: the turn was interrupted,
+       * `approve()` took its aborted branch and the owner's yes arrived at a
+       * turn that had already declined on their behalf.
+       *
+       * So the budget is PAUSED while any request of this turn is open and
+       * re-armed with what is left when the last one ends. It is a budget for
+       * the model's own silence, and nothing else. A request that is never
+       * answered cannot wedge the turn forever either: the daemon's own
+       * backstop ends the wait at the stored number plus slack, the request
+       * returns decline, and the remaining budget starts running again.
+       */
+      let remainingMs = timeoutMs;
+      let armedAt = Date.now();
+      let parked = 0;
+      const expire = () => {
         if (turn.id)
           void this.server
             .request("turn/interrupt", { threadId: id, turnId: turn.id })
@@ -1058,7 +1261,21 @@ export class CodexHost {
         turn.finish(
           this.result(id, turn, false, "Codex timed out. Retry your message."),
         );
-      }, timeoutMs);
+      };
+      let watchdog = setTimeout(expire, remainingMs);
+      // Counted, not a flag: a turn can hold an approval and an ask carousel at
+      // the same time, and the first one to come back must not restart the
+      // clock while the other is still in front of the owner.
+      const parkWatchdog = () => {
+        if (finished || parked++ > 0) return;
+        clearTimeout(watchdog);
+        remainingMs = Math.max(0, remainingMs - (Date.now() - armedAt));
+      };
+      const resumeWatchdog = () => {
+        if (finished || parked === 0 || --parked > 0) return;
+        armedAt = Date.now();
+        watchdog = setTimeout(expire, remainingMs);
+      };
       const turn: ActiveTurn = {
         callbacks,
         messages: new Map(),
@@ -1068,6 +1285,8 @@ export class CodexHost {
         childFirstSeen: new Map(),
         childState: new Map(),
         childBaseName: new Map(),
+        parkWatchdog,
+        resumeWatchdog,
         finish: (result) => {
           if (finished) return;
           finished = true;
@@ -1141,6 +1360,7 @@ export class CodexHost {
       finalAgentMessageText: finalText,
       turnCompleted: completed,
       error,
+      ...(turn.sawPlanProposal ? { sawPlanProposal: true } : {}),
       ...turnClock(reported),
     };
   }
@@ -1263,6 +1483,30 @@ export class CodexHost {
         this.cwdByThread.set(String(params.threadId ?? ""), item.cwd);
       const started = method === "item/started";
       const itemKey = typeof item.id === "string" ? item.id : "";
+      // THE PLAN THE MODEL PROPOSED, before entryFromItem drops it.
+      //
+      // A plan item is not an activity row and never was: `entryFromItem`
+      // returns null for it and it vanished with no log line, which is why a
+      // Codex owner in plan mode got the sentence before the plan and never the
+      // plan itself. Taken on `item/completed` only, because `item/started`
+      // carries an empty text and `item/plan/delta` carries a partial.
+      if (item.type === "plan") {
+        if (!started && typeof item.text === "string" && item.text.trim()) {
+          turn.sawPlanProposal = true;
+          turn.pending.push(
+            Promise.resolve()
+              .then(() =>
+                turn.callbacks.onPlanProposal?.({
+                  turnId: params.turnId ?? null,
+                  itemId: itemKey,
+                  text: String(item.text),
+                }),
+              )
+              .catch(() => {}),
+          );
+        }
+        return;
+      }
       if (started && itemKey && typeof params.startedAtMs === "number")
         turn.rowStartedAt.set(itemKey, params.startedAtMs);
       const phase: ItemPhase = started ? "started" : "completed";

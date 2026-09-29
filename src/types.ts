@@ -74,6 +74,30 @@ export interface InboundMessagePayload {
   turnState?: string;
   senderType?: "user" | "agent" | "system";
   senderGuardrail?: string;
+  /**
+   * The owner's per agent plan level, as the server's own LABELLED SENTENCE.
+   *
+   * NOT the bare enum, and this comment said it was until 2026-09-23. The wire
+   * never carries `only_when_asked` / `risky_jobs` / `always`: the backend
+   * ships the prefix "Your owner's setting for when you show a plan before you
+   * change anything ..." followed by the level's own words
+   * (backend/src/services/plan-policy.ts, buildPlanPolicyField), and it OMITS
+   * the key entirely at the default level, so an absent value means the
+   * default level, an older backend, or a channel with no such setting. That
+   * belief is the one that made `planPolicySentence` switch on three values no
+   * envelope ever holds, so every real level reached no turn at all; see the
+   * header of `planPolicySentence` in plan-card.ts for the correction. This
+   * declaration is the one a reader reaches first from `bgos-ws.ts`'s
+   * normalizer, so it is the copy that has to say it; the DispatchArgs twin in
+   * inbound-handler.ts carries the same paragraph.
+   *
+   * It rides the ENVELOPE rather than being read off the assistant row on
+   * purpose, and that is the same rule the share guardrail follows: the daemon
+   * offers, the server decides, the daemon never reads the owner's settings.
+   * UNLIKE the guardrail it rides BOTH provenance arms, because it describes
+   * the agent RECEIVING the turn and not whoever is speaking.
+   */
+  planPolicy?: string;
   chatKind?: string;
   senderUserId?: string;
   senderRelationship?: string;
@@ -148,6 +172,21 @@ export interface ApprovalMeta {
   agent_route: string;
   risk: "low" | "medium" | "high";
   request_id: string;
+  /**
+   * The longest this daemon can hold its own side of the request open, in
+   * seconds (APPROVAL_HOLD_SECONDS). It is an offer, not the real wait: the
+   * server stores the smaller of this and the owner's per-agent choice, its
+   * expiry sweep reads the row's stored value, and that stored number rides
+   * back on the created message. Absent means a backend older than the field,
+   * which gives the row the generic 60 s.
+   */
+  wait_seconds?: number;
+  /**
+   * Set by the SERVER's sweep once the row is past its deadline, and it is the
+   * only thing that makes a tap on the card refuse. The daemon reads it back
+   * off the row rather than running a clock of its own; see the two clocks
+   * note in interactions.ts approve().
+   */
   expired?: boolean;
 }
 
@@ -194,6 +233,13 @@ export interface OutboundMessagePayload {
     | "tool_progress"
     | "event";
   approvalMeta?: ApprovalMeta;
+  /**
+   * How a row carrying `options` is drawn: chips in the thread ("inline",
+   * what every card here wants) or a modal that demands an answer. Declared
+   * on the payload because the plan card posts through `postMessage` rather
+   * than inlining its own body the way the `reply` tool does.
+   */
+  renderMode?: "inline" | "modal";
   /**
    * Renderable payload - required when messageType="event". The app draws the
    * card registered for `payload.kind` and falls back to the title plus the
@@ -343,5 +389,12 @@ export interface BgosMessageEnvelope {
     text: string | null;
     messageType: string;
     createdAt: string;
+    /**
+     * Present on an `approval_request` row. `expired` is the server's verdict
+     * that the request is dead, and the durable poll in interactions.ts reads
+     * it here: it is why a daemon stops listening at the same moment the card
+     * stops accepting a tap, instead of a few minutes earlier.
+     */
+    approvalMeta?: ApprovalMeta;
   };
 }

@@ -381,6 +381,29 @@ export class BgosApi {
     );
   }
 
+  /**
+   * Report this chat's session mode to BGOS, so the app can draw the plan mode
+   * chip and the gold pill without guessing.
+   *
+   * Per CHAT, not per assistant: Codex's mode lives in `SessionSettingsStore`
+   * keyed on chatId, and a daemon serving several chats can be planning in one
+   * and coding in another. `enforced` says whether anything other than the
+   * agent's goodwill holds the wait.
+   *
+   * Additive route: an older backend answers 404 and every caller swallows it,
+   * because a chip the app cannot draw must never cost a turn.
+   */
+  async reportSessionMode(
+    assistantId: number,
+    chatId: number,
+    body: { mode: "plan" | "default"; enforced: boolean },
+  ): Promise<void> {
+    await this.http.patch(
+      `integrations/assistants/${assistantId}/chats/${chatId}/session-mode`,
+      body,
+    );
+  }
+
   async mergeCommands(
     assistantId: number,
     commands: CommandManifestEntry[],
@@ -401,15 +424,30 @@ export class BgosApi {
     return r.data;
   }
 
-  /** Fetch the recent message history for a chat - used by the daemon to
-   *  rebuild conversation context before dispatching to a stateless
-   *  gateway. Backend returns up to 100 entries ASC by created_at. */
+  /**
+   * Fetch the recent message history for a chat - used by the daemon to
+   * rebuild conversation context before dispatching to a stateless gateway.
+   *
+   * `cursor` pins the page to a row the caller already knows about. With no
+   * cursor the route answers with the NEWEST 50 rows, which is right for a
+   * transcript read and wrong for a poll waiting on ONE row: `beforeId` filters
+   * id < beforeId and the page is taken newest first, so beforeId = id + 1 puts
+   * that row first whatever else has landed since. `Interactions.readPending`
+   * is why this exists; see the trap written out there.
+   */
   async getMessages(
     chatId: number,
     userId: string,
+    cursor?: { beforeId?: number; limit?: number },
   ): Promise<BgosMessageEnvelope[]> {
     const r = await this.http.get(`chats/${chatId}/messages`, {
-      params: { userId },
+      params: {
+        userId,
+        ...(cursor?.beforeId === undefined
+          ? {}
+          : { beforeId: cursor.beforeId }),
+        ...(cursor?.limit === undefined ? {} : { limit: cursor.limit }),
+      },
     });
     const rows = r.data?.messages;
     return Array.isArray(rows) ? (rows as BgosMessageEnvelope[]) : [];
@@ -667,7 +705,16 @@ export class BgosApi {
    */
   async setStatus(
     assistantId: number,
-    body: { statusText: string | null; statusEmoji?: string | null },
+    body: {
+      statusText: string | null;
+      statusEmoji?: string | null;
+      /**
+       * How long the line survives if nothing clears it, 1 to 1440 minutes.
+       * The server's own default is two hours, which is the wrong number for a
+       * plan waiting on an owner who may answer tomorrow.
+       */
+      ttlMinutes?: number;
+    },
   ): Promise<void> {
     await this.http.patch(
       `integrations/assistants/${assistantId}/status`,

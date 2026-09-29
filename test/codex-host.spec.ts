@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CodexHost,
+  OWNER_BLOCKING_TOOLS,
   appServerInput,
+  waitsForOwner,
   type RunTurnResult,
 } from "../src/codex-host.js";
 import { verifyModel } from "../src/setup/verify-model.js";
@@ -215,6 +217,287 @@ describe("native Codex host contracts", () => {
     expect(result.turnStartedAtMs).toBeUndefined();
     expect(result.turnFinishedAtMs).toBeUndefined();
   });
+  /**
+   * THE WATCHDOG IS A BUDGET FOR SILENCE, NOT FOR THE OWNER'S THINKING.
+   *
+   * An approval may now hold a turn for up to APPROVAL_HOLD_SECONDS (1800 s,
+   * interactions.ts), and this watchdog is armed for 30 minutes from TURN
+   * START, which is always earlier than the card. At the ceiling it therefore
+   * always won: the turn was interrupted, the request answered decline on the
+   * owner's behalf, and the longest wait the card advertises could never be
+   * served. So it pauses while a request is parked and resumes with what is
+   * left.
+   *
+   * MUTATION PROOFS, run by hand against this tree:
+   *  - calling `turn.callbacks.onRequest` in the host's `onRequest` without the
+   *    park/resume wrap turns the parked case red: the turn times out while the
+   *    owner is still holding it.
+   *  - making `resumeWatchdog` a no-op never re-arms the budget, so the parked
+   *    case fails on its own timeout instead of seeing the turn end.
+   *  - parking unconditionally, i.e. never resuming, turns the control case red
+   *    the same way: an ordinary turn would never time out again.
+   *  - parking on EVERY request instead of the owner-facing ones turns the tool
+   *    call case red: a call that never returns would wedge the turn forever.
+   *  - dropping ANY ONE entry from the park list (renaming it, typo'ing it,
+   *    deleting it) turns that entry's row of the table below red. The list was
+   *    trusted rather than enforced until then: only the approval method was
+   *    exercised, so the other three could be broken with the suite green.
+   *  - the `ask_user_input` row is the one that was WRONG rather than untested.
+   *    It is a HOAI tool, so it arrives as an ordinary `item/tool/call` and the
+   *    method-only gate let the watchdog run while the blocking carousel sat in
+   *    front of the owner for up to 600 s.
+   */
+  /** Holds one request open from the moment the turn is registered, which is
+   *  the earliest a card could be raised, and hands back the release. */
+  function parkRequest(method: string, extra: Record<string, unknown> = {}) {
+    let release: (value: unknown) => void = () => {};
+    const held = new Promise<unknown>((resolve) => (release = resolve));
+    const base = server.request.getMockImplementation()!;
+    const parked: { promise: Promise<unknown> | null } = { promise: null };
+    server.request.mockImplementation(async (name: string, p: any) => {
+      if (name === "turn/start" && !parked.promise)
+        parked.promise = server.onRequest(method, {
+          threadId: p.threadId,
+          ...extra,
+        });
+      return base(name, p);
+    });
+    const task = host.runDetached(
+      1,
+      "work",
+      { onRequest: () => held },
+      false,
+      50,
+    );
+    return { task, parked, release };
+  }
+
+  it.each([
+    ["item/commandExecution/requestApproval", {}],
+    ["item/fileChange/requestApproval", {}],
+    ["item/permissions/requestApproval", {}],
+    ["item/tool/requestUserInput", {}],
+    ["mcpServer/elicitation/request", {}],
+    ["item/tool/call", { tool: "ask_user_input" }],
+  ] as Array<[string, Record<string, unknown>]>)(
+    "does not spend the turn's watchdog while the owner holds %s %j",
+    async (method, extra) => {
+      const { task, parked, release } = parkRequest(method, extra);
+      let done = false;
+      void task.then(() => (done = true));
+      await vi.waitFor(() => expect(parked.promise).not.toBeNull());
+      // Five watchdogs' worth of wall clock with the owner still holding.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      expect(done).toBe(false);
+      release({ decision: "decline" });
+      await parked.promise;
+      // Paused, not cancelled: the remaining budget runs again once the owner is
+      // no longer the thing being waited on.
+      expect((await task).error).toMatch(/timed out/);
+    },
+  );
+  it.each([[{}], [{ tool: "send_message" }]])(
+    "still counts a tool call %j, because nobody is holding that one",
+    async (extra) => {
+      // The same never-answered request, with the one method that is the model
+      // talking to itself. A call that hangs is the silence this clock is for.
+      const { task, parked, release } = parkRequest("item/tool/call", extra);
+      await vi.waitFor(() => expect(parked.promise).not.toBeNull());
+      expect((await task).error).toMatch(/timed out/);
+      release({});
+      await parked.promise;
+    },
+  );
+  it("still spends the watchdog on a turn with nothing parked", async () => {
+    const result = await host.runDetached(1, "work", {}, false, 50);
+    expect(result.error).toMatch(/timed out/);
+  });
+  /**
+   * The park list names ONE blocking HOAI tool, and the runtime hands the gate
+   * a tool name and nothing else, so the pairing is checked against the source
+   * that actually blocks: every `case` in `HoaiTools.call` that delegates to
+   * `this.interactions` must be in OWNER_BLOCKING_TOOLS. Add a second blocking
+   * tool there and forget the park list, and this goes red rather than the
+   * owner's carousel silently spending the watchdog again.
+   */
+  /**
+   * THE PLAN THE MODEL PROPOSED.
+   *
+   * A live probe on 2026-09-23 against the vendored app server at 0.154.0
+   * (docs/learnings/codex-plan-mode-wire.md) showed the runtime lifting the
+   * model's `<proposed_plan>` block out of the message into its own item:
+   * `item/started` with an empty text, `item/plan/delta` while it streams, then
+   * `item/completed` with the whole markdown. `entryFromItem` returns null for
+   * a plan item, so before this branch existed the plan reached nobody and the
+   * owner got only the sentence that came before it.
+   */
+  it("hands over the plan a plan item carries, once, when it is finished", async () => {
+    const seen: Array<{ text: string; itemId: string; turnId: string | null }> = [];
+    const task = host.runTurn(1, "plan it", {
+      onPlanProposal: (signal) => {
+        seen.push(signal);
+      },
+    });
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    const plan = "## Add retry\n\n1. Add the helper";
+    // The empty opener is not a plan.
+    server.emit("notification", "item/started", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { id: "turn-1-plan", type: "plan", text: "" },
+    });
+    // Neither is a partial.
+    server.emit("notification", "item/plan/delta", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      itemId: "turn-1-plan",
+      delta: "## Add re",
+    });
+    server.emit("notification", "item/completed", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { id: "turn-1-plan", type: "plan", text: plan },
+    });
+    server.finish("thread-1", "I explored it. Here is the plan.");
+    const result = await task;
+    expect(seen).toEqual([
+      { text: plan, itemId: "turn-1-plan", turnId: "turn-1" },
+    ]);
+    // And the turn's own reply is what the runtime left in the message, which
+    // is exactly why the card has to carry the plan.
+    expect(result.replyText).toBe("I explored it. Here is the plan.");
+    expect(result.sawPlanProposal).toBe(true);
+  });
+
+  it("ignores a plan item's OPENER even when the runtime fills its text", async () => {
+    // The `!started` half of the guard, which nothing held: the existing case
+    // opens with an EMPTY text, so `item.text.trim()` carried it alone. A
+    // runtime that ever put the whole plan on `item/started` as well would
+    // post two cards for one plan, the second superseding the first, for no
+    // reason the owner could see.
+    const seen: string[] = [];
+    const task = host.runTurn(1, "plan it", {
+      onPlanProposal: (signal) => {
+        seen.push(signal.text);
+      },
+    });
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.emit("notification", "item/started", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { id: "turn-1-plan", type: "plan", text: "## Add retry\n\n1. Add the helper" },
+    });
+    server.finish("thread-1", "Here is the plan.");
+    const result = await task;
+    expect(seen).toEqual([]);
+    expect(result.sawPlanProposal).toBeUndefined();
+  });
+
+  it("says nothing about a plan on a turn that proposed none", async () => {
+    const seen: string[] = [];
+    const task = host.runTurn(1, "just answer", {
+      onPlanProposal: (signal) => {
+        seen.push(signal.text);
+      },
+    });
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.finish("thread-1", "No plan needed.");
+    const result = await task;
+    expect(seen).toEqual([]);
+    expect(result.sawPlanProposal).toBeUndefined();
+  });
+
+  it("never draws a plan item as an activity row", async () => {
+    const rows: string[] = [];
+    const task = host.runTurn(1, "plan it", {
+      onTool: (card) => {
+        rows.push(card.name);
+      },
+    });
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.emit("notification", "item/completed", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { id: "turn-1-plan", type: "plan", text: "## A plan\n\n1. Do it" },
+    });
+    server.finish("thread-1", "done");
+    await task;
+    expect(rows).toEqual([]);
+  });
+
+  /**
+   * `propose_plan` RETURNS AT ONCE, so it must stay off the park list.
+   *
+   * The plan wait has no end by design: the owner's tap arrives as a click and
+   * starts the next turn. A `propose_plan` on this list would park the turn's
+   * 30 minute budget on an answer that may come tomorrow, and the comment above
+   * `execute` is explicit that the budget is for the model's silence and
+   * nothing else.
+   */
+  it("names the chats it has stored in plan mode, and only those", () => {
+    // The mode is per chat and persisted, so a restart has to be able to
+    // report what it came back holding. The STORE is the truth, not the
+    // running threads: a chat with no thread yet still has a mode.
+    writeFileSync(
+      join(home, "session-settings.json"),
+      JSON.stringify({
+        "20": { mode: "plan", model: "one" },
+        "21": { mode: "default", model: "one" },
+        "22": { model: "one" },
+        "23": { mode: "plan" },
+        bogus: { mode: "plan" },
+      }),
+    );
+    const fresh = new CodexHost({
+      auth: { ok: true, mode: "chatgpt", label: "test" },
+      workdir: home,
+      server: new Server() as any,
+    });
+    try {
+      expect(fresh.planModeChats().sort((a, b) => a - b)).toEqual([20, 23]);
+    } finally {
+      fresh.close();
+    }
+  });
+
+  it("keeps propose_plan off the park list, because nothing waits on it", () => {
+    expect(OWNER_BLOCKING_TOOLS.has("propose_plan")).toBe(false);
+    expect(waitsForOwner("item/tool/call", { tool: "propose_plan" })).toBe(false);
+  });
+
+  it("keeps OWNER_BLOCKING_TOOLS equal to the tools that block on a person", () => {
+    const source = readFileSync(
+      new URL("../src/hoai-tools.ts", import.meta.url),
+      "utf8",
+    );
+    const body = source.slice(source.indexOf("  async call("));
+    expect(body.length).toBeGreaterThan(0);
+    const blocking = new Set<string>();
+    let current: string | null = null;
+    for (const line of body.split("\n")) {
+      const label = /^\s*case "([a-z0-9_]+)":/.exec(line);
+      if (label) current = label[1];
+      if (line.includes("this.interactions.") && current) blocking.add(current);
+    }
+    expect([...blocking].sort()).toEqual([...OWNER_BLOCKING_TOOLS].sort());
+  });
+  it.each([
+    ["item/commandExecution/requestApproval", {}, true],
+    ["item/fileChange/requestApproval", {}, true],
+    ["item/permissions/requestApproval", {}, true],
+    ["item/tool/requestUserInput", {}, true],
+    ["mcpServer/elicitation/request", {}, true],
+    ["item/tool/call", { tool: "ask_user_input" }, true],
+    ["item/tool/call", { tool: "send_message" }, false],
+    ["item/tool/call", {}, false],
+    ["item/tool/call", { tool: 7 }, false],
+    ["turn/started", {}, false],
+  ] as Array<[string, Record<string, unknown>, boolean]>)(
+    "waitsForOwner(%s, %j) is %s",
+    (method, params, expected) => {
+      expect(waitsForOwner(method, params)).toBe(expected);
+    },
+  );
   it("upgrades a legacy thread with tools without deleting its history", async () => {
     host.close();
     writeFileSync(

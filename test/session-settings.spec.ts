@@ -129,6 +129,103 @@ describe("durable native settings", () => {
       sandboxPolicy: { type: "readOnly" },
     });
   });
+  /**
+   * PLAN MODE IS TWO SETTINGS, and only one of them refuses a write.
+   *
+   * The live probe of 2026-09-23 ran `exec_command` and wrote a file with
+   * `collaborationMode: { mode: "plan" }` on the thread and on the turn, with
+   * no approval raised, because the mode rewrites `developer_instructions` and
+   * leaves `sandboxPolicy` alone. So `/plan` sets the read only sandbox too,
+   * and `enforced` is measured off what was actually stored.
+   */
+  it("sets the sandbox with the mode, and gives the access back", async () => {
+    await host.updateSettings(10, { model: "one" });
+    expect(await host.setPlanMode(10, true)).toEqual({ enforced: true });
+    const planning = await host.sessionSettings(10);
+    expect(planning.mode).toBe("plan");
+    expect(planning.permission).toBe("read-only");
+    expect(nativeSettings(planning)).toMatchObject({
+      sandboxPolicy: { type: "readOnly" },
+      collaborationMode: { mode: "plan" },
+    });
+    expect(host.planWaitEnforcedIn(10)).toBe(true);
+
+    expect(await host.setPlanMode(10, false)).toEqual({ enforced: false });
+    const coding = await host.sessionSettings(10);
+    expect(coding.mode).toBe("default");
+    expect(coding.permission).toBe("workspace");
+    expect(coding.permissionBeforePlan).toBeUndefined();
+    expect(host.planWaitEnforcedIn(10)).toBe(false);
+  });
+
+  it("carries the lock, and the memory, across a daemon restart", async () => {
+    // Chat 10 was narrowed by the owner; chat 11 is an ordinary workspace
+    // chat. Both go into plan mode, then the daemon dies mid plan.
+    await host.updateSettings(10, { model: "one", permission: "read-only" });
+    await host.updateSettings(11, { model: "one" });
+    await host.setPlanMode(10, true);
+    await host.setPlanMode(11, true);
+    const restarted = new CodexHost({
+      auth: { ok: true, mode: "chatgpt", label: "test" },
+      workdir: home,
+      server: new Server() as any,
+    });
+    try {
+      expect(restarted.planModeChats().sort()).toEqual([10, 11]);
+      // Reported as real locks, because they still are: both halves came off
+      // disk together.
+      expect(restarted.planWaitEnforcedIn(10)).toBe(true);
+      expect(restarted.planWaitEnforcedIn(11)).toBe(true);
+      await restarted.setPlanMode(10, false);
+      await restarted.setPlanMode(11, false);
+      // The owner's narrowing survives Go ahead.
+      expect((await restarted.sessionSettings(10)).permission).toBe("read-only");
+      // And the ordinary chat gets its workspace back. WITHOUT THE MEMORY ON
+      // DISK this is where it stays read only for ever: the only permission a
+      // restarted daemon can see is the one plan mode itself wrote.
+      expect((await restarted.sessionSettings(11)).permission).toBe("workspace");
+    } finally {
+      restarted.close();
+    }
+  });
+
+  it("keeps plan mode when the runtime refuses the sandbox, and says it is not enforced", async () => {
+    // A plan mode with no lock is worse than no plan mode only if we LIE about
+    // it. `updateSettings` rolls the whole patch back and throws, so the pair
+    // is retried as the mode alone and the honest false goes to the app.
+    writeFileSync(
+      join(home, "threads.json"),
+      JSON.stringify({ 10: "persisted" }),
+    );
+    host = new CodexHost({
+      auth: { ok: true, mode: "chatgpt", label: "test" },
+      workdir: home,
+      server: server as any,
+    });
+    await host.updateSettings(10, { model: "one" });
+    let seen = 0;
+    server.request.mockImplementation(async (method: string, p: any) => {
+      if (method === "model/list") return { data: models };
+      if (method === "thread/start") return { thread: { id: "thread-new" } };
+      if (method === "thread/resume") return { thread: { id: p.threadId } };
+      if (method === "thread/settings/update") {
+        seen += 1;
+        // Refuse the READ ONLY sandbox specifically, which is the half the
+        // pair adds. The retry still carries the chat's existing workspace
+        // sandbox and is taken.
+        if (p.sandboxPolicy?.type === "readOnly")
+          throw new Error("sandbox refused");
+      }
+      return {};
+    });
+    expect(await host.setPlanMode(10, true)).toEqual({ enforced: false });
+    expect(seen).toBe(2);
+    const settings = await host.sessionSettings(10);
+    expect(settings.mode).toBe("plan");
+    expect(settings.permission).toBe("workspace");
+    expect(host.planWaitEnforcedIn(10)).toBe(false);
+  });
+
   it("never lets /resume reach another HOAI chat's native history", async () => {
     await expect(host.resumeSavedThread(10, "foreign")).rejects.toThrow(
       "does not belong",
@@ -159,5 +256,74 @@ describe("durable native settings", () => {
         createdAt: 1789074000,
       }),
     ).toMatch(/^Conversation · /);
+  });
+});
+
+describe("the chats this daemon has left in plan mode", () => {
+  /**
+   * Codex's mode is per chat and persisted, so a daemon that restarts comes
+   * back with chats still in plan mode and an app drawing no chip for any of
+   * them. The store had no way to enumerate itself, which is why it could not
+   * be reported at connect.
+   */
+  let home: string;
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "hoai-plan-store-"));
+  });
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("lists every chat it has a setting for, cleaned", () => {
+    const file = join(home, "settings.json");
+    const store = new SessionSettingsStore(file);
+    store.set(20, { mode: "plan", model: "one" });
+    store.set(21, { mode: "default", model: "one" });
+    store.set(22, { model: "one" });
+    expect(new SessionSettingsStore(file).entries().sort()).toEqual([
+      [20, { mode: "plan", model: "one" }],
+      [21, { mode: "default", model: "one" }],
+      [22, { model: "one" }],
+    ]);
+  });
+
+  it("keeps the permission plan mode is holding for the owner", () => {
+    // THE MEMORY SURVIVES A RESTART, which is the reason it is a stored field
+    // and not a Map in the daemon. A daemon that stops mid plan and comes back
+    // has to know what to hand over on Go ahead; without this, the restore
+    // would be a hardcoded "workspace" that widens a chat the owner narrowed.
+    const file = join(home, "settings.json");
+    const store = new SessionSettingsStore(file);
+    store.set(20, { mode: "plan", permission: "read-only", permissionBeforePlan: "workspace" });
+    expect(new SessionSettingsStore(file).get(20)).toEqual({
+      mode: "plan",
+      permission: "read-only",
+      permissionBeforePlan: "workspace",
+    });
+    // Whitelisted like the rest: a value this store does not know is dropped
+    // rather than written back out.
+    store.set(21, { permissionBeforePlan: "sudo" } as never);
+    expect(new SessionSettingsStore(file).get(21)).toEqual({});
+  });
+
+  it("never sends the remembered permission to the runtime", () => {
+    // It is the daemon's own bookkeeping. `thread/settings/update` would not
+    // know what to do with it, and a settings update the runtime rejects rolls
+    // the whole patch back.
+    expect(
+      nativeSettings({
+        model: "one",
+        permission: "read-only",
+        permissionBeforePlan: "workspace",
+      }),
+    ).not.toHaveProperty("permissionBeforePlan");
+  });
+
+  it("gives back a copy, so a caller cannot edit the store through it", () => {
+    const store = new SessionSettingsStore(join(home, "settings.json"));
+    store.set(20, { mode: "plan" });
+    const entry = store.entries()[0]![1];
+    entry.mode = "default";
+    expect(store.get(20).mode).toBe("plan");
   });
 });
