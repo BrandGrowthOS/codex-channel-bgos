@@ -113,6 +113,30 @@ export { SESSIONS_LIBRARY };
  */
 export const CHANGES_RPC = "changes_rpc";
 
+/**
+ * This daemon REPORTS each chat's model and reasoning effort as its runtime
+ * really runs them, and its own `/model` changes them between turns from the
+ * account's own list. Declared from 0.18.0 (P5 stage 7, C-26).
+ *
+ * The promise to the person holding the phone: the quiet row under a Codex
+ * chat's message box shows what the runtime is running in THAT chat, never a
+ * value asked for and not yet applied. The reports go through the per chat
+ * session-settings rail (`BgosApi.reportSessionSettings`), from every change
+ * that lands, the runtime's own `thread/settings/updated` and `model/rerouted`,
+ * the thread's start and resume answers, and a sweep of the stored chats at
+ * connect. A tap on the row sends the ordinary `/model`, whose question lists
+ * the account's own models and then that model's own efforts, and a change is
+ * refused while a turn is running, which is why the row says "changes apply
+ * between turns".
+ *
+ * The backend reads this token and nothing else to offer the owner's "Show
+ * model and effort" switch; the switch itself is app side and this daemon
+ * never reads it (test/agent-activity.spec.ts). The name is the backend's own
+ * `SESSION_MODEL_CONTROL` and is pinned by one hash in both repos
+ * (SESSION_SETTINGS_RAIL_SHA256, test/session-rail-contract.spec.ts).
+ */
+export const SESSION_MODEL_CONTROL = "session_model_control";
+
 export const DECLARED_CAPABILITIES: readonly string[] = Object.freeze([
   MISSION_EVENTS,
   MISSION_GOAL_LOOP,
@@ -121,4 +145,5 @@ export const DECLARED_CAPABILITIES: readonly string[] = Object.freeze([
   STOP_PAUSES_MISSION,
   SESSIONS_LIBRARY,
   CHANGES_RPC,
+  SESSION_MODEL_CONTROL,
 ]);

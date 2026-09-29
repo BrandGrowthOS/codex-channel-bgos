@@ -18,6 +18,7 @@ import {
   CHANGES_RESULT_TIMEOUT_MS,
 } from "./changes-handler.js";
 import type { ChangesResultBody } from "./git-changes.js";
+import { reportBody, type SessionReport } from "./session-report.js";
 
 const SKILLS_RPC_POST_TIMEOUT_MS = 3_000;
 
@@ -445,6 +446,32 @@ export class BgosApi {
       `integrations/assistants/${assistantId}/chats/${chatId}/session-mode`,
       body,
     );
+  }
+
+  /**
+   * Report the model and reasoning effort this chat's runtime is REALLY
+   * running (P5 stage 7, C-26), so the app can draw the quiet row under the
+   * message box. A report, never a command: nothing on HOAI's side can
+   * change the value, and the row moves only when one of these lands.
+   *
+   * The ONE place the route is built. Its method, path and body order are a
+   * contract with the BGOS backend, pinned by one sha256 in both repos
+   * (SESSION_SETTINGS_RAIL_SHA256, test/session-rail-contract.spec.ts). The
+   * body is built from the five named fields only, in the rail's order.
+   *
+   * Additive route: an older backend answers 404, and the adapter swallows
+   * every failure, because a row the app cannot draw never costs a turn.
+   */
+  async reportSessionSettings(
+    assistantId: number,
+    chatId: number,
+    report: SessionReport,
+  ): Promise<void> {
+    await this.http.request({
+      method: "PATCH",
+      url: `integrations/assistants/${assistantId}/chats/${chatId}/session-settings`,
+      data: reportBody(report),
+    });
   }
 
   async mergeCommands(

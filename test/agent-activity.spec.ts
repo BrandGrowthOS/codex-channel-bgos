@@ -876,6 +876,21 @@ describe("the plugin never reads the owner's switch", () => {
     expect(sourceFiles("src").length).toBeGreaterThan(40);
   });
 
+  it("reads the owner's Show model and effort switch nowhere in src/", () => {
+    // P5 stage 7 (C-26, S10). The daemon reports each chat's model and effort
+    // ALWAYS, and the app alone decides whether to draw the row: the switch
+    // (assistants.show_model_effort) and the derived canShowModelEffort are
+    // app side. A daemon that read either would go quiet exactly when the
+    // owner turns the row on, because nothing it held would be current.
+    const offenders = sourceFiles("src").filter((file) =>
+      /showModelEffort|show_model_effort|canShowModelEffort/.test(
+        readFileSync(file, "utf8"),
+      ),
+    );
+    expect(offenders).toEqual([]);
+    expect(sourceFiles("src").length).toBeGreaterThan(40);
+  });
+
   it("reads the owner's approval wait nowhere in src/", () => {
     // The same rule, on the setting that decides how long a request stays
     // answerable. The daemon OFFERS the longest it can hold its own side open

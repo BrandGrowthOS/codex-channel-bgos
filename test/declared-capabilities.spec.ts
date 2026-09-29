@@ -20,6 +20,7 @@ import {
   MISSION_GOAL_LOOP,
   MISSION_PAUSE,
   REQUEST_REASON,
+  SESSION_MODEL_CONTROL,
 } from "../src/declared-capabilities.js";
 import {
   SESSIONS_LIBRARY,
@@ -86,6 +87,17 @@ describe("DECLARED_CAPABILITIES", () => {
     expect(CHANGES_RPC).toMatch(CAPABILITY_TOKEN_REGEX);
     expect(DECLARED_CAPABILITIES.length).toBeLessThanOrEqual(32);
     expect(Object.isFrozen(DECLARED_CAPABILITIES)).toBe(true);
+  });
+
+  it("declares session_model_control, because this daemon reports each chat's model and effort", () => {
+    // P5 stage 7 (C-26). The token lights the owner's "Show the model and
+    // effort" switch and the row under a Codex chat's message box. It is
+    // honest only because this daemon REPORTS what the runtime runs (the
+    // session-settings rail) and its own /model changes it between turns;
+    // the name is the backend's own constant (session-settings-rail.ts),
+    // pinned by one hash in both repos (test/session-rail-contract.spec.ts).
+    expect(SESSION_MODEL_CONTROL).toBe("session_model_control");
+    expect(DECLARED_CAPABILITIES).toContain(SESSION_MODEL_CONTROL);
   });
 
   it("is frozen, so one constant is the single source", () => {
