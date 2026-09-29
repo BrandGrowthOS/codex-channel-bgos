@@ -134,13 +134,13 @@ interface Pending {
  * release (the request card), which merged ahead of this one and brought its
  * own HELD-FROM-LATEST line and its own reason (the paragraph above); the
  * merge order is #12, #14, #15, P2 stage 5 (0.13.0), then 0.14.0. Retire the
- * EIGHT lines one at a time, in this order: stage 1 backend live, then 0.10.1;
+ * SEVEN lines one at a time, in this order: stage 1 backend live, then 0.10.1;
  * stage 3 backend live, then 0.11.0; stage 4 backend live, then 0.12.0; stage
  * 5 backend live, then 0.13.0; then 0.14.0, only after 0.13.0 is on latest,
  * never before or in the same step, and only after that live image turn. Then
  * 0.15.0, only after 0.14.0 is on latest, never before or in the same step.
- * Then 0.17.0, once BGOS #1705 and #1704 (changes_rpc) are deployed. Then
- * 0.18.0, only after 0.15.0 is on latest, never before or in the same step.
+ * Then 0.18.0, only after 0.15.0 is on latest, never before or in the same
+ * step.
  *
  * 0.15.0 adds NO hold of its own either: a steer with nothing to steer runs
  * as an ordinary message and a landed steer posts no reply, which every
@@ -151,13 +151,6 @@ interface Pending {
  * to that older version. The HOAI app steers only daemons at 0.15.0 or later
  * (STEER_FALLBACK_SINCE in native-commands.ts), so until it is promoted Send
  * now on a Codex agent stays a plain send.
- *
- * 0.17.0 HAS a hold of its own (Data's ruling on #24). It is the Changes
- * panel (P7, #21): it answers `changes_rpc` with read only Git and declares
- * the `changes_rpc` token, and the live BGOS build has no backend for it at
- * all, because that backend is BGOS #1705 and #1704, still open. So it waits
- * for BGOS #1705 and #1704 (changes_rpc) to be deployed. 0.18.0 carries this
- * code on the train, so it carries this hold too.
  *
  * 0.18.0 adds NO hold of its own either: it reports each chat's model and
  * effort to HOAI (session-report.ts) and declares session_model_control, and
@@ -183,7 +176,6 @@ interface Pending {
  * HELD-FROM-LATEST: 0.13.0
  * HELD-FROM-LATEST: 0.14.0
  * HELD-FROM-LATEST: 0.15.0
- * HELD-FROM-LATEST: 0.17.0
  * HELD-FROM-LATEST: 0.18.0
  */
 export const APPROVAL_HOLD_SECONDS = 1800;
