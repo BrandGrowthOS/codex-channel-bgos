@@ -8,7 +8,43 @@ import type { DispatchArgs } from "./inbound-handler.js";
 import type { Interactions, InteractionContext } from "./interactions.js";
 import { planWaitEnforced } from "./plan-mode.js";
 import type { SessionSettings } from "./session-settings.js";
-import type { RpcObject } from "./app-server.js";
+import { RequestTimeoutError, type RpcObject } from "./app-server.js";
+
+/**
+ * The native command a correction rides, typed or sent by the HOAI app's
+ * follow ups tray (its Send now on a Codex agent, P5 stage 5, C-27). The
+ * catalog registers it under this name and the router answers to it, and the
+ * app offers a steer only to an agent whose catalog lists it.
+ */
+export const STEER_COMMAND_NAME = "steer";
+/**
+ * The first release whose `/steer` with nothing to steer runs the text as a
+ * normal message instead of answering an error and dropping it, and whose
+ * landed steer posts no reply. The app steers only daemons at or past it (its
+ * `CODEX_STEER_FALLBACK_SINCE`); below it, Send now is a plain send. A test
+ * holds package.json at or past this floor.
+ */
+export const STEER_FALLBACK_SINCE = "0.15.0";
+/**
+ * THE CROSS REPO PIN (P5 stage 5, spec section 8). The sha256 of the
+ * canonical steer contract `steer;slash_command;/steer {text};0.15.0`: the
+ * command name, the message type it arrives under, the text shape the router
+ * parses and the floor above. The HOAI app carries the SAME constant in
+ * `frontend/expo-app/src/components/chat/followUpTrayModel.ts`; each side
+ * rebuilds the string from its OWN values in a test (here
+ * test/steer-contract.spec.ts) and compares this hash, so a one sided change
+ * that also updates its own word for word pin still turns the hash pin red.
+ * Change the contract only with the app's PR, and move the hash in both.
+ */
+export const TRAY_STEER_CONTRACT_SHA256 =
+  "04ae44be5ff657f805b13f44cb7919997328387e9caddec8fc2cc422477f7226";
+/**
+ * The one line a steer can still produce: Codex never answered it. It may
+ * have landed, so it is neither run as a message nor sent again (never both),
+ * and the owner is told plainly what to do if it did not.
+ */
+export const STEER_UNCONFIRMED_TEXT =
+  "Codex did not confirm the correction in time, so it was not sent a second time. If Codex does not act on it, send it again as a normal message.";
 
 export const NATIVE_COMMAND_DESCRIPTIONS = [
   ["model", "Choose this chat's Codex model and reasoning level"],
@@ -26,7 +62,7 @@ export const NATIVE_COMMAND_DESCRIPTIONS = [
   ["resume", "Resume a saved Codex conversation from this HOAI chat"],
   ["fork", "Continue from a copy of this chat's Codex conversation"],
   ["ps", "Show whether this chat has an active Codex response"],
-  ["steer", "Send a correction to this chat's running response"],
+  [STEER_COMMAND_NAME, "Send a correction to this chat's running response"],
   ["goal", "Set a condition Codex works toward until it is met"],
   ["help", "Show supported Codex controls and how to use them"],
 ] as const;
@@ -394,6 +430,45 @@ export class NativeCommands {
     );
   }
 
+  /**
+   * `/steer <text>`: into the running turn, or else as a normal message.
+   *
+   * A steer that LANDS posts nothing. It used to answer "Correction delivered
+   * to the current response." as an ordinary reply, and HOAI reads any
+   * ordinary reply as the agent being done, so confirming a correction INTO a
+   * running turn marked that turn finished: the working line and Stop went
+   * away for the rest of it. The owner's own `/steer` message and its
+   * delivered tick are the receipt, and the turn's own reply answers it.
+   *
+   * A steer with NOTHING TO STEER runs the text once as a normal message
+   * through `deps.run`, which is the chat's own queue (it waits behind a turn
+   * still publishing, exactly as a message sent then would). That covers no
+   * turn yet (the host has no turn id: the message still waits in the queue,
+   * or `turn/start` has not answered), a turn that ended as the steer went
+   * out (the runtime refuses the id it expected), and a review or compaction
+   * (the runtime refuses to steer those). It used to answer "No response is
+   * ready for a correction" and drop the words, and the HOAI tray's Send now
+   * is pressed exactly near a turn's end, when that race is likeliest.
+   *
+   * Never both, and never an error line for a steer that could be run. The
+   * one exception is a steer Codex never ANSWERED: it may have landed, so
+   * running it as well could deliver it twice. That one is not run, and one
+   * plain line says what to do.
+   *
+   * Only this router's `/steer` falls back. `MissionControlLane` calls
+   * `host.steer` itself and relies on the throw to keep its bulletin queued.
+   */
+  private async steerOrRun(args: DispatchArgs, text: string): Promise<void> {
+    try {
+      await this.deps.host.steer(args.chatId, text);
+      return;
+    } catch (error) {
+      if (error instanceof RequestTimeoutError)
+        throw new Error(STEER_UNCONFIRMED_TEXT);
+    }
+    await this.deps.run(args, text);
+  }
+
   private async runCommand(
     args: DispatchArgs,
     context: InteractionContext,
@@ -429,13 +504,15 @@ export class NativeCommands {
       );
       return;
     }
-    if (name === "steer") {
-      if (!text)
+    if (name === STEER_COMMAND_NAME) {
+      // A slash command frame's args arrive as sent; the text parser trims.
+      // Both reach the same words here.
+      const correction = text.trim();
+      if (!correction)
         throw new Error(
           "Use /steer followed by your correction while Codex is responding.",
         );
-      await host.steer(args.chatId, text);
-      await say("Correction delivered to the current response.");
+      await this.steerOrRun(args, correction);
       return;
     }
     if (name === "goal") {

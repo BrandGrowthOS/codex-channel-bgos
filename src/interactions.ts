@@ -134,10 +134,21 @@ interface Pending {
  * release (the request card), which merged ahead of this one and brought its
  * own HELD-FROM-LATEST line and its own reason (the paragraph above); the
  * merge order is #12, #14, #15, P2 stage 5 (0.13.0), then 0.14.0. Retire the
- * FIVE lines one at a time, in this order: stage 1 backend live, then 0.10.1;
+ * SIX lines one at a time, in this order: stage 1 backend live, then 0.10.1;
  * stage 3 backend live, then 0.11.0; stage 4 backend live, then 0.12.0; stage
  * 5 backend live, then 0.13.0; then 0.14.0, only after 0.13.0 is on latest,
- * never before or in the same step, and only after that live image turn.
+ * never before or in the same step, and only after that live image turn. Then
+ * 0.15.0, only after 0.14.0 is on latest, never before or in the same step.
+ *
+ * 0.15.0 adds NO hold of its own either: a steer with nothing to steer runs
+ * as an ordinary message and a landed steer posts no reply, which every
+ * backend already accepts (P5 stage 5, the steer fallback, stacked on
+ * 0.14.0). It is held only because it carries every hold before it, 0.14.0's
+ * included, so it is promoted only after 0.14.0 is on latest, never before or
+ * in the same step: promoting an older version after 0.15.0 moves latest back
+ * to that older version. The HOAI app steers only daemons at 0.15.0 or later
+ * (STEER_FALLBACK_SINCE in native-commands.ts), so until it is promoted Send
+ * now on a Codex agent stays a plain send.
  *
  * The lines below are the machine readable half of that hold, and the publish
  * workflow's HELD_FROM_LATEST list must agree with them exactly
@@ -149,6 +160,7 @@ interface Pending {
  * HELD-FROM-LATEST: 0.12.0
  * HELD-FROM-LATEST: 0.13.0
  * HELD-FROM-LATEST: 0.14.0
+ * HELD-FROM-LATEST: 0.15.0
  */
 export const APPROVAL_HOLD_SECONDS = 1800;
 

@@ -1,11 +1,13 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   NativeCommands,
+  STEER_UNCONFIRMED_TEXT,
   parseNativeCommand,
   normalizeNativeCommand,
   reviewTarget,
   usageSummary,
 } from "../src/native-commands.js";
+import { RequestTimeoutError } from "../src/app-server.js";
 
 const models = ["one", "two"].map((model, i) => ({
   model,
@@ -520,5 +522,163 @@ describe("the goal control", () => {
     const s = setup();
     await s.router.handle(s.args("help"));
     expect(String(s.sendText.mock.calls[0]![0])).toContain("`/goal`");
+  });
+});
+
+/**
+ * `/steer`, and the HOAI tray's Send now that rides it (P5 stage 5, C-27,
+ * Build C, 0.15.0).
+ *
+ * Before 0.15.0 a steer that landed answered "Correction delivered to the
+ * current response." as an ordinary reply. HOAI reads any ordinary reply as
+ * the agent being done, so confirming a correction INTO a running turn marked
+ * that turn finished: the working line and Stop went away for the rest of it.
+ * And a steer with nothing to steer (no turn running yet, the turn had just
+ * ended, a review or a compaction) answered "No response is ready for a
+ * correction" and dropped the owner's words. Send now is pressed exactly near
+ * a turn's end, which is when that race is likeliest.
+ *
+ * Now a landed steer posts nothing (the owner's own message and its delivered
+ * tick are the receipt, and the turn's own reply answers it). A steer with
+ * nothing to steer runs the text ONCE as a normal message through the per
+ * chat queue (`deps.run`), never both and never an error line. A steer Codex
+ * did not answer in time is not run a second time, because it may have
+ * landed, and one line says so.
+ */
+describe("a steer with nothing to steer runs as a normal message, and a landed steer posts no reply", () => {
+  const NO_TURN =
+    "No response is ready for a correction. Send a normal message or wait for Codex to start.";
+
+  it("steers a running turn once and posts nothing", async () => {
+    const s = setup();
+    await s.router.handle(s.args("steer", "Keep the public API"));
+    expect(s.host.steer).toHaveBeenCalledTimes(1);
+    expect(s.host.steer).toHaveBeenCalledWith(20, "Keep the public API");
+    expect(s.run).not.toHaveBeenCalled();
+    expect(s.sendText).not.toHaveBeenCalled();
+  });
+
+  it("with no running turn, runs the text once as a normal message and posts nothing", async () => {
+    const s = setup();
+    s.host.steer.mockRejectedValueOnce(new Error(NO_TURN) as never);
+    await s.router.handle(s.args("steer", "Keep the public API"));
+    expect(s.host.steer).toHaveBeenCalledTimes(1);
+    expect(s.run).toHaveBeenCalledTimes(1);
+    expect(s.run).toHaveBeenCalledWith(
+      expect.objectContaining({ assistantId: 10, chatId: 20 }),
+      "Keep the public API",
+    );
+    expect(s.sendText).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["the turn it named has just ended", "expected turn id turn-1 does not match the active turn"],
+    ["no turn is active in the runtime", "no active turn to steer"],
+    ["a review turn cannot be steered", "activeTurnNotSteerable: review"],
+    ["a compaction cannot be steered", "activeTurnNotSteerable: compact"],
+  ])(
+    "runs it once when the runtime refuses the steer (%s)",
+    async (_why, refusal) => {
+      const s = setup();
+      s.host.steer.mockRejectedValueOnce(new Error(refusal) as never);
+      await s.router.handle(s.args("steer", "Use the staging database"));
+      expect(s.host.steer).toHaveBeenCalledTimes(1);
+      expect(s.run).toHaveBeenCalledTimes(1);
+      expect(s.run.mock.calls[0]![1]).toBe("Use the staging database");
+      expect(s.sendText).not.toHaveBeenCalled();
+    },
+  );
+
+  it("never both: a landed steer is not also run, and a refused one is not steered twice", async () => {
+    const landed = setup();
+    await landed.router.handle(landed.args("steer", "one"));
+    expect(landed.host.steer.mock.calls.length + landed.run.mock.calls.length).toBe(1);
+    const refused = setup();
+    refused.host.steer.mockRejectedValueOnce(new Error(NO_TURN) as never);
+    await refused.router.handle(refused.args("steer", "two"));
+    expect(refused.host.steer).toHaveBeenCalledTimes(1);
+    expect(refused.run).toHaveBeenCalledTimes(1);
+  });
+
+  it("a steer Codex did not answer in time is not run again, and one line says so", async () => {
+    const s = setup();
+    s.host.steer.mockRejectedValueOnce(
+      new RequestTimeoutError("Codex turn/steer timed out.") as never,
+    );
+    await s.router.handle(s.args("steer", "Keep the public API"));
+    expect(s.host.steer).toHaveBeenCalledTimes(1);
+    expect(s.run).not.toHaveBeenCalled();
+    expect(s.sendText).toHaveBeenCalledTimes(1);
+    expect(s.sendText).toHaveBeenCalledWith(STEER_UNCONFIRMED_TEXT);
+    expect(STEER_UNCONFIRMED_TEXT).toBe(
+      "Codex did not confirm the correction in time, so it was not sent a second time. If Codex does not act on it, send it again as a normal message.",
+    );
+  });
+
+  it.each(["", "   ", "\n\t"])(
+    "an empty /steer (%j) still answers its usage line, and neither steers nor runs",
+    async (blank) => {
+      const s = setup();
+      await s.router.handle(s.args("steer", blank));
+      expect(s.host.steer).not.toHaveBeenCalled();
+      expect(s.run).not.toHaveBeenCalled();
+      expect(s.sendText).toHaveBeenCalledWith(
+        "Use /steer followed by your correction while Codex is responding.",
+      );
+    },
+  );
+
+  it("steers and runs the correction without the blank edges a tagged frame keeps", async () => {
+    // A slash command frame's args arrive untrimmed (inbound-handler.ts reads
+    // commandArgs as sent); the text parser trims. Both reach the same words.
+    const landed = setup();
+    await landed.router.handle(landed.args("steer", "  Keep the public API \n"));
+    expect(landed.host.steer).toHaveBeenCalledWith(20, "Keep the public API");
+    const refused = setup();
+    refused.host.steer.mockRejectedValueOnce(new Error(NO_TURN) as never);
+    await refused.router.handle(refused.args("steer", "  Keep the public API \n"));
+    expect(refused.run.mock.calls[0]![1]).toBe("Keep the public API");
+  });
+
+  it.each([true, false])(
+    "a typed /steer behaves exactly like the app's Send now (a turn running: %s)",
+    async (running) => {
+      const typed = setup();
+      const tray = setup();
+      if (!running) {
+        typed.host.steer.mockRejectedValueOnce(new Error(NO_TURN) as never);
+        tray.host.steer.mockRejectedValueOnce(new Error(NO_TURN) as never);
+      }
+      // Typed: the owner's own words, read by the text parser.
+      const parsed = parseNativeCommand("/steer Keep the public API");
+      await typed.router.handle({
+        ...typed.args("steer"),
+        command: normalizeNativeCommand(parsed!),
+      });
+      // The tray: the slash command frame's name and args.
+      await tray.router.handle(tray.args("steer", "Keep the public API"));
+      expect(typed.host.steer.mock.calls).toEqual(tray.host.steer.mock.calls);
+      expect(typed.run.mock.calls.map((c) => c[1])).toEqual(
+        tray.run.mock.calls.map((c) => c[1]),
+      );
+      expect(typed.sendText.mock.calls).toEqual(tray.sendText.mock.calls);
+      expect(tray.sendText).not.toHaveBeenCalled();
+      // Not equal by both doing nothing: each tried the steer once, and ran
+      // the words only when there was nothing to steer.
+      expect(typed.host.steer).toHaveBeenCalledTimes(1);
+      expect(typed.run).toHaveBeenCalledTimes(running ? 0 : 1);
+    },
+  );
+
+  it("is refused for anyone but the owner, and then neither steers nor runs", async () => {
+    const s = setup();
+    await s.router.handle(
+      s.args("steer", "Keep the public API", { senderUserId: "guest" }),
+    );
+    expect(s.host.steer).not.toHaveBeenCalled();
+    expect(s.run).not.toHaveBeenCalled();
+    expect(String(s.sendText.mock.calls[0]![0])).toContain(
+      "Only this agent's owner",
+    );
   });
 });

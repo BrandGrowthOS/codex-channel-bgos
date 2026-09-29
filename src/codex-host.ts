@@ -1107,6 +1107,13 @@ export class CodexHost {
         turnId: turn.id,
       });
   }
+  /**
+   * Add `text` to the chat's running turn. Throws when there is no turn to
+   * steer or the runtime refuses, and callers decide what that means: the
+   * `/steer` router runs the text as a normal message instead
+   * (native-commands.ts, `steerOrRun`), and MissionControlLane keeps its
+   * bulletin queued for the next turn.
+   */
   async steer(chatId: number, text: string): Promise<void> {
     const threadId = this.map[String(chatId)];
     const turnId = this.active.get(threadId)?.id;

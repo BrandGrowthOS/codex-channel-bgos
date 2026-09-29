@@ -14,6 +14,10 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     send({ id: "reverse", method: "item/tool/call", params: m.params });
   }
   if (m.method === "crash") process.exit(3);
+  // P5 stage 5: the runtime answering a request with an error (a refusal),
+  // which is not the same thing as leaving it unanswered.
+  if (m.method === "refuse")
+    send({ id: m.id, error: { code: -32600, message: "no active turn to steer" } });
   // "never" intentionally leaves the request unanswered.
 
   // Round 7: lines longer than the client's 16 MiB line cap. `park` is
