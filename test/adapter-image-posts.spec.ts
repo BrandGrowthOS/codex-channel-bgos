@@ -1140,4 +1140,60 @@ describe("a goal turn follows the Stop picture rules", () => {
     expect(order.indexOf("row:shell")).toBeGreaterThan(image);
     expect(order.indexOf("approval card")).toBeGreaterThan(image);
   });
+
+  /**
+   * The chat's stop generation branch in an adopted goal turn's `deliver`
+   * (src/adapter.ts). Since P6 (#20) an owner Stop aborts the goal turn's own
+   * controller (stopKeepWorking, D35), and this branch runs only for a
+   * controller that was not aborted, so what still reaches it is a /new: it
+   * moves the chat's stop generation and resets the chat without touching the
+   * goal turn's controller. The turn the /new discarded stays silent, no reply and no red
+   * error; a picture it had finished still posts, after the fresh line, and
+   * the goal lane still counts the turn.
+   *
+   * MUTATION PROOF (Data's ruling on #24; the checker's probe, now here):
+   * disable that branch (`false &&` ahead of its condition) and this case
+   * goes red on its first expect, because the discarded turn's "Goal step
+   * done." posts as a reply.
+   */
+  it("posts no reply for a goal turn a /new discarded, and its picture after the fresh line", async () => {
+    const { adapter, reply, order } = goalFixture();
+    // What /new reads that the harness does not set.
+    adapter.missionLane.clearStopMarker = vi.fn(async () => {});
+    adapter.lastInput = new Map();
+    adapter.lastNativeOptions = new Map();
+    const adopted = adapter.adoptGoalTurn(20)!;
+    await adapter.codexDispatch({
+      chatId: 20,
+      assistantId: 10,
+      messageId: 7,
+      userId: "owner-1",
+      senderType: "user",
+      text: "/new",
+      command: { name: "new", args: "" },
+      replyHandle: reply,
+    });
+    // The runtime ends the discarded goal turn after the reset, finished and
+    // with no error: nothing but the stop generation says it was discarded.
+    await adopted.deliver(
+      done({
+        replyText: "Goal step done.",
+        finalAgentMessageText: "Goal step done.",
+        images: [picture()],
+      }),
+    );
+    await vi.waitFor(() => expect(adapter.pictureTails?.get(20)).toBeUndefined());
+    expect(order).not.toContain("text:Goal step done.");
+    expect(adapter.outbound.sendAgentError).not.toHaveBeenCalled();
+    expect(order).toEqual([
+      "text:Started a fresh conversation. This chat's Codex thread was reset.",
+      "goal finalize",
+      `image:Prompt: ${PROMPT}`,
+    ]);
+    expect(adapter.host.resetChat).toHaveBeenCalledWith(20);
+    expect(adapter.goalLane.noteTurnFinished).toHaveBeenCalledWith(20, {
+      text: "Goal step done.",
+      error: null,
+    });
+  });
 });
