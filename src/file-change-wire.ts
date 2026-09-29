@@ -79,8 +79,71 @@ export const DIFF_UNITS_TOTAL = 65_536;
  * under it rather than discovering it.
  */
 export const APPROVAL_META_BYTES_MAX = 98_304;
-/** Bytes left for the stage 1 fields (route, risk, request id, wait). */
-const META_RESERVE_BYTES = 1_024;
+/**
+ * UTF-16 units of `approvalMeta.reason`, the agent's own plain words for WHY
+ * it is asking, and of `approvalMeta.rule_text`, what an always answer would
+ * save. The backend's DTO REFUSES a longer string rather than clipping it, so
+ * the writer clips to these and this file counts what it clipped to.
+ *
+ * They live here, beside the column's byte cap, because the byte accounting
+ * below is the only thing in this repo that has to know both numbers at once;
+ * `interactions.ts` imports them for the clip and cannot export them back
+ * (this module is its dependency, not the other way round).
+ */
+export const REQUEST_REASON_MAX_UNITS = 280;
+export const REQUEST_RULE_TEXT_MAX_UNITS = 500;
+/**
+ * UTF-16 units of `approvalMeta.tool` on the card this file does NOT build:
+ * the command one, where `tool` is the literal argv the runtime would run and
+ * nothing else in the column is large.
+ *
+ * It lives here beside the column's byte cap because that cap is what decides
+ * it. Worst case a unit costs six bytes serialised, so 8,192 units is 49,152
+ * bytes, and with the two request strings at their own caps (4,712 bytes) and
+ * a kilobyte for the four small keys the command card's whole column stays
+ * around 55 KB against the server's 98,304. Long enough that no command a
+ * person reads is ever cut, short enough that a runaway one costs the owner an
+ * ellipsis rather than the whole card: the backend answers an oversized column
+ * with a 400, and the card is what is lost.
+ */
+export const COMMAND_TOOL_MAX_UNITS = 8_192;
+/**
+ * Bytes ONE UTF-16 unit can cost inside a serialised JSON string, worst case.
+ * Six, because a control character leaves `JSON.stringify` as the six byte
+ * escape `\u0001`; a three byte BMP character costs three and a surrogate PAIR
+ * costs four bytes for its two units, so neither reaches this.
+ */
+const JSON_STRING_BYTES_PER_UNIT = 6;
+/** `"reason":"",` and `"rule_text":"",`: the keys, quotes and separators. */
+const REQUEST_STRING_KEY_BYTES = 32;
+/**
+ * What the two request card strings can take out of the column between them.
+ *
+ * They do NOT ride a file change card today: a file change request carries no
+ * exec policy amendment, so no always tier and no rule, and its `reason`
+ * arrives as an explicit null. So be honest about who pays: this reserve is
+ * charged to the DIFF, on the one card kind that cannot carry either string,
+ * and it costs that card about 3.8 KB of patch. The command card, which is the
+ * only one that does carry them, is not weighed here at all; it is held under
+ * the column by `COMMAND_TOOL_MAX_UNITS` above, which is the only other large
+ * field it has.
+ *
+ * The reserve is kept anyway because it is this file's stand in for every
+ * `ApprovalMeta` field it does not weigh, and the ONE way that constant fails
+ * is a field being added to the interface and quietly eating the headroom: the
+ * daemon then posts a body the server answers with a 400 and the owner loses
+ * the whole card. A field that exists is a field that can ride, so it is
+ * counted from the day it exists rather than from the day it first does.
+ */
+const REQUEST_STRINGS_RESERVE_BYTES =
+  (REQUEST_REASON_MAX_UNITS + REQUEST_RULE_TEXT_MAX_UNITS) *
+    JSON_STRING_BYTES_PER_UNIT +
+  REQUEST_STRING_KEY_BYTES;
+/**
+ * Bytes left for every `approvalMeta` field this file does not weigh: stage
+ * 1's four (route, risk, request id, wait) and stage 5's two strings.
+ */
+const META_RESERVE_BYTES = 1_024 + REQUEST_STRINGS_RESERVE_BYTES;
 
 /** The one line a redacted private key block becomes. */
 const PRIVATE_KEY_BODY = "[private key removed]";
@@ -385,7 +448,11 @@ export interface FileChangeWire {
   tool: string;
 }
 
-/** The serialised size of what this card would put in the column, in bytes. */
+/**
+ * The serialised size of what this card would put in the column, in bytes:
+ * the three keys this file builds, plus the reserve standing in for the six it
+ * does not.
+ */
 function metaBytes(summary: ChangeSummary, diff: DiffWire | undefined, tool: string): number {
   try {
     return (

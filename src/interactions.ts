@@ -7,11 +7,19 @@ import type {
   InboundClickPayload,
 } from "./types.js";
 import type { RpcObject } from "./app-server.js";
-import { buildDiffForWire } from "./file-change-wire.js";
+import { clipWithEllipsis } from "./clip-text.js";
+import {
+  COMMAND_TOOL_MAX_UNITS,
+  REQUEST_REASON_MAX_UNITS,
+  REQUEST_RULE_TEXT_MAX_UNITS,
+  buildDiffForWire,
+} from "./file-change-wire.js";
 import {
   diskPendingApprovals,
   type PendingApprovalStore,
 } from "./pending-approvals-store.js";
+import { redactOutput } from "./redact-output.js";
+import { redactCommandLine } from "./redact-command.js";
 
 export interface InteractionContext {
   assistantId: number;
@@ -94,9 +102,24 @@ interface Pending {
  * `ApprovalMetaDto` strips a field it does not declare with a 201 and no
  * error: against a backend without the stage 4 DTO this daemon would mask and
  * cap a patch for nothing, the card would still read "Apply file changes",
- * and nothing anywhere would say why. Retire the THREE lines one at a time,
- * in this order: stage 1 backend live, then 0.10.1; stage 3 backend live,
- * then 0.11.0; stage 4 backend live, then 0.12.0.
+ * and nothing anywhere would say why.
+ *
+ * 0.13.0 INHERITS all three and its own reason is WORSE than theirs, which is
+ * the part a future releaser has to read before promoting the dist tag. Its
+ * request card sends `approvalMeta.reason`, the model's own words for why it
+ * is asking, and `approvalMeta.rule_text`, the sentence saying that an Always
+ * answer writes a permanent line into the owner's global Codex rules file.
+ * Against a backend whose `ApprovalMetaDto` declares neither, both are
+ * stripped with a 201 and no error, and the card does not merely stay as it
+ * was: on 0.12.0 the model's justification WAS the card's title (`text` was
+ * `params.reason ?? the generic sentence`, the fallback still on this method
+ * below), and here the title becomes `Run <command>` while that justification
+ * moves to the stripped `reason`. So against a pre stage 5 backend this
+ * release says LESS than the one before it: the sentence the owner used to
+ * read is gone and nothing replaces it. Retire the FOUR lines one
+ * at a time, in this order: stage 1 backend live, then 0.10.1; stage 3 backend
+ * live, then 0.11.0; stage 4 backend live, then 0.12.0; stage 5 backend live,
+ * then 0.13.0.
  *
  * The lines below are the machine readable half of that hold, and the publish
  * workflow's HELD_FROM_LATEST list must agree with them exactly
@@ -106,6 +129,7 @@ interface Pending {
  * HELD-FROM-LATEST: 0.10.1
  * HELD-FROM-LATEST: 0.11.0
  * HELD-FROM-LATEST: 0.12.0
+ * HELD-FROM-LATEST: 0.13.0
  */
 export const APPROVAL_HOLD_SECONDS = 1800;
 
@@ -145,6 +169,195 @@ export function storedWaitSeconds(created: unknown): number | null {
     seconds <= APPROVAL_HOLD_SECONDS
     ? seconds
     : null;
+}
+
+/**
+ * UTF-16 units of the command read back into a request card's TITLE.
+ *
+ * 120 because the title is one line under a name and above a mono panel that
+ * still carries the whole argv: past a line's worth the title stops being the
+ * ask and starts being the command a second time. ONE line is a promise
+ * `titleCommandText` below keeps, not only a budget: it folds every run of
+ * whitespace (a heredoc's newlines included) to a single space.
+ */
+export const TITLE_COMMAND_MAX_UNITS = 120;
+
+/**
+ * The lead in of the sentence drawn under an offered Always button.
+ *
+ * Every clause of it is a finding rather than a guess:
+ *  - "this command, and the same command with anything added after it": the
+ *    line an Always answer saves is a PREFIX rule,
+ *    `prefix_rule(pattern=[<the argv>], decision="allow")`, and the 0.154.0
+ *    schema describes the amendment as allowing "similar commands without
+ *    prompting". Checked offline with Codex's own evaluator (`codex
+ *    execpolicy check --rules <a scratch rules file>`, a scratch CODEX_HOME,
+ *    no approval answered): a rule saved for `["rm","-rf","build"]` answers
+ *    `allow` for `rm -rf build /`, and the probe's own amendment
+ *    `[powershell.exe, -Command, "echo exec-probe > probe.txt"]` answers
+ *    `allow` for the same argv plus a fourth token `; Remove-Item -Recurse
+ *    x`, which PowerShell joins into the same script. This clause read "this
+ *    exact command" until the stage 5 codex review ran that check: the probe
+ *    had shown only that the amendment is the WHOLE argv (the model's
+ *    `prefix_rule` argument does not narrow it), not how the saved rule
+ *    MATCHES. A sentence that understated a permanent, global allow rule was
+ *    the one thing this line exists to prevent.
+ *  - "in every project on this computer ... your Codex rules file": answering
+ *    with the amendment APPENDED a permanent line to
+ *    `C:\Users\<owner>\.codex\rules\default.rules`, a file already holding
+ *    rules from past sessions across several projects, and the next identical
+ *    command in the same turn raised no approval at all. The control run
+ *    answered a plain `accept`, wrote nothing, and was asked again.
+ *
+ * The app owns the lead in "If you choose Always allow this:" and draws this
+ * verbatim after it, so this string starts mid sentence on purpose.
+ */
+export const EXECPOLICY_RULE_LEAD =
+  "this command, and the same command with anything added after it, runs without asking again, in every project on this computer, until you remove the rule from your Codex rules file: ";
+
+/**
+ * What a shell reads as the join between two commands, or as a command run
+ * inside another: a pipe, `&&`, `||`, a background `&`, `;`, a newline, a
+ * backtick, `$(`, and a process substitution `<(` or `>(`.
+ */
+const SHELL_CONNECTOR_RE = /[|&;\r\n`]|\$\(|[<>]\(/;
+
+/**
+ * The runtime's own parsed command for this request, without the shell wrapper
+ * it will be run through, or null when that parse cannot be shown to BE the
+ * whole command.
+ *
+ * `commandActions` is a DISPLAY SUMMARY, not a transcript. The 0.154.0 schema
+ * says it "returns a list ... because a single shell command may be composed
+ * of many commands piped together", and Codex parses a plain `a && b` into one
+ * action per command. But the parser also DROPS parts it treats as
+ * formatting: codex-rs's `parse_command` leaves the small helpers of a
+ * pipeline out of the list (the token chain wc, tr, column, printf, sort,
+ * uniq, head, tail, xargs, cut, tee, yes, awk, sed sits beside
+ * `shell-command\src\parse_command.rs` in the 0.154.0 binary) and skips a
+ * leading `cd`. So ONE action does not mean one command: `ls | xargs rm -rf`
+ * can come back as a single `ls`, and `curl URL | tee ~/.bashrc` as a single
+ * `curl URL`. The title is also the push body, the only text the phone gets,
+ * and `Run ls` on a lock screen for a delete is the failure this exists to
+ * prevent. (The stage 5 codex review took exactly one action to mean the whole
+ * command; the whole diff review found the drop list.)
+ *
+ * So the action is used only when all four hold, and otherwise the caller
+ * falls back to the wrapped `params.command`, which is less readable and never
+ * less than what runs:
+ *  1. exactly one action, carrying a non empty string `command`;
+ *  2. the wrapped command is a string (without it nothing can say what the
+ *     parser left out);
+ *  3. neither the wrapped command nor the action holds a shell connector
+ *     (`SHELL_CONNECTOR_RE`), so the script is one command and nothing was
+ *     there to drop; a quoted `|` inside an argument also falls back, which
+ *     costs a nicer title and never a truer one;
+ *  4. the action's command appears VERBATIM inside the wrapped one, so the
+ *     title never names text that is not literally in what runs.
+ *
+ * Defensive about every level of it, because a shape that is not the probed
+ * one must fall back to the wrapped command rather than throw inside an RPC
+ * the model is parked on.
+ */
+export function soleActionCommand(
+  actions: unknown,
+  wrapped: unknown,
+): string | null {
+  if (!Array.isArray(actions) || actions.length !== 1) return null;
+  const only: unknown = actions[0];
+  if (typeof only !== "object" || only === null) return null;
+  const command = (only as Record<string, unknown>).command;
+  if (typeof command !== "string") return null;
+  const trimmed = command.trim();
+  if (trimmed.length === 0) return null;
+  if (typeof wrapped !== "string") return null;
+  if (SHELL_CONNECTOR_RE.test(wrapped) || SHELL_CONNECTOR_RE.test(trimmed)) {
+    return null;
+  }
+  return wrapped.includes(trimmed) ? trimmed : null;
+}
+
+/**
+ * The command as the TITLE draws it: masked, on one line, clipped.
+ *
+ * The title is also the push body and the chat list preview, so it reaches
+ * APNs, FCM and a lock screen, where `approvalMeta.tool` (which keeps the
+ * literal argv for the mono panel) never goes. Four steps, in this order:
+ *  1. `redactOutput`, the platform's secret mask this daemon already runs on a
+ *     command's output, over the WHOLE command, so `curl -H 'Authorization:
+ *     Bearer sk-...'` or `psql postgres://user:pass@...` never leaves the
+ *     machine in a notification. First, because a private key block is
+ *     matched across its lines: its BEGIN line opens the block and every line
+ *     to the END marker becomes one placeholder. Folded first, the block is
+ *     one line, the BEGIN header alone is masked, and the base64 body rides
+ *     the push (pinned by "removes a private key block before it folds").
+ *  2. `redactCommandLine`, the shapes a COMMAND carries a credential in and
+ *     output does not (`curl -u user:pass`, a URL's `user:pass@`, a short
+ *     `PGPASSWORD=`, `--password x`, `mysql -px`); the output mask was built
+ *     for output and misses every one of them.
+ *  3. Every run of whitespace folded to one space, so a heredoc's newlines do
+ *     not become a four line title and a four line notification.
+ *  4. The clip, inside the cap and last, so a mask never meets half a secret
+ *     the cut left behind.
+ */
+export function titleCommandText(command: string): string {
+  const folded = redactCommandLine(redactOutput(command))
+    .replace(/\s+/g, " ")
+    .trim();
+  return clipWithEllipsis(folded, TITLE_COMMAND_MAX_UNITS);
+}
+
+/**
+ * The agent's own WHY, clipped, or null when there is nothing to add.
+ *
+ * Null in three cases and each one is deliberate: the runtime sent no string
+ * (a file change request sends an explicit `null` here), it sent only
+ * whitespace, or it sent the very sentence already drawn as the title. The
+ * third is the one that matters: the title falls back to this string when the
+ * request named no command, and a card that drew it twice would read worse
+ * than a card that never said why.
+ */
+export function differingReason(raw: unknown, title: string): string | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (trimmed.length === 0 || trimmed === title.trim()) return null;
+  return clipWithEllipsis(trimmed, REQUEST_REASON_MAX_UNITS);
+}
+
+/**
+ * What an Always answer would save, in one sentence, or null when the
+ * amendment is not a shape this can say honestly.
+ *
+ * The argv is joined with single spaces and a token holding WHITESPACE is
+ * wrapped in double quotes, because `-Command` and `echo exec-probe >
+ * probe.txt` are two arguments and a bare join reads as five. Any whitespace,
+ * not only U+0020: a tab inside a token is just as invisible at a join. An
+ * EMPTY token is quoted too, as `""`: `git commit -m ""` joined bare reads
+ * `git commit -m ` with a trailing space nobody can see, which is a different
+ * command.
+ *
+ * This is a rendering FOR A READER and never a shell quoting: nothing
+ * re-parses this string, and the array itself is what is sent back to the
+ * runtime if the owner presses the button. A token carrying its own quote is
+ * therefore left exactly as the runtime sent it.
+ *
+ * Null rather than a partial sentence when the amendment is not an array of
+ * strings end to end. The tier is offered on a truthy amendment, so a shape
+ * this cannot read still gets its button; it just gets no claim about what the
+ * button would save, which is where this stage started.
+ */
+export function execpolicyRuleText(amendment: unknown): string | null {
+  if (!Array.isArray(amendment) || amendment.length === 0) return null;
+  if (!amendment.every((token) => typeof token === "string")) return null;
+  const argv = (amendment as string[])
+    .map((token) =>
+      token === "" || /\s/.test(token) ? `"${token}"` : token,
+    )
+    .join(" ");
+  return clipWithEllipsis(
+    `${EXECPOLICY_RULE_LEAD}${argv}`,
+    REQUEST_RULE_TEXT_MAX_UNITS,
+  );
 }
 
 /** The durable poll's two cadences, and the window the fast one owns. */
@@ -588,6 +801,12 @@ export class Interactions {
   ): Promise<unknown> {
     const permissions = method.includes("permissions");
     const fileChange = method.includes("fileChange");
+    // NAMED, not inferred from the other two. Stage 5's title, reason and rule
+    // are all read off params only a `commandExecution` request carries
+    // (twelve fields, against a file change's six), so a method that is
+    // neither permissions nor a file change keeps this method's pre stage 5
+    // behaviour instead of inheriting a title built from fields it never sends.
+    const commandExecution = method.includes("commandExecution");
     const denied = permissions
       ? { permissions: {}, scope: "turn" }
       : { decision: "decline" };
@@ -617,17 +836,17 @@ export class Interactions {
           ? { permissions: params.permissions, scope: "session" }
           : { decision: "acceptForSession" },
       ]);
-    if (
+    const alwaysOffered =
       !permissions &&
-      params.proposedExecpolicyAmendment &&
+      Boolean(params.proposedExecpolicyAmendment) &&
       (!available ||
         available.some(
           (d: unknown) =>
             typeof d === "object" &&
             d !== null &&
             "acceptWithExecpolicyAmendment" in d,
-        ))
-    )
+        ));
+    if (alwaysOffered)
       choices.push([
         "Always allow this rule",
         "always",
@@ -663,14 +882,23 @@ export class Interactions {
     // the ask sentence. They differ on purpose: an app that predates this
     // stage draws the ask as the title and the list in its mono panel, which
     // is already better than "Apply file changes" over nothing.
+    //
+    // Clipped on the command path, which `buildDiffForWire` does not weigh:
+    // there `tool` is the literal argv and a runaway one is the only thing in
+    // that column big enough to reach the server's 98,304 byte refusal, which
+    // costs the owner the whole card rather than a tail. The file change path
+    // is already counted to the byte by the wire builder, so it is left alone.
     const command = wire
       ? wire.tool
-      : String(
-          params.command ??
-            params.reason ??
-            (permissions
-              ? JSON.stringify(params.permissions)
-              : "Apply file changes"),
+      : clipWithEllipsis(
+          String(
+            params.command ??
+              params.reason ??
+              (permissions
+                ? JSON.stringify(params.permissions)
+                : "Apply file changes"),
+          ),
+          COMMAND_TOOL_MAX_UNITS,
         );
     // The runtime's own sentence wins whenever it fills one. The live probe
     // saw `reason: null` on every file change request, EXPLICITLY null rather
@@ -681,6 +909,83 @@ export class Interactions {
       typeof params.reason === "string" && params.reason.trim().length > 0
         ? params.reason
         : null;
+    // WHAT THE OWNER IS BEING ASKED TO RUN, as the title, read back from the
+    // runtime's own parsed action rather than from the wrapper it runs in.
+    //
+    // A live probe on app server 0.154.0 caught both strings on ONE request:
+    // `command` is the hundred character `"C:\...\powershell.exe" -Command
+    // 'echo exec-probe > probe.txt'`, and `commandActions[0].command` is
+    // `echo exec-probe > probe.txt`, which is the string a person reads. The
+    // wrapped one is unchanged on `approvalMeta.tool`, where the mono panel
+    // draws the literal argv for anyone who wants it; the title says what it
+    // does, so the reason below can say why.
+    //
+    // The command path only. A file change keeps stage 4's ask sentence, and
+    // a permissions request keeps its own sentence even when it carries a
+    // command. And a COMMAND request only: the 0.154.0 schema gives this
+    // method a `kind` of `command` or `writeStdin` ("distinguishes a command
+    // approval from input sent to an existing terminal"), and a stdin request
+    // carries no field holding the input, so `Run python` over it would tell
+    // the owner they are starting a program that is already running. Absent
+    // `kind` is the probed shape of a command request and reads as one.
+    //
+    // ONE action, or the wrapped command: see `soleActionCommand`. And never
+    // the raw string: `titleCommandText` masks it and folds it onto one line,
+    // because this title is the push body below and a notification is the
+    // one place the literal argv must not go.
+    //
+    // `cardText` is ALSO the push body: the backend never puts `approvalMeta`
+    // on a notification, so the phone shows this string and nothing else. The
+    // WHY cannot ride along, and on a request that carried no
+    // `commandActions`, or more than one, the body falls back to the wrapped
+    // command, which is the least readable string on the card. That is the spec's call (4.2 and
+    // 4.3) rather than an accident; it is written down here, and pinned in
+    // test/interactions.spec.ts, so the next edit of `cardText` is an edit of
+    // the notification and knows it.
+    const actionCommand = soleActionCommand(
+      params.commandActions,
+      params.command,
+    );
+    const titleCommand =
+      actionCommand ??
+      (typeof params.command === "string" && params.command.trim().length > 0
+        ? params.command.trim()
+        : null);
+    const commandKind =
+      params.kind === undefined || params.kind === "command";
+    const askTitle =
+      commandExecution && commandKind && titleCommand
+        ? `Run ${titleCommandText(titleCommand)}`
+        : null;
+    const cardText: string = askTitle
+      ? askTitle
+      : wire
+        ? (reasonText ?? wire.ask)
+        : (params.reason ?? "Codex needs your approval to continue.");
+    // WHY, in the model's own words and never this host's. `params.reason` on
+    // a command request is `exec_command`'s `justification` passed through
+    // unaltered: a live probe pinned the stub's exact sentence arriving here.
+    //
+    // Sent only when it is not the title already drawn above it. On a request
+    // carrying neither an action nor a command the title FALLS BACK to this
+    // same sentence, and a card that read it twice would be worse than one
+    // that never said why at all.
+    //
+    // Not gated on the method, because the method cannot gate it: on every
+    // OTHER kind of request the title IS this sentence (a file change falls
+    // back to `reasonText`, a permissions request to `params.reason`), so
+    // `differingReason` returns null there by construction rather than by a
+    // branch. A ternary on `commandExecution` here would read as the thing
+    // keeping the reason off those cards while never once changing an answer,
+    // and the case below that pins it ("sends neither string on a file change
+    // approval") would go on passing if it were deleted.
+    const cardReason = differingReason(params.reason, cardText);
+    // WHAT PRESSING ALWAYS WOULD SAVE, and for how long. Only beside the
+    // button itself: the sentence is about an answer that is not on offer
+    // otherwise, and the app does not draw the line without the option.
+    const ruleText = alwaysOffered
+      ? execpolicyRuleText(params.proposedExecpolicyAmendment)
+      : null;
     // Typed, so the compiler actually checks the wire names. `agentRequest`
     // takes an `unknown` body, so an object literal inlined below would let a
     // camelCase `waitSeconds` through and the backend would silently strip it:
@@ -707,6 +1012,15 @@ export class Interactions {
       approvalMeta.change_summary = wire.change_summary;
       if (wire.diff) approvalMeta.diff = wire.diff;
     }
+    // And the same argument a third time, for the two strings stage 5 adds:
+    // fields on ApprovalMeta, never an inline literal, because `reason` sent
+    // as `Reason` or `rule_text` sent as `ruleText` is dropped with a 201 and
+    // no error and the card says nothing about why or about what Always does.
+    // Left OFF entirely rather than sent empty: the app draws a line only when
+    // the string is there, so an absent field renders byte identically to
+    // every card this daemon posted before this stage.
+    if (cardReason) approvalMeta.reason = cardReason;
+    if (ruleText) approvalMeta.rule_text = ruleText;
     const result = await this.api.agentRequest(
       "POST",
       "messages",
@@ -715,9 +1029,7 @@ export class Interactions {
         assistantId: context.assistantId,
         chatId: context.chatId,
         sender: "assistant",
-        text: wire
-          ? (reasonText ?? wire.ask)
-          : (params.reason ?? "Codex needs your approval to continue."),
+        text: cardText,
         messageType: "approval_request",
         options,
         approvalMeta,
@@ -801,6 +1113,15 @@ export class Interactions {
       // read a pending request with zero options as the settled "This request
       // is no longer open" row; flagged for the app lane rather than papered
       // over by faking a server verdict from a daemon.
+      // OPTIONS AND NOTHING ELSE, and that is load bearing since 0.13.0. A
+      // PATCH of a message REPLACES the whole approval metadata column, so an
+      // edit that carried `approvalMeta` at all would have to re-send
+      // `reason` and `rule_text` or take both lines off a card that had them
+      // (the served canon says exactly this to every channel). This body
+      // never sends the column, so the question cannot arise here;
+      // test/interactions.spec.ts pins the WHOLE body rather than one key, so
+      // adding one is a red test and not a card that quietly loses its reason
+      // line.
       await this.api
         .agentRequest("PATCH", `messages/${messageId}`, context.assistantId, {
           options: [],

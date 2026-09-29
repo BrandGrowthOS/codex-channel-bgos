@@ -269,6 +269,38 @@ export interface ApprovalMeta {
    */
   change_summary?: ChangeSummary;
   diff?: DiffWire;
+  /**
+   * WHY THE AGENT IS ASKING, and WHAT AN ALWAYS ANSWER WOULD SAVE.
+   *
+   * Declared here for the same reason as every field above: `agentRequest`
+   * takes an `unknown` body and the backend's whitelist strips a key its DTO
+   * does not declare, silently, with a 201. `ruleText` inlined in the POST
+   * body would compile, ship and never reach an owner.
+   *
+   * `reason` is the MODEL's sentence, not this host's: on a command request
+   * `params.reason` is `exec_command`'s `justification` passed through
+   * unaltered. It rides only when it is not already the card's title, so no
+   * card ever reads one sentence twice. At most 280 units
+   * (REQUEST_REASON_MAX_UNITS); the backend refuses a longer one rather than
+   * clipping it.
+   *
+   * `rule_text` is this host's sentence about the owner's own machine, and it
+   * rides only beside an offered Always button. It says the one thing the
+   * button never did: a live probe on app server 0.154.0 proved that answering
+   * with `acceptWithExecpolicyAmendment` APPENDS a permanent line to
+   * `~/.codex/rules/default.rules`, which outlives the session and the
+   * project. The amendment is the WHOLE argv, but the line it saves is a
+   * PREFIX rule: `codex execpolicy check` against a scratch rules file answers
+   * `allow` for the same argv with anything added after it (the stage 5 codex
+   * review's offline check, recorded on EXECPOLICY_RULE_LEAD). So the
+   * sentence says exactly that, and never "this exact command". At most 500
+   * units (REQUEST_RULE_TEXT_MAX_UNITS).
+   *
+   * Both ride the CREATE, like every other field here: the backend's update
+   * path replaces the whole column and four of its fields are required.
+   */
+  reason?: string;
+  rule_text?: string;
 }
 
 /**
