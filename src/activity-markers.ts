@@ -273,6 +273,9 @@ function failed(item: Rec): boolean {
     item.status === "interrupted" ||
     item.success === false ||
     Boolean(item.error) ||
+    // A picture the runtime refused (`usageLimitExceeded`) says so here and
+    // not in its status, whose strings the protocol never enumerates.
+    Boolean(item.failure) ||
     (typeof item.exitCode === "number" && item.exitCode !== 0)
   );
 }
@@ -790,7 +793,15 @@ export function entryFromItem(
   }
 
   if (type === "imageGeneration" || type === "imageView") {
-    const path = shortenPath(item.path, ctx);
+    // Two different items with two different fields: `imageView` (the agent
+    // looked at a local picture) has `path`, and `imageGeneration` has
+    // `savedPath`, where the runtime saved the picture it made. Reading
+    // `path` for both left every generated picture's row without its file.
+    // The base64 `result` is never read here: a picture is not a row field.
+    const path = shortenPath(
+      type === "imageView" ? item.path : item.savedPath,
+      ctx,
+    );
     const card: ActivityCard = {
       icon: TOOL_ICON[type]!,
       name: type === "imageView" ? "view_image" : "image_generation",

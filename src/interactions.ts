@@ -116,10 +116,28 @@ interface Pending {
  * below), and here the title becomes `Run <command>` while that justification
  * moves to the stripped `reason`. So against a pre stage 5 backend this
  * release says LESS than the one before it: the sentence the owner used to
- * read is gone and nothing replaces it. Retire the FOUR lines one
- * at a time, in this order: stage 1 backend live, then 0.10.1; stage 3 backend
- * live, then 0.11.0; stage 4 backend live, then 0.12.0; stage 5 backend live,
- * then 0.13.0.
+ * read is gone and nothing replaces it.
+ *
+ * 0.14.0 adds NO hold of its own: a picture Codex makes posts itself as an
+ * ordinary image message, which every backend already accepts. It is held
+ * only because it carries the holds of the releases before it, so it is
+ * promoted only after 0.13.0 is on latest, never before or in the same step:
+ * `npm dist-tag add` points latest at whichever version ran last, so
+ * promoting an older version after 0.14.0 moves latest back to that older
+ * version. Beside that it waits for one thing no backend gives: it is promoted only after one logged in live
+ * image turn confirms the real item (result bytes and their form, the result
+ * size (under 12 MiB, the line cap), revisedPrompt, savedPath, the failure
+ * shape; probe.md, decision 7). The offline probe never saw a real item, and
+ * a shape this code does not read turns every picture into a "could not be
+ * shown" line while the served canon tells the model not to resend it; a
+ * picture over the line cap never posts either, only that line does. 0.13.0 is P2 stage 5's
+ * release (the request card), which merged ahead of this one and brought its
+ * own HELD-FROM-LATEST line and its own reason (the paragraph above); the
+ * merge order is #12, #14, #15, P2 stage 5 (0.13.0), then 0.14.0. Retire the
+ * FIVE lines one at a time, in this order: stage 1 backend live, then 0.10.1;
+ * stage 3 backend live, then 0.11.0; stage 4 backend live, then 0.12.0; stage
+ * 5 backend live, then 0.13.0; then 0.14.0, only after 0.13.0 is on latest,
+ * never before or in the same step, and only after that live image turn.
  *
  * The lines below are the machine readable half of that hold, and the publish
  * workflow's HELD_FROM_LATEST list must agree with them exactly
@@ -130,6 +148,7 @@ interface Pending {
  * HELD-FROM-LATEST: 0.11.0
  * HELD-FROM-LATEST: 0.12.0
  * HELD-FROM-LATEST: 0.13.0
+ * HELD-FROM-LATEST: 0.14.0
  */
 export const APPROVAL_HOLD_SECONDS = 1800;
 

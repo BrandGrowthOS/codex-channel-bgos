@@ -71,6 +71,15 @@ export interface ReplyHandle {
   sendFile: (filePath: string, caption?: string) => Promise<{ id: number }>;
   sendImage: (filePath: string, caption?: string) => Promise<{ id: number }>;
   sendVideo: (filePath: string, caption?: string) => Promise<{ id: number }>;
+  /**
+   * A picture held as bytes, with no path and no media guard: a picture the
+   * Codex runtime generated this turn (stage 4, C-21). Rides the same reply
+   * route as every other method here, a peer reply included.
+   */
+  sendImageBytes: (
+    image: { bytes: Buffer; fileName: string; mimeType: string },
+    caption?: string,
+  ) => Promise<{ id: number }>;
   sendTyping: () => Promise<void>;
   /** Publish a local file path to BGOS as a `files[]` entry; useful when
    *  the agent emits structured tool output rather than a `MEDIA:` line.
@@ -285,6 +294,17 @@ export function buildReplyHandle(
         assistantId,
         chatId,
         filePath,
+        caption,
+        replyVia,
+        replyToId,
+      }),
+    sendImageBytes: (image, caption) =>
+      deps.outbound.sendImageBytes({
+        assistantId,
+        chatId,
+        bytes: image.bytes,
+        fileName: image.fileName,
+        mimeType: image.mimeType,
         caption,
         replyVia,
         replyToId,

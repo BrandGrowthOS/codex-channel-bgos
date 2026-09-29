@@ -10,9 +10,22 @@ import {
   appServerInput,
   rememberChanges,
   waitsForOwner,
+  type RunTurnCallbacks,
   type RunTurnResult,
 } from "../src/codex-host.js";
 import { verifyModel } from "../src/setup/verify-model.js";
+import {
+  GOLD_PNG,
+  imageItem,
+  itemCompleted,
+  itemStarted,
+  oversizedImageCompleted,
+  probe401Turn,
+} from "./fixtures/image-generation.js";
+import {
+  IMAGE_MADE_NOT_SHOWN_LINE,
+  imageNotShownLine,
+} from "../src/generated-images.js";
 
 class Server extends EventEmitter {
   onRequest: any;
@@ -547,10 +560,15 @@ describe("native Codex host contracts", () => {
     });
     const result = host.runTurn(17, "continue");
     await vi.waitFor(() => expect(server.next).toBe(1));
+    // Never resumed to RUN: no turn starts on the legacy thread, and a resume
+    // it gets (only to read its history, Round 7) returns no turns.
     expect(server.request).not.toHaveBeenCalledWith(
-      "thread/resume",
-      expect.anything(),
+      "turn/start",
+      expect.objectContaining({ threadId: "legacy" }),
     );
+    for (const [method, params] of server.request.mock.calls)
+      if (method === "thread/resume" && params.threadId === "legacy")
+        expect(params.excludeTurns).toBe(true);
     expect(server.request).toHaveBeenCalledWith(
       "thread/start",
       expect.objectContaining({
@@ -1212,9 +1230,14 @@ describe("the Codex goal lane's half of the host", () => {
     const threadId = await bindThread(14);
     const forked = await host.forkThread(14);
     expect(forked).toMatch(/^fork-/);
+    // No goal flag and no `ephemeral`: the owner's fork is theirs to keep.
+    // `excludeTurns` (stage 4, C-21) only keeps the fork's REPLY small: the
+    // runtime still copies every turn into the new thread, it just does not
+    // send them all back in one line (see the 0.154.0 ThreadForkParams).
     expect(server.request).toHaveBeenLastCalledWith("thread/fork", {
       threadId,
       cwd: home,
+      excludeTurns: true,
     });
   });
 });
@@ -1375,11 +1398,18 @@ describe("a child agent's name and its last look at the turn's end", () => {
     const block = source.slice(at, source.indexOf("\n  }", at));
     expect(block).toContain('"thread/read"');
     expect(block).not.toContain("thread/resume");
-    // The two resumes this daemon has are the owner's own /resume and the
-    // tool version upgrade, each on a thread from this process's chat map.
-    // A third is a new call site, and a child's thread is the one thread
-    // this daemon must never subscribe to.
-    expect(source.match(/"thread\/resume"/g) ?? []).toHaveLength(2);
+    // The three resumes this daemon has are the owner's own /resume, the
+    // chat's own thread in ensureThread, and (Round 7) the tool version
+    // upgrade's metadata only resume of a legacy thread the history index has
+    // not seen, only to page it, in recentThreadMessages. Each is on a thread
+    // from this process's chat map. A fourth is a new call site, and a
+    // child's thread is the one thread this daemon must never subscribe to.
+    expect(source.match(/"thread\/resume"/g) ?? []).toHaveLength(3);
+    const history = source.slice(
+      source.indexOf("private async recentThreadMessages"),
+      source.indexOf("private async pageThreadMessages"),
+    );
+    expect(history).toContain('"thread/resume"');
   });
 
   it("settles a helper the turn ended on when its own thread says it stopped", async () => {
@@ -1498,5 +1528,744 @@ describe("a child agent's name and its last look at the turn's end", () => {
     });
     // Nothing was left working, so the card closes the way it always has.
     expect((await settled).helpersStillRunning).toBeUndefined();
+  });
+});
+
+/**
+ * STAGE 4 (C-21): a picture the runtime's image generation tool finished is
+ * KEPT on the turn and handed back on the result, never posted from inside
+ * the notification loop. A standard post mid turn marks a Codex agent done for
+ * the rest of the turn (gap 04), so the adapter posts it at the end instead.
+ *
+ * The item fixtures are the schema's (the live probe could not make a
+ * picture, see test/fixtures/image-generation.ts); the envelopes and the
+ * failed turn are the probe's own.
+ *
+ * MUTATION PROOFS, recorded in docs/reports/2026-09-24-p5-s4-image-posts:
+ *  - collecting on `item/started` too turns the started only case red;
+ *  - a `return` after the collection (copying the plan branch) turns the row
+ *    case red, because the row is never built;
+ *  - dropping the seed in execute() turns the adopted hand over red;
+ *  - leaving `images` out of result() turns every result case red.
+ */
+describe("pictures a turn made", () => {
+  let home: string, server: Server, host: CodexHost;
+  let adopted: number[];
+  let delivered: RunTurnResult[];
+  /** What an adopted turn is handed, read when the turn is adopted. */
+  let adoptedCallbacks: RunTurnCallbacks;
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "hoai-images-"));
+    vi.stubEnv("CODEX_BGOS_HOME", home);
+    adopted = [];
+    delivered = [];
+    adoptedCallbacks = {};
+    server = new Server();
+    host = new CodexHost({
+      auth: { ok: true, mode: "chatgpt", label: "test" },
+      workdir: home,
+      server: server as any,
+      onAdoptedTurn: (chatId) => {
+        adopted.push(chatId);
+        return {
+          callbacks: adoptedCallbacks,
+          deliver: (result) => {
+            delivered.push(result);
+          },
+        };
+      },
+    });
+  });
+  afterEach(() => {
+    host.close();
+    vi.unstubAllEnvs();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("keeps a finished picture on the result once, however often it completes", async () => {
+    const task = host.runTurn(1, "draw a gold circle");
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.emit(
+      "notification",
+      "item/started",
+      itemStarted(imageItem({ status: "inProgress", result: "" }), "thread-1"),
+    );
+    server.emit("notification", "item/completed", itemCompleted(imageItem(), "thread-1"));
+    // The same item completing twice (a replay, a second notification) is
+    // still one picture: the turn keys them on the item id.
+    server.emit("notification", "item/completed", itemCompleted(imageItem(), "thread-1"));
+    server.finish("thread-1", "Here is the gold circle.");
+    const result = await task;
+    expect(result.replyText).toBe("Here is the gold circle.");
+    expect(result.images).toHaveLength(1);
+    const [image] = result.images!;
+    expect(image!.bytes!.equals(GOLD_PNG)).toBe(true);
+    expect(image).toMatchObject({
+      itemId: "ig_01a0d1ba2874",
+      mimeType: "image/png",
+      revisedPrompt: "A plain gold circle centred on a dark charcoal background",
+    });
+    expect(image).not.toHaveProperty("result");
+  });
+
+  it("hands a proposed plan the pictures finished before it, so they can post ahead of its card", async () => {
+    // Finding 2: a picture posted AFTER the plan card runs the backend's done
+    // over the card's blocked ("Waiting on your go ahead"). The card is
+    // posted from inside the turn, so the pictures it must follow have to
+    // reach the adapter there too.
+    const signals: any[] = [];
+    const task = host.runTurn(1, "plan a logo", {
+      onPlanProposal: (signal) => {
+        signals.push(signal);
+      },
+    });
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.emit("notification", "item/completed", itemCompleted(imageItem(), "thread-1"));
+    server.emit("notification", "item/completed", {
+      threadId: "thread-1",
+      turnId: "turn-thread-1",
+      item: { id: "plan-1", type: "plan", text: "## Logo\n\n1. Draw it" },
+    });
+    server.finish("thread-1", "");
+    await task;
+    expect(signals).toHaveLength(1);
+    expect(signals[0].images.map((i: any) => i.itemId)).toEqual([
+      "ig_01a0d1ba2874",
+    ]);
+  });
+
+  it("adds nothing on item/started alone, even when the runtime fills the result early", async () => {
+    const task = host.runTurn(1, "draw");
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.emit("notification", "item/started", itemStarted(imageItem(), "thread-1"));
+    server.finish("thread-1", "Still drawing.");
+    expect((await task).images ?? []).toHaveLength(0);
+  });
+
+  it("carries a refused picture with its failure, and no bytes", async () => {
+    const failure = {
+      type: "usageLimitExceeded",
+      limitId: "image_generation",
+      resetsAt: 1790240000,
+    };
+    const task = host.runTurn(1, "draw");
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.emit(
+      "notification",
+      "item/completed",
+      itemCompleted(imageItem({ result: "", failure, savedPath: null }), "thread-1"),
+    );
+    server.finish("thread-1", "");
+    const [image] = (await task).images!;
+    expect(image!.failure).toEqual(failure);
+    expect(image!.bytes).toBeUndefined();
+  });
+
+  it("keeps two pictures in the order they finished", async () => {
+    const task = host.runTurn(1, "draw two");
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.emit(
+      "notification",
+      "item/completed",
+      itemCompleted(imageItem({ id: "exec-2", revisedPrompt: "second" }), "thread-1"),
+    );
+    server.emit(
+      "notification",
+      "item/completed",
+      itemCompleted(imageItem({ id: "exec-1", revisedPrompt: "first" }), "thread-1"),
+    );
+    server.finish("thread-1", "Two.");
+    expect((await task).images!.map((i) => i.itemId)).toEqual(["exec-2", "exec-1"]);
+  });
+
+  it("still draws the image row on both phases, named from savedPath", async () => {
+    const cards: Array<{ itemId: string; card: any }> = [];
+    const task = host.runTurn(1, "draw", {
+      onTool: (card, itemId) => {
+        cards.push({ itemId, card });
+      },
+    });
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.emit(
+      "notification",
+      "item/started",
+      itemStarted(imageItem({ status: "inProgress", result: "" }), "thread-1"),
+    );
+    server.emit("notification", "item/completed", itemCompleted(imageItem(), "thread-1"));
+    server.emit(
+      "notification",
+      "item/completed",
+      itemCompleted(
+        imageItem({
+          id: "ig_refused",
+          result: "",
+          savedPath: null,
+          failure: { type: "usageLimitExceeded", limitId: "image_generation" },
+        }),
+        "thread-1",
+      ),
+    );
+    server.finish("thread-1", "Done.");
+    await task;
+    expect(cards.map((c) => [c.itemId, c.card.name, c.card.status])).toEqual([
+      ["ig_01a0d1ba2874", "image_generation", "running"],
+      ["ig_01a0d1ba2874", "image_generation", "done"],
+      ["ig_refused", "image_generation", "error"],
+    ]);
+    expect(cards[1]!.card.path).toMatch(/ig_01a0d1ba2874\.png$/);
+    // The base64 never rides a row.
+    expect(JSON.stringify(cards)).not.toContain(GOLD_PNG.toString("base64").slice(0, 40));
+  });
+
+  it("hands the watchdog's result the pictures finished before it fired", async () => {
+    const task = host.runDetached(1, "draw", {}, false, 300);
+    await vi.waitFor(() =>
+      expect(server.request.mock.calls.some((c) => c[0] === "turn/start")).toBe(true),
+    );
+    server.emit("notification", "item/completed", itemCompleted(imageItem(), "thread-1"));
+    const result = await task;
+    expect(result.error).toMatch(/timed out/);
+    expect(result.images).toHaveLength(1);
+  });
+
+  it("carries a picture through a turn that then failed, on the probe's own 401 shape", async () => {
+    const task = host.runTurn(1, "draw");
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.emit("notification", "item/completed", itemCompleted(imageItem(), "thread-1"));
+    server.emit("notification", "turn/completed", probe401Turn("thread-1"));
+    const result = await task;
+    expect(result.error).toBe(
+      "Codex needs you to sign in again. Reconnect this agent in HOAI, then retry.",
+    );
+    expect(result.images).toHaveLength(1);
+  });
+
+  it("hands the pictures an adopted turn finished to the owner turn that takes its thread", async () => {
+    const first = host.runTurn(20, "hello");
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.finish("thread-1", "hi");
+    await first;
+    server.emit("notification", "turn/started", {
+      threadId: "thread-1",
+      turn: { id: "turn-continuation", status: "inProgress" },
+    });
+    expect(adopted).toEqual([20]);
+    server.emit("notification", "item/completed", itemCompleted(imageItem(), "thread-1"));
+
+    // The owner asks something while the continuation runs: the owner's turn
+    // takes the thread and the adopted turn is released without delivering.
+    const owner = host.runTurn(20, "and make it bigger");
+    await vi.waitFor(() =>
+      expect(
+        server.request.mock.calls.filter((c) => c[0] === "turn/start").length,
+      ).toBe(2),
+    );
+    server.finish("thread-1", "Here it is.");
+    const result = await owner;
+    expect(result.images?.map((i) => i.itemId)).toEqual(["ig_01a0d1ba2874"]);
+    expect(delivered).toHaveLength(0);
+  });
+
+  /**
+   * Re-review item 4. A picture an adopted goal turn handed to its plan card
+   * was posted there (the adapter posts a card's pictures first). If the
+   * owner then takes the thread over, the handover must not copy that picture
+   * into the owner's turn too, whose fresh picture record would post it a
+   * second time. A picture finished AFTER the card still carries across.
+   *
+   * MUTATION PROOF: copy every prior picture again (drop the handed off
+   * skip) and this case goes red.
+   */
+  it("does not hand an owner turn a picture the adopted turn already handed to its plan card", async () => {
+    const signals: any[] = [];
+    adoptedCallbacks = {
+      onPlanProposal: (signal) => {
+        signals.push(signal);
+      },
+    };
+    const first = host.runTurn(20, "hello");
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.finish("thread-1", "hi");
+    await first;
+    server.emit("notification", "turn/started", {
+      threadId: "thread-1",
+      turn: { id: "turn-continuation", status: "inProgress" },
+    });
+    expect(adopted).toEqual([20]);
+    server.emit("notification", "item/completed", itemCompleted(imageItem(), "thread-1"));
+    server.emit("notification", "item/completed", {
+      threadId: "thread-1",
+      turnId: "turn-continuation",
+      item: { id: "plan-1", type: "plan", text: "## Logo\n\n1. Draw it" },
+    });
+    await vi.waitFor(() => expect(signals).toHaveLength(1));
+    expect(signals[0].images.map((i: any) => i.itemId)).toEqual([
+      "ig_01a0d1ba2874",
+    ]);
+    // A second picture, finished after the card: nothing has posted it yet.
+    server.emit(
+      "notification",
+      "item/completed",
+      itemCompleted(imageItem({ id: "ig_after_card" }), "thread-1"),
+    );
+
+    const owner = host.runTurn(20, "and make it bigger");
+    await vi.waitFor(() =>
+      expect(
+        server.request.mock.calls.filter((c) => c[0] === "turn/start").length,
+      ).toBe(2),
+    );
+    server.finish("thread-1", "Here it is.");
+    const result = await owner;
+    expect(result.images?.map((i) => i.itemId)).toEqual(["ig_after_card"]);
+    expect(delivered).toHaveLength(0);
+  });
+
+  /**
+   * Round 8. A picture whose `item/completed` line was over the transport's
+   * cap reaches the host as the transport rebuilds it (src/app-server.ts,
+   * pinned by test/app-server.spec.ts on the same fixture): the item id, no
+   * result, `tooLarge`. The host has to keep it as a picture Codex MADE, so
+   * the owner reads "Codex made a picture, but it could not be shown here."
+   * and never the tried line, and its row has to close.
+   */
+  it("keeps a picture too large to read as made, so the made line posts, and closes its row", async () => {
+    const cards: Array<{ itemId: string; status: string }> = [];
+    const task = host.runTurn(1, "draw a huge poster", {
+      onTool: (card, itemId) => {
+        cards.push({ itemId, status: card.status });
+      },
+    });
+    await vi.waitFor(() => expect(server.next).toBe(1));
+    server.emit(
+      "notification",
+      "item/started",
+      itemStarted(
+        imageItem({ id: "ig_big_1", status: "inProgress", result: "", savedPath: null }),
+        "thread-1",
+      ),
+    );
+    server.emit(
+      "notification",
+      "item/completed",
+      oversizedImageCompleted("ig_big_1", "thread-1"),
+    );
+    server.finish("thread-1", "Here is the poster.");
+    const result = await task;
+    expect(result.images).toHaveLength(1);
+    const [image] = result.images!;
+    expect(image).toMatchObject({ itemId: "ig_big_1", returnedOutput: true });
+    expect(image!.bytes).toBeUndefined();
+    expect(imageNotShownLine(image!)).toBe(IMAGE_MADE_NOT_SHOWN_LINE);
+    expect(cards).toEqual([
+      { itemId: "ig_big_1", status: "running" },
+      { itemId: "ig_big_1", status: "done" },
+    ]);
+  });
+});
+
+/**
+ * Stage 4 (C-21), finding 4: no past turn rides a resume, a fork or a read.
+ *
+ * The runtime stores every picture's full base64 `result` in the rollout, and
+ * `thread/resume`, `thread/fork` and `thread/read {includeTurns:true}` all
+ * hydrate `thread.turns` unless told not to. A chat with about six pictures
+ * then answers one resume with a single line over the app server client's
+ * 16 MiB cap (src/app-server.ts), which closed the connection and failed every
+ * live turn on the daemon, for every chat (since Round 7 it fails only that
+ * resume, still the chat's turn), again on every later resume. The
+ * wire was measured on the vendored 0.154.0 binary by the review: 14.23 MiB
+ * for five pictures without the flag, 3.9 KB with it.
+ *
+ * The 0.154.0 schema (`codex app-server generate-ts --experimental`):
+ *  - ThreadResumeParams.excludeTurns and ThreadForkParams.excludeTurns: "When
+ *    true, return only thread metadata ... without populating
+ *    `thread.turns`. Full-history hydration is deprecated for paginated
+ *    threads; use this with `thread/turns/list` and `thread/items/list`."
+ *  - ThreadReadParams.includeTurns: "Full-history hydration is deprecated for
+ *    paginated threads; prefer a metadata-only read and page with
+ *    `thread/turns/list` and `thread/items/list`."
+ *  - ThreadTurnsListParams: cursor, limit, sortDirection (defaults to
+ *    descending), itemsView (defaults to summary). Probed on 0.154.0: the
+ *    summary view of a turn carries its userMessage and agentMessage items.
+ *
+ * MUTATION PROOFS: drop `excludeTurns` from either resume, or from the fork,
+ * and that case goes red; point the migration back at `thread/read
+ * {includeTurns:true}` and the migration cases go red.
+ */
+describe("no past turn rides a resume, a fork or a read", () => {
+  let home: string, server: Server, host: CodexHost;
+  const tools = [
+    {
+      type: "function" as const,
+      name: "reply",
+      description: "reply",
+      inputSchema: { type: "object" },
+    },
+  ];
+  function makeHost(): CodexHost {
+    return new CodexHost({
+      auth: { ok: true, mode: "chatgpt", label: "test" },
+      workdir: home,
+      server: server as any,
+      tools,
+    });
+  }
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "hoai-history-"));
+    vi.stubEnv("CODEX_BGOS_HOME", home);
+    server = new Server();
+    host = makeHost();
+  });
+  afterEach(() => {
+    host.close();
+    vi.unstubAllEnvs();
+    rmSync(home, { recursive: true, force: true });
+  });
+  async function bindThread(chatId: number): Promise<string> {
+    const task = host.runTurn(chatId, "hello");
+    await vi.waitFor(() => expect(server.next).toBeGreaterThan(0));
+    const threadId = `thread-${server.next}`;
+    server.finish(threadId, "hi");
+    await task;
+    return threadId;
+  }
+  const callsOf = (method: string) =>
+    server.request.mock.calls.filter((c) => c[0] === method).map((c) => c[1]);
+
+  it("resumes a chat's thread after a restart with excludeTurns", async () => {
+    const threadId = await bindThread(30);
+    host.close();
+    const again = host.runTurn(30, "next");
+    await vi.waitFor(() => expect(callsOf("thread/resume")).toHaveLength(1));
+    expect(callsOf("thread/resume")[0]).toMatchObject({
+      threadId,
+      excludeTurns: true,
+    });
+    server.finish(threadId, "Next");
+    await again;
+  });
+
+  it("resumes a saved conversation with excludeTurns", async () => {
+    const threadId = await bindThread(31);
+    await host.resumeSavedThread(31, threadId);
+    expect(callsOf("thread/resume")).toEqual([
+      expect.objectContaining({ threadId, excludeTurns: true }),
+    ]);
+  });
+
+  it("forks the owner's thread with excludeTurns", async () => {
+    await bindThread(32);
+    await host.forkThread(32);
+    expect(callsOf("thread/fork")).toEqual([
+      expect.objectContaining({ excludeTurns: true }),
+    ]);
+  });
+
+  it("never reads a thread with its turns, anywhere", async () => {
+    await bindThread(33);
+    await host.savedThreads(33);
+    for (const params of callsOf("thread/read"))
+      expect(params.includeTurns).not.toBe(true);
+  });
+
+  describe("the legacy tool upgrade carries recent text from paged summary turns", () => {
+    function legacyHost(chatId: number): void {
+      host.close();
+      writeFileSync(
+        join(home, "threads.json"),
+        JSON.stringify({ [chatId]: "legacy" }),
+      );
+      host = makeHost();
+    }
+    const turn = (user: string, agent: string) => ({
+      id: `turn-${user}`,
+      itemsView: "summary",
+      status: "completed",
+      items: [
+        {
+          type: "userMessage",
+          id: `u-${user}`,
+          content: [{ type: "text", text: user, text_elements: [] }],
+        },
+        { type: "agentMessage", id: `a-${user}`, text: agent },
+      ],
+    });
+
+    it("pages newest first and keeps the conversation in its own order", async () => {
+      legacyHost(40);
+      const base = server.request.getMockImplementation()!;
+      server.request.mockImplementation(async (method: string, p: any) => {
+        if (method === "thread/turns/list")
+          return p.cursor === "older"
+            ? { data: [turn("first ask", "first answer")], nextCursor: null }
+            : {
+                data: [turn("second ask", "second answer")],
+                nextCursor: "older",
+              };
+        return base(method, p);
+      });
+      const task = host.runTurn(40, "continue");
+      await vi.waitFor(() => expect(callsOf("thread/start")).toHaveLength(1));
+      expect(callsOf("thread/turns/list")).toEqual([
+        {
+          threadId: "legacy",
+          itemsView: "summary",
+          sortDirection: "desc",
+          limit: 4,
+        },
+        {
+          threadId: "legacy",
+          itemsView: "summary",
+          sortDirection: "desc",
+          limit: 4,
+          cursor: "older",
+        },
+      ]);
+      for (const params of callsOf("thread/read"))
+        expect(params.includeTurns).not.toBe(true);
+      const instructions = String(
+        callsOf("thread/start")[0].developerInstructions,
+      );
+      expect(instructions).toContain("legacy remains saved");
+      const order = ["first ask", "first answer", "second ask", "second answer"]
+        .map((text) => instructions.indexOf(text));
+      expect(order.every((at) => at >= 0)).toBe(true);
+      expect(order).toEqual([...order].sort((a, b) => a - b));
+      server.finish("thread-1", "Continued");
+      await task;
+    });
+
+    it("stops paging once the text budget is spent", async () => {
+      legacyHost(41);
+      const base = server.request.getMockImplementation()!;
+      server.request.mockImplementation(async (method: string, p: any) => {
+        if (method === "thread/turns/list")
+          return {
+            data: [turn("ask", "x".repeat(70_000))],
+            nextCursor: "older",
+          };
+        return base(method, p);
+      });
+      const task = host.runTurn(41, "continue");
+      await vi.waitFor(() => expect(callsOf("thread/start")).toHaveLength(1));
+      expect(callsOf("thread/turns/list")).toHaveLength(1);
+      server.finish("thread-1", "Continued");
+      await task;
+    });
+
+    it("still upgrades the thread when a history page cannot be read", async () => {
+      legacyHost(42);
+      const base = server.request.getMockImplementation()!;
+      server.request.mockImplementation(async (method: string, p: any) => {
+        if (method === "thread/turns/list") throw new Error("not indexed");
+        return base(method, p);
+      });
+      const task = host.runTurn(42, "continue");
+      await vi.waitFor(() => expect(callsOf("thread/start")).toHaveLength(1));
+      expect(String(callsOf("thread/start")[0].developerInstructions)).toContain(
+        "legacy remains saved",
+      );
+      server.finish("thread-1", "Continued");
+      await task;
+    });
+
+    /**
+     * Round 7, the final review's medium item. The runtime pages a thread's
+     * turns out of its thread history index. A thread the index has not seen
+     * (a rollout older than the index, or one copied in) pages NOTHING until
+     * something loads it: the review's probe (copied rollouts, cold) and
+     * `_tools-p5/probes/s4-turns/probe-turns-cold.js` both show
+     * `turns=0 nextCursor=null` cold and the turn once the thread is resumed.
+     * A thread the app server made itself IS indexed and pages cold with no
+     * resume at all (`probe-turns-indexed.js`: a second app server on the same
+     * home, nothing loaded). So the read pages cold first, and only a first
+     * page that comes back empty with no cursor resumes the thread, metadata
+     * only, pages again, and lets it go.
+     *
+     * This fake is the runtime's shape: `thread/turns/list` answers `data: []`
+     * for a thread until it has been resumed, and an unsubscribe unloads it.
+     *
+     * MUTATION PROOFS (Round 7 in red-proofs.md): drop the resume and the first
+     * and fifth cases go red; resume every legacy thread, indexed or not, and
+     * the second goes red; drop the goal check and the third goes red; drop
+     * the history read guard in `notification` and the fourth goes red; drop
+     * the unsubscribe and the first and fifth go red.
+     */
+    function unindexed(pages: (p: any) => any): Set<string> {
+      const loadedHere = new Set<string>();
+      const base = server.request.getMockImplementation()!;
+      server.request.mockImplementation(async (method: string, p: any) => {
+        if (method === "thread/turns/list")
+          return loadedHere.has(p.threadId)
+            ? pages(p)
+            : { data: [], nextCursor: null, backwardsCursor: null };
+        if (method === "thread/resume") loadedHere.add(p.threadId);
+        if (method === "thread/unsubscribe") {
+          loadedHere.delete(p.threadId);
+          return { status: "unsubscribed" };
+        }
+        return base(method, p);
+      });
+      return loadedHere;
+    }
+    const methodsFor = (threadId: string) =>
+      server.request.mock.calls
+        .filter((c) => c[1]?.threadId === threadId || c[0] === "thread/start")
+        .map((c) => c[0]);
+
+    it("resumes a thread the history index has not seen, metadata only, pages it, then lets it go", async () => {
+      legacyHost(43);
+      const loadedHere = unindexed((p) =>
+        p.cursor === "older"
+          ? { data: [turn("first ask", "first answer")], nextCursor: null }
+          : { data: [turn("second ask", "second answer")], nextCursor: "older" },
+      );
+      const task = host.runTurn(43, "continue");
+      await vi.waitFor(() => expect(callsOf("thread/start")).toHaveLength(1));
+      const instructions = String(
+        callsOf("thread/start")[0].developerInstructions,
+      );
+      for (const text of ["first ask", "first answer", "second ask", "second answer"])
+        expect(instructions, `the carried context lost "${text}"`).toContain(text);
+      expect(
+        callsOf("thread/resume").filter((p) => p.threadId === "legacy"),
+      ).toEqual([{ threadId: "legacy", cwd: home, excludeTurns: true }]);
+      // Cold page, the resume, the pages, the unsubscribe, THEN the new thread.
+      expect(methodsFor("legacy")).toEqual([
+        "thread/turns/list",
+        "thread/goal/get",
+        "thread/resume",
+        "thread/turns/list",
+        "thread/turns/list",
+        "thread/unsubscribe",
+        "thread/start",
+      ]);
+      expect(loadedHere.has("legacy")).toBe(false);
+      expect(server.request).not.toHaveBeenCalledWith(
+        "turn/start",
+        expect.objectContaining({ threadId: "legacy" }),
+      );
+      server.finish("thread-1", "Continued");
+      await task;
+    });
+
+    it("pages an indexed thread cold and never resumes it", async () => {
+      legacyHost(44);
+      const base = server.request.getMockImplementation()!;
+      server.request.mockImplementation(async (method: string, p: any) => {
+        if (method === "thread/turns/list")
+          return { data: [turn("ask", "answer")], nextCursor: null };
+        return base(method, p);
+      });
+      const task = host.runTurn(44, "continue");
+      await vi.waitFor(() => expect(callsOf("thread/start")).toHaveLength(1));
+      expect(String(callsOf("thread/start")[0].developerInstructions)).toContain(
+        "answer",
+      );
+      expect(methodsFor("legacy")).toEqual(["thread/turns/list", "thread/start"]);
+      server.finish("thread-1", "Continued");
+      await task;
+    });
+
+    it("never resumes a legacy thread whose goal is active: the resume would start its continuation turn", async () => {
+      // probe-turns-cold.js part 2: a COLD resume of a stored thread whose
+      // goal is active started a turn within seconds, by itself. Here that
+      // would be model spend on a thread being retired, with the old tools,
+      // in a turn this host would adopt into the chat.
+      legacyHost(45);
+      unindexed(() => ({ data: [turn("ask", "answer")], nextCursor: null }));
+      server.goal = {
+        threadId: "legacy",
+        objective: "Ship the page",
+        status: "active",
+      };
+      const task = host.runTurn(45, "continue");
+      await vi.waitFor(() => expect(callsOf("thread/start")).toHaveLength(1));
+      expect(
+        callsOf("thread/resume").filter((p) => p.threadId === "legacy"),
+      ).toEqual([]);
+      expect(String(callsOf("thread/start")[0].developerInstructions)).toContain(
+        "legacy remains saved",
+      );
+      server.finish("thread-1", "Continued");
+      await task;
+    });
+
+    it("lets nothing the legacy thread says during the read reach the chat", async () => {
+      // A resume answers with the thread's goal state (the cold probe saw
+      // thread/goal/cleared on each read), and a turn could still start. The
+      // chat maps to the legacy thread until the new one exists, so either
+      // would be routed to it.
+      host.close();
+      writeFileSync(
+        join(home, "threads.json"),
+        JSON.stringify({ 46: "legacy" }),
+      );
+      const onGoalUpdate = vi.fn();
+      const onAdoptedTurn = vi.fn(() => null);
+      host = new CodexHost({
+        auth: { ok: true, mode: "chatgpt", label: "test" },
+        workdir: home,
+        server: server as any,
+        tools,
+        onGoalUpdate,
+        onAdoptedTurn,
+      });
+      unindexed(() => ({ data: [turn("ask", "answer")], nextCursor: null }));
+      const paging = server.request.getMockImplementation()!;
+      server.request.mockImplementation(async (method: string, p: any) => {
+        const answer = await paging(method, p);
+        if (method === "thread/resume" && p.threadId === "legacy") {
+          server.emit("notification", "thread/goal/cleared", {
+            threadId: "legacy",
+          });
+          server.emit("notification", "turn/started", {
+            threadId: "legacy",
+            turn: { id: "turn-legacy", status: "inProgress" },
+          });
+        }
+        return answer;
+      });
+      const task = host.runTurn(46, "continue");
+      await vi.waitFor(() => expect(callsOf("thread/start")).toHaveLength(1));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(onGoalUpdate).not.toHaveBeenCalled();
+      expect(onAdoptedTurn).not.toHaveBeenCalled();
+      server.finish("thread-1", "Continued");
+      await task;
+    });
+
+    it("lets the thread go even when the page after the resume fails", async () => {
+      legacyHost(47);
+      const loadedHere = unindexed(() => {
+        throw new Error("page failed");
+      });
+      const task = host.runTurn(47, "continue");
+      await vi.waitFor(() => expect(callsOf("thread/start")).toHaveLength(1));
+      expect(callsOf("thread/unsubscribe")).toEqual([{ threadId: "legacy" }]);
+      expect(loadedHere.has("legacy")).toBe(false);
+      server.finish("thread-1", "Continued");
+      await task;
+    });
+
+    it("still upgrades the thread when the history resume fails", async () => {
+      legacyHost(48);
+      unindexed(() => ({ data: [turn("ask", "answer")], nextCursor: null }));
+      const paging = server.request.getMockImplementation()!;
+      server.request.mockImplementation(async (method: string, p: any) => {
+        if (method === "thread/resume" && p.threadId === "legacy")
+          throw new Error("no rollout found");
+        return paging(method, p);
+      });
+      const task = host.runTurn(48, "continue");
+      await vi.waitFor(() => expect(callsOf("thread/start")).toHaveLength(1));
+      expect(String(callsOf("thread/start")[0].developerInstructions)).toContain(
+        "legacy remains saved",
+      );
+      expect(callsOf("thread/unsubscribe")).toEqual([]);
+      server.finish("thread-1", "Continued");
+      await task;
+    });
   });
 });

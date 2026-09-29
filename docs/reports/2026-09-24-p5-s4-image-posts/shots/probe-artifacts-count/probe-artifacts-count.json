@@ -1,0 +1,68 @@
+{
+  "at": "2026-09-24T04:52:19.786Z",
+  "note": "development probe, not a stage 4 claim; the app is vtdist-base, unchanged by stage 4",
+  "results": {
+    "dark-phone": {
+      "countText": "1 item",
+      "countBox": {
+        "x": 338.2,
+        "y": 12,
+        "w": 35.8,
+        "h": 44,
+        "right": 374,
+        "bottom": 56
+      },
+      "countLines": 2,
+      "countLineHeight": 22,
+      "subtitleBox": {
+        "x": 96,
+        "y": 35,
+        "w": 259.8,
+        "h": 18,
+        "right": 355.8,
+        "bottom": 53
+      },
+      "overlapPx": {
+        "x": 17.600000000000023,
+        "y": 18
+      },
+      "overlaps": true,
+      "window": {
+        "w": 390,
+        "h": 844
+      },
+      "frame": "E:\\bgos-worktrees\\_tools-p5\\vt\\vt-images-probe-artifacts-count\\artifacts-count-dark-phone-3x.png"
+    },
+    "light-phone": {
+      "countText": "1 item",
+      "countBox": {
+        "x": 338.2,
+        "y": 12,
+        "w": 35.8,
+        "h": 44,
+        "right": 374,
+        "bottom": 56
+      },
+      "countLines": 2,
+      "countLineHeight": 22,
+      "subtitleBox": {
+        "x": 96,
+        "y": 35,
+        "w": 259.8,
+        "h": 18,
+        "right": 355.8,
+        "bottom": 53
+      },
+      "overlapPx": {
+        "x": 17.600000000000023,
+        "y": 18
+      },
+      "overlaps": true,
+      "window": {
+        "w": 390,
+        "h": 844
+      },
+      "frame": "E:\\bgos-worktrees\\_tools-p5\\vt\\vt-images-probe-artifacts-count\\artifacts-count-light-phone-3x.png"
+    }
+  }
+}

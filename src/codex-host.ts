@@ -52,6 +52,7 @@ import {
   planModeOn,
   planWaitEnforced,
 } from "./plan-mode.js";
+import { collectGeneratedImage } from "./generated-images.js";
 
 export interface DynamicTool {
   type: "function";
@@ -146,6 +147,53 @@ export interface PlanProposalSignal {
   itemId: string;
   /** The plan, as markdown. Already finalized; never a partial. */
   text: string;
+  /**
+   * The pictures this turn finished BEFORE the plan, in order (stage 4,
+   * C-21, review finding 2). The card is posted from inside the turn and is
+   * read as blocked; a picture posted after it would be read as done and run
+   * over it, so the adapter posts these first. Absent when there are none.
+   */
+  images?: GeneratedImage[];
+}
+/**
+ * Why the runtime refused a picture. The 0.154.0 schema has one variant,
+ * `usageLimitExceeded {limitId, resetsAt}`; anything else is kept by its type
+ * so the adapter can still say something plain.
+ */
+export interface GeneratedImageFailure {
+  type: string;
+  limitId?: string;
+  /** Epoch seconds on this protocol. Absent when the runtime gave none. */
+  resetsAt?: number;
+}
+/**
+ * A picture the runtime's image generation tool finished this turn, as the
+ * turn keeps it (stage 4, C-21). Decoded when its `imageGeneration` item
+ * completes (generated-images.ts), so a turn holds the BYTES and never the
+ * base64 string, and posted by the adapter when the turn finishes, first in
+ * the reply. Never mid turn: a standard post mid turn marks a Codex agent
+ * done for the whole rest of the turn (gap 04).
+ */
+export interface GeneratedImage {
+  itemId: string;
+  /** The picture, capped at the 10 MB image limit. Absent when there is
+   *  nothing to post: a refusal, an empty result, or bytes that are not an
+   *  image. */
+  bytes?: Buffer;
+  mimeType?: string;
+  fileName?: string;
+  /** The prompt the image model actually used, for the caption. */
+  revisedPrompt?: string;
+  /** Where the runtime saved its own copy, when the save worked. Only ever
+   *  compared against `MEDIA:` lines and shown on the row; never read. */
+  savedPath?: string;
+  /** The runtime handed back a non empty `result`, whether or not it decoded
+   *  (not a picture, over the cap), or one on a line too large to read at all
+   *  (`tooLarge`, src/app-server.ts, Round 8). Codex MADE something then, so a
+   *  picture that cannot be shown says "made" and never "tried". The string
+   *  itself is never kept. */
+  returnedOutput?: true;
+  failure?: GeneratedImageFailure;
 }
 export interface RunTurnCallbacks {
   signal?: AbortSignal;
@@ -206,6 +254,14 @@ export interface RunTurnResult {
    * out of the way. Absent and false both mean no plan item was seen.
    */
   sawPlanProposal?: boolean;
+  /**
+   * The pictures this turn made, in the order their items completed, one per
+   * item id. Filled by `result()`, the one constructor every outcome goes
+   * through, so a failed turn, a stopped turn and the watchdog's result all
+   * carry the pictures that finished first. Optional so a hand built result
+   * compiles; absent means none.
+   */
+  images?: GeneratedImage[];
 }
 interface ActiveTurn {
   id?: string;
@@ -261,6 +317,23 @@ interface ActiveTurn {
    */
   childBaseName: Map<string, string>;
   /**
+   * The pictures this turn finished, keyed on the item id, which is the
+   * dedupe: a second `item/completed` for the same picture is still one
+   * picture. REQUIRED, not optional, so the compiler makes BOTH constructors
+   * (`execute` and `adoptTurn`) start one; the second constructor is the one
+   * that gets forgotten.
+   */
+  images: Map<string, GeneratedImage>;
+  /**
+   * The ids of the pictures this turn already handed to `onPlanProposal`
+   * (re-review item 4). The adapter deals with every one of them before the
+   * card, by posting it or by posting its line, so when an owner turn takes
+   * this thread over, `execute` must not copy them into that turn as well:
+   * its picture record starts empty and would post them a second time.
+   * REQUIRED for the same reason `images` is.
+   */
+  handedOff: Set<string>;
+  /**
    * The runtime already handed this turn a finished `plan` item, so the
    * adapter's `<proposed_plan>` fallback must not post a second card. Read on
    * the result, never inside the notification loop.
@@ -278,7 +351,10 @@ interface ActiveTurn {
    * Present only on an ADOPTED turn: drop its bookkeeping without delivering
    * anything. A turn the owner asks for takes the same thread key (the app
    * server steers a running turn rather than starting a second one), and the
-   * outcome then belongs to the turn that replaced it.
+   * outcome then belongs to the turn that replaced it. That includes the
+   * pictures it already finished: `execute` copies `images` across before it
+   * calls this, because nothing else would ever post them, except the ones in
+   * `handedOff`, which its plan card already dealt with.
    */
   release?: () => void;
 }
@@ -410,6 +486,67 @@ function workerStatesOf(
 const CHILD_READ_TIMEOUT_MS = 5_000;
 
 /**
+ * PAST_TURNS_NOTE: no request this host sends brings a thread's past turns
+ * back in its reply (stage 4, C-21, review finding 4).
+ *
+ * The runtime keeps every generated picture's full base64 `result` in the
+ * rollout, and `thread/resume`, `thread/fork` and `thread/read
+ * {includeTurns:true}` all hydrate `thread.turns` unless told not to. A chat
+ * with about six pictures then answers ONE resume with a single line over the
+ * 16 MiB cap in src/app-server.ts. That used to close the connection and fail
+ * every live turn on this daemon, for every chat; since Round 7 the reader
+ * drops only that line and fails only that resume, which is still the chat's
+ * turn, again on every later resume of that chat. Measured on the vendored
+ * 0.154.0 binary: 14.23 MiB for five pictures without the flag, 3.9 KB with
+ * it.
+ *
+ * The 0.154.0 schema (`codex app-server generate-ts --experimental`) offers
+ * the cure in so many words. ThreadResumeParams.excludeTurns and
+ * ThreadForkParams.excludeTurns: "When true, return only thread metadata ...
+ * without populating `thread.turns` ... Full-history hydration is deprecated
+ * for paginated threads; use this with `thread/turns/list` and
+ * `thread/items/list` instead." ThreadReadParams.includeTurns: "prefer a
+ * metadata-only read and page with `thread/turns/list`". So both resumes and
+ * the fork pass `excludeTurns: true` (none of them reads a turn), every
+ * metadata read passes `includeTurns: false`, and the one reader that needs
+ * old text, the legacy tool upgrade below, pages `thread/turns/list` a few
+ * turns at a time instead: cold first, and only a thread the runtime's history
+ * index has not seen is resumed (metadata only) to be paged, then let go
+ * (Round 7, recentThreadMessages).
+ */
+/** How much recent conversation a legacy tool upgrade carries over. */
+const LEGACY_CONTEXT_CHARS = 60_000;
+/**
+ * Turns per `thread/turns/list` page for that upgrade, newest first. Small, so
+ * that even a page whose summary view did carry pictures (not seen on the
+ * 0.154.0 probe, where a summary turn holds its userMessage and agentMessage)
+ * stays far below the line cap.
+ */
+const LEGACY_HISTORY_PAGE_TURNS = 4;
+/** The most pages one upgrade reads (100 turns): the budget ends it sooner. */
+const LEGACY_HISTORY_MAX_PAGES = 25;
+
+/** The user and agent text of one turn, in the turn's own order. */
+function turnMessages(turn: RpcObject): Array<{ role: string; text: string }> {
+  const items: RpcObject[] = Array.isArray(turn?.items) ? turn.items : [];
+  return items.flatMap((item) =>
+    item.type === "agentMessage"
+      ? [{ role: "assistant", text: String(item.text ?? "") }]
+      : item.type === "userMessage"
+        ? [
+            {
+              role: "user",
+              text: (Array.isArray(item.content) ? item.content : [])
+                .filter((c: RpcObject) => c.type === "text")
+                .map((c: RpcObject) => c.text)
+                .join("\n"),
+            },
+          ]
+        : [],
+  );
+}
+
+/**
  * The child's readable name off its own thread: its nickname, else its role.
  *
  * The parent's stream carries no name for a child anywhere, so this metadata
@@ -493,6 +630,13 @@ export class CodexHost {
   private readonly toolVersions: ThreadMap;
   private readonly toolVersionsFile: string;
   private readonly loaded = new Set<string>();
+  /**
+   * Legacy threads resumed ONLY to read their history (Round 7, see
+   * recentThreadMessages). Nothing such a thread says reaches a chat: the chat
+   * still maps to it while the read runs, so a goal notification or a turn
+   * would otherwise be routed to the chat that is leaving it.
+   */
+  private readonly historyReads = new Set<string>();
   private readonly active = new Map<string, ActiveTurn>();
   private readonly queues = new Map<number, Promise<unknown>>();
   private hints = BGOS_AGENT_HINTS;
@@ -918,6 +1062,8 @@ export class CodexHost {
         threadId,
         cwd: this.workdir,
         developerInstructions: this.hints,
+        // Only the identity is read below. See PAST_TURNS_NOTE.
+        excludeTurns: true,
       });
       if (result.thread?.id !== threadId)
         throw new Error("Codex returned a different conversation.");
@@ -933,6 +1079,9 @@ export class CodexHost {
       const result = await this.server.request("thread/fork", {
         threadId: parent,
         cwd: this.workdir,
+        // The fork still copies every turn; only its REPLY leaves them out,
+        // and only the new id is read below. See PAST_TURNS_NOTE.
+        excludeTurns: true,
       });
       const id = result.thread?.id;
       if (typeof id !== "string" || !id || id === parent)
@@ -1173,6 +1322,111 @@ export class CodexHost {
       relay,
     );
   }
+  /**
+   * A thread's recent user and agent text, oldest first, read a few summary
+   * turns at a time from the newest, until `budget` characters are in hand or
+   * the history ends. Best effort: a page that cannot be read ends the walk
+   * with what was read, and the upgrade goes ahead without it rather than
+   * failing the turn.
+   *
+   * COLD FIRST (Round 7; the probes are in the stage 4 red-proofs.md). The
+   * runtime pages a thread's turns out of its thread history index, and that
+   * index knows every thread the app server made, loaded or not: on the
+   * vendored 0.154.0 binary a second app server on the same home paged two
+   * such threads cold, with no resume and nothing loaded. A thread the index
+   * has never seen (a rollout older than the index, or one copied in) pages
+   * nothing until something loads it: `turns=0 nextCursor=null` cold, the turn
+   * once resumed. So only a first page that comes back empty with no cursor,
+   * or fails, resumes the thread, metadata only (see PAST_TURNS_NOTE), pages
+   * it again, and lets it go.
+   *
+   * NEVER A THREAD WHOSE GOAL IS ACTIVE. A cold resume of a stored thread with
+   * an active goal started the goal's continuation turn by itself within
+   * seconds, on the same binary. Here that would be model spend on a thread
+   * being retired, with its old tools, in a turn this host would adopt into
+   * the chat. So an active goal, or a goal read that fails, skips the resume,
+   * and the upgrade carries no old text, as it did before.
+   */
+  private async recentThreadMessages(
+    threadId: string,
+    budget: number,
+  ): Promise<Array<{ role: string; text: string }>> {
+    const cold = await this.pageThreadMessages(threadId, budget);
+    if (!cold.unread) return cold.messages;
+    try {
+      const { goal } = await this.server.request("thread/goal/get", {
+        threadId,
+      });
+      if (goal?.status === "active") return [];
+    } catch {
+      return [];
+    }
+    this.historyReads.add(threadId);
+    try {
+      try {
+        await this.server.request("thread/resume", {
+          threadId,
+          cwd: this.workdir,
+          excludeTurns: true,
+        });
+      } catch {
+        return [];
+      }
+      try {
+        return (await this.pageThreadMessages(threadId, budget)).messages;
+      } finally {
+        await this.server
+          .request("thread/unsubscribe", { threadId })
+          .catch(() => {});
+      }
+    } finally {
+      this.historyReads.delete(threadId);
+    }
+  }
+  /**
+   * The paging walk itself. `unread` is true when the FIRST page failed or
+   * came back with no turns and no cursor: the answer a thread the history
+   * index has not seen gives, and the one reason to resume it and look again.
+   */
+  private async pageThreadMessages(
+    threadId: string,
+    budget: number,
+  ): Promise<{
+    messages: Array<{ role: string; text: string }>;
+    unread: boolean;
+  }> {
+    const newestFirst: Array<{ role: string; text: string }> = [];
+    let collected = 0;
+    let cursor: string | null = null;
+    for (let page = 0; page < LEGACY_HISTORY_MAX_PAGES; page += 1) {
+      let result: RpcObject;
+      try {
+        result = await this.server.request("thread/turns/list", {
+          threadId,
+          itemsView: "summary",
+          sortDirection: "desc",
+          limit: LEGACY_HISTORY_PAGE_TURNS,
+          ...(cursor ? { cursor } : {}),
+        });
+      } catch {
+        return { messages: newestFirst.reverse(), unread: page === 0 };
+      }
+      const turns: RpcObject[] = Array.isArray(result?.data) ? result.data : [];
+      for (const turn of turns)
+        for (const message of turnMessages(turn).reverse()) {
+          newestFirst.push(message);
+          collected += message.text.length;
+        }
+      cursor =
+        typeof result?.nextCursor === "string" && result.nextCursor
+          ? result.nextCursor
+          : null;
+      if (page === 0 && turns.length === 0 && !cursor)
+        return { messages: [], unread: true };
+      if (!cursor || collected >= budget) break;
+    }
+    return { messages: newestFirst.reverse(), unread: false };
+  }
   private async ensureThread(chatId: number): Promise<string> {
     await this.server.start();
     let threadId: string | undefined = this.map[String(chatId)];
@@ -1207,29 +1461,13 @@ export class CodexHost {
         // Dynamic tools are fixed at thread creation. Keep the old native
         // transcript intact and carry recent attributed text to a new thread.
         // Never silently resume a legacy thread that cannot call HOAI tools.
-        const previous = await this.server.request("thread/read", {
+        // Never `thread/read {includeTurns:true}`: that is the whole history
+        // in one line, pictures and all. See PAST_TURNS_NOTE.
+        const messages = await this.recentThreadMessages(
           threadId,
-          includeTurns: true,
-        });
-        const messages = (previous.thread.turns ?? []).flatMap(
-          (turn: RpcObject) =>
-            (turn.items ?? []).flatMap((item: RpcObject) =>
-              item.type === "agentMessage"
-                ? [{ role: "assistant", text: item.text }]
-                : item.type === "userMessage"
-                  ? [
-                      {
-                        role: "user",
-                        text: (item.content ?? [])
-                          .filter((c: RpcObject) => c.type === "text")
-                          .map((c: RpcObject) => c.text)
-                          .join("\n"),
-                      },
-                    ]
-                  : [],
-            ),
+          LEGACY_CONTEXT_CHARS,
         );
-        let budget = 60_000;
+        let budget = LEGACY_CONTEXT_CHARS;
         const recent: RpcObject[] = [];
         for (const message of messages.slice().reverse()) {
           if (budget <= 0) break;
@@ -1247,7 +1485,12 @@ export class CodexHost {
         threadId = undefined;
       }
       const result = threadId
-        ? await this.server.request("thread/resume", { ...params, threadId })
+        ? await this.server.request("thread/resume", {
+            ...params,
+            threadId,
+            // Only the identity is read below. See PAST_TURNS_NOTE.
+            excludeTurns: true,
+          })
         : await this.server.request("thread/start", {
             ...params,
             developerInstructions: this.hints + priorContext,
@@ -1333,6 +1576,8 @@ export class CodexHost {
         childFirstSeen: new Map(),
         childState: new Map(),
         childBaseName: new Map(),
+        images: new Map(),
+        handedOff: new Set(),
         parkWatchdog,
         resumeWatchdog,
         finish: (result) => {
@@ -1360,7 +1605,18 @@ export class CodexHost {
       // A continuation turn this process adopted holds the same thread key.
       // Drop its bookkeeping before taking the thread, or its tick outlives
       // it and its result is delivered for work this turn now owns.
-      this.active.get(id)?.release?.();
+      //
+      // The pictures it already finished come across first. The release
+      // delivers nothing, and the app server steers the same runtime turn, so
+      // this turn's result is the only place those pictures can still reach
+      // the chat: they exist and the quota is spent. Not the ones its plan
+      // card was handed (re-review item 4): those were posted before the
+      // card, and this turn's fresh picture record would post them again.
+      const prior = this.active.get(id);
+      if (prior?.release)
+        for (const [itemId, image] of prior.images)
+          if (!prior.handedOff.has(itemId)) turn.images.set(itemId, image);
+      prior?.release?.();
       this.active.set(id, turn);
       void this.server
         .request(
@@ -1409,10 +1665,12 @@ export class CodexHost {
       turnCompleted: completed,
       error,
       ...(turn.sawPlanProposal ? { sawPlanProposal: true } : {}),
+      ...(turn.images.size > 0 ? { images: [...turn.images.values()] } : {}),
       ...turnClock(reported),
     };
   }
   private notification(method: string, params: RpcObject): void {
+    if (this.historyReads.has(String(params.threadId ?? ""))) return;
     if (method === "thread/tokenUsage/updated")
       this.usage.set(params.threadId, params.tokenUsage);
     // Markers sit ABOVE the active-turn guard on purpose: the owner's own
@@ -1541,6 +1799,13 @@ export class CodexHost {
       if (item.type === "plan") {
         if (!started && typeof item.text === "string" && item.text.trim()) {
           turn.sawPlanProposal = true;
+          // The pictures finished BEFORE this plan, taken now rather than a
+          // microtask later, and recorded as handed off when a card is there
+          // to take them (re-review item 4): the adapter posts them ahead of
+          // the card, so a turn that takes this thread over must not.
+          const images = [...turn.images.values()];
+          if (turn.callbacks.onPlanProposal)
+            for (const image of images) turn.handedOff.add(image.itemId);
           turn.pending.push(
             Promise.resolve()
               .then(() =>
@@ -1548,12 +1813,32 @@ export class CodexHost {
                   turnId: params.turnId ?? null,
                   itemId: itemKey,
                   text: String(item.text),
+                  ...(images.length > 0 ? { images } : {}),
                 }),
               )
               .catch(() => {}),
           );
         }
         return;
+      }
+      // A PICTURE THE MODEL MADE, kept for the end of the turn (stage 4,
+      // C-21). On `item/completed` only: `item/started` opens the row and
+      // carries no finished picture. Decoded now and the base64 dropped, so
+      // the turn holds bytes and not a string a third bigger. Keyed on the
+      // item id, which is the dedupe.
+      //
+      // It FALLS THROUGH, unlike the plan branch above: this item is still a
+      // tool row, and the row below must be built on both phases. Never posted
+      // from here: a standard post mid turn marks a Codex agent done for the
+      // rest of the turn (gap 04), so the adapter posts it with the reply.
+      if (
+        !started &&
+        item.type === "imageGeneration" &&
+        itemKey &&
+        !turn.images.has(itemKey)
+      ) {
+        const image = collectGeneratedImage(item);
+        if (image) turn.images.set(itemKey, image);
       }
       if (started && itemKey && typeof params.startedAtMs === "number")
         turn.rowStartedAt.set(itemKey, params.startedAtMs);
@@ -1996,6 +2281,8 @@ export class CodexHost {
       childFirstSeen: new Map(),
       childState: new Map(),
       childBaseName: new Map(),
+      images: new Map(),
+      handedOff: new Set(),
       finish: (result) => {
         if (!forget()) return;
         void Promise.allSettled(turn.pending)

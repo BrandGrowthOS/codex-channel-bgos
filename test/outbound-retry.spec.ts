@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { BgosOutbound } from "../src/outbound.js";
+import { BgosOutbound, OutboundSpooledError } from "../src/outbound.js";
 import { classifyOutboundError } from "../src/outbound-retry.js";
 import { loadOutbox } from "../src/outbox.js";
 import type { BgosApi } from "../src/bgos-api.js";
@@ -125,6 +125,62 @@ describe("BgosOutbound retry + spool", () => {
     // Network recovers -> replay drains the spool.
     failing = false;
     await out.replaySpool();
+    expect(loadOutbox()).toHaveLength(0);
+  });
+
+  /**
+   * Stage 4 (C-21), finding 8: a caller has to be able to tell QUEUED from
+   * LOST. A picture the outbox took will still land, so the turn must not
+   * post "(Codex finished the turn without a text reply.)" or "could not be
+   * shown" for it. The rejection stays a rejection (every other caller
+   * swallows it exactly as before); it just says it was spooled.
+   */
+  it("says a send it spooled was spooled, with the network error as its cause", async () => {
+    const api = fakeApi(async () => {
+      throw netErr("ECONNREFUSED");
+    });
+    const out = new BgosOutbound(api);
+    out.setSleepFn(async () => {});
+    const png = Buffer.from(
+      "89504e470d0a1a0a0000000d4948445200000001000000010806000000",
+      "hex",
+    );
+    const err = await out
+      .sendImageBytes({
+        assistantId: 1,
+        chatId: 2,
+        bytes: png,
+        fileName: "codex-image-1.png",
+        mimeType: "image/png",
+        caption: "Prompt: a circle",
+      })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+    expect(err).toBeInstanceOf(OutboundSpooledError);
+    expect((err as OutboundSpooledError).spooled).toBe(true);
+    expect((err as OutboundSpooledError).cause).toMatchObject({
+      code: "ECONNREFUSED",
+    });
+    expect((err as Error).message).toBe("ECONNREFUSED");
+    expect(loadOutbox()).toHaveLength(1);
+  });
+
+  it("never calls an ambiguous failure spooled", async () => {
+    const api = fakeApi(async () => {
+      throw httpErr(502);
+    });
+    const out = new BgosOutbound(api);
+    out.setSleepFn(async () => {});
+    const err = await out
+      .sendText({ assistantId: 1, chatId: 2, text: "hi" })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+    expect(err).toBeTruthy();
+    expect(err).not.toBeInstanceOf(OutboundSpooledError);
     expect(loadOutbox()).toHaveLength(0);
   });
 });

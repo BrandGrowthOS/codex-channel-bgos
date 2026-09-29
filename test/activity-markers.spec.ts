@@ -587,13 +587,65 @@ describe("pathCount counts files, and only when there is more than one", () => {
     expect(two.card.args).toBe("src/a.ts +1");
   });
 
+  // Stage 4 (C-21): this fixture used to carry a `path` field, which an
+  // imageGeneration item does not have. The wire field is `savedPath`, so the
+  // row never showed the file in production while this case stayed green.
   it("gives a single image path no count either", () => {
     const row = entryFromItem(
-      { id: "im2", type: "imageGeneration", path: "out.png" },
+      { id: "im2", type: "imageGeneration", savedPath: "out.png" },
       "completed",
     )!;
     expect(row.card.path).toBe("out.png");
     expect(row.card).not.toHaveProperty("pathCount");
+  });
+
+  it("reads a generated picture's savedPath, never its base64", () => {
+    const home = "C:\\Users\\owner";
+    const row = entryFromItem(
+      {
+        type: "imageGeneration",
+        id: "ig_1",
+        status: "completed",
+        revisedPrompt: "A plain gold circle",
+        result: "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJ",
+        transparentBackground: false,
+        failure: null,
+        savedPath: `${home}\\.codex\\generated_images\\t1\\ig_1.png`,
+      },
+      "completed",
+      { home, cwd: "C:\\work" },
+    )!;
+    expect(row.card.path).toBe("~\\.codex\\generated_images\\t1\\ig_1.png");
+    expect(row.card.status).toBe("done");
+    expect(JSON.stringify(row)).not.toContain("iVBORw0KGgo");
+  });
+
+  it("draws a refused picture in its error colour, whatever its status says", () => {
+    const row = entryFromItem(
+      {
+        type: "imageGeneration",
+        id: "ig_2",
+        status: "completed",
+        result: "",
+        failure: {
+          type: "usageLimitExceeded",
+          limitId: "image_generation",
+          resetsAt: 1790240000,
+        },
+        savedPath: null,
+      },
+      "completed",
+    )!;
+    expect(row.card.status).toBe("error");
+  });
+
+  it("still reads an imageView row's own path", () => {
+    const row = entryFromItem(
+      { id: "iv1", type: "imageView", path: "shot.png" },
+      "completed",
+    )!;
+    expect(row.card.name).toBe("view_image");
+    expect(row.card.path).toBe("shot.png");
   });
 });
 
