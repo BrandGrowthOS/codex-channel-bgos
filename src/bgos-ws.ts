@@ -10,6 +10,10 @@ import {
   type MissionEventFrame,
 } from "./mission-events.js";
 import { normalizeSkillsRpc, type SkillsRpcFrame } from "./skills-handler.js";
+import {
+  normalizeChangesRpc,
+  type ChangesRpcFrame,
+} from "./changes-handler.js";
 import { normalizeVoiceRpc, type VoiceRpcFrame } from "./voice-rpc.js";
 import {
   PairingRevokedError,
@@ -36,6 +40,8 @@ type EventMap = {
   callback_result: [CallbackResultPayload];
   voice_rpc: [VoiceRpcFrame];
   skills_rpc: [SkillsRpcFrame];
+  /** The owner's Changes panel reads this agent's uncommitted changes. */
+  changes_rpc: [ChangesRpcFrame];
   /** One mission lifecycle frame, already normalized and deduped. */
   mission_event: [MissionEventFrame];
   error: [Error];
@@ -210,6 +216,12 @@ export class BgosWs {
     socket.on("skills_rpc", (p: unknown) => {
       const frame = normalizeSkillsRpc(p);
       if (frame) this.emitter.emit("skills_rpc", frame);
+    });
+    // The owner's Changes panel (P7 stage 3). A frame with no rpcId is
+    // dropped here; every other one goes to the handler, which answers it.
+    socket.on("changes_rpc", (p: unknown) => {
+      const frame = normalizeChangesRpc(p);
+      if (frame) this.emitter.emit("changes_rpc", frame);
     });
     // Mission lifecycle (mission program stage 5). Eight frames, one handler
     // shape. This listener advances NO cursor (loadLastId / saveLastId is the

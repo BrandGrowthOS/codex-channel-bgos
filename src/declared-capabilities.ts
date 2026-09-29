@@ -102,6 +102,17 @@ export { STOP_PAUSES_MISSION };
  */
 export { SESSIONS_LIBRARY };
 
+/**
+ * This daemon answers `changes_rpc` (op `diff`, scope `uncommitted`) with
+ * read only Git in its working folder. Declared from the release that ships
+ * the handler (src/changes-handler.ts).
+ *
+ * The owner's Changes panel sends a frame only to a pairing that declared
+ * this token, and shows "Update its BGOS connector" to one that has not. The
+ * owner's per agent switch is enforced by the backend, never read here.
+ */
+export const CHANGES_RPC = "changes_rpc";
+
 export const DECLARED_CAPABILITIES: readonly string[] = Object.freeze([
   MISSION_EVENTS,
   MISSION_GOAL_LOOP,
@@ -109,4 +120,5 @@ export const DECLARED_CAPABILITIES: readonly string[] = Object.freeze([
   REQUEST_REASON,
   STOP_PAUSES_MISSION,
   SESSIONS_LIBRARY,
+  CHANGES_RPC,
 ]);

@@ -2,6 +2,19 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { CodexHost, RunTurnCallbacks } from "./codex-host.js";
+import {
+  checkGitFloor,
+  createFindGit,
+  GIT_FLOOR_MESSAGE,
+  gitReadEnv,
+  GitTooOldError,
+  nodeChangesFs,
+  NO_FSMONITOR,
+  NO_INDEX_REFRESH,
+  topLevelHolds,
+  type FindGit,
+  type GitVersionCache,
+} from "./git-changes.js";
 import { formatGoalSeconds, goalStatusWord, GOAL_DEFAULT_TURN_CAP } from "./goal-lane.js";
 import type { ThreadGoal } from "./goal-protocol.js";
 import type { DispatchArgs } from "./inbound-handler.js";
@@ -120,6 +133,62 @@ export function normalizeNativeCommand(command: {
   return { ...command, name: aliases[name] ?? name };
 }
 const exec = promisify(execFile);
+
+/**
+ * The native /diff's Git command. /diff reads the same folder the Changes
+ * panel reads, so it keeps the collector's rules and its threat model
+ * (git-changes.ts): the fsmonitor a repository names is off, a porcelain
+ * diff never refreshes the index, and Git runs by the absolute path found on
+ * PATH's absolute entries with Git's read environment (the repository
+ * variables dropped, GIT_OPTIONAL_LOCKS=0). Until fix round w4 (R-3) /diff
+ * ran a bare `git` from the agent's folder, which a git.exe in that folder
+ * (one a clone can carry) answered on Windows, with none of those rules: a
+ * gap there since /diff was written. Since fix round w5 its Git also runs
+ * with GIT_NO_LAZY_FETCH=1 (in Git's read environment), which turns lazy
+ * fetching from a promisor remote off on a Git that knows the variable; a
+ * Git from 2.36 that does not know it can still fetch lazily, the gap the
+ * collector's header documents. With a Git below 2.36, or one whose version
+ * cannot be read, it runs nothing after `git version` (W4-N3): the Git found
+ * must meet the floor first, through the cache the panel uses. And its top
+ * level must be the agent's folder or one above it, as real paths, or no
+ * diff runs (W4-N4): until then a core.worktree the agent set posted another
+ * folder's files as its diff. That check covers the top level alone; the
+ * Git directory and the common directory are not checked, on purpose. The
+ * floor, the variable and the top level check are defence in depth against
+ * the agent's own config, as the collector's header explains. A clean
+ * filter the repository names still runs on this diff, as on the panel's:
+ * an accepted limit, whose reasons are in git-changes.ts.
+ */
+const NATIVE_TOPLEVEL_ARGS = [...NO_FSMONITOR, "rev-parse", "--show-toplevel"] as const;
+
+/** The top level is outside the agent's folder (fix round w5, W4-N4). */
+class TopLevelOutside extends Error {}
+const NATIVE_DIFF_ARGS = [
+  ...NO_FSMONITOR,
+  ...NO_INDEX_REFRESH,
+  "--no-pager",
+  "diff",
+  "--no-ext-diff",
+  "--no-textconv",
+  "HEAD",
+  "--",
+] as const;
+
+/** How /diff runs Git: execFile, never a shell (tests inject one). */
+export type ExecGit = (
+  file: string,
+  args: readonly string[],
+  options: {
+    cwd: string;
+    env: Record<string, string | undefined>;
+    windowsHide: boolean;
+    timeout: number;
+    maxBuffer: number;
+  },
+) => Promise<{ stdout: string }>;
+
+const execGitFile: ExecGit = (file, args, options) =>
+  exec(file, [...args], options);
 
 export function parseNativeCommand(
   text: string,
@@ -296,6 +365,13 @@ export class NativeCommands {
        * resumed thread. Never throws.
        */
       clearStopMarker: (chatId: number, assistantId: number) => Promise<void>;
+      /** /diff's Git lookup, the collector's own by default. */
+      findGit?: FindGit;
+      /** /diff's runner, execFile by default. */
+      execGit?: ExecGit;
+      /** Each Git path's floor verdict, the daemon's one cache by default
+       * (fix round w5, W4-N3). */
+      gitVersions?: GitVersionCache;
     },
   ) {}
 
@@ -630,24 +706,53 @@ export class NativeCommands {
     if (name === "diff") {
       let stdout: string;
       try {
-        ({ stdout } = await exec(
-          "git",
-          [
-            "--no-pager",
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "HEAD",
-            "--",
-          ],
-          {
-            cwd: host.workdir,
-            windowsHide: true,
-            timeout: 15_000,
-            maxBuffer: 512_000,
+        // Looked up per /diff, with the environment Git itself gets; no Git
+        // on an absolute PATH entry runs nothing and reads as not loaded.
+        const env = gitReadEnv(process.env);
+        const git = await (this.deps.findGit ?? createFindGit())(env).catch(
+          () => null,
+        );
+        if (!git) throw new Error("git was not found on an absolute PATH entry");
+        const execGit = this.deps.execGit ?? execGitFile;
+        const options = {
+          cwd: host.workdir,
+          env,
+          windowsHide: true,
+          timeout: 15_000,
+          maxBuffer: 512_000,
+        };
+        // Git 2.36 or later, or nothing (fix round w5, W4-N3). A Git that ran
+        // and failed has no version to read; one that could not start, or
+        // ran out of time, is the diff failing to load.
+        await checkGitFloor(
+          git,
+          async () => {
+            try {
+              return (await execGit(git, ["version"], options)).stdout;
+            } catch (failed) {
+              if (typeof (failed as { code?: unknown }).code === "number") return "";
+              throw failed;
+            }
           },
-        ));
+          this.deps.gitVersions,
+        );
+        // The top level is the agent's folder or above it, or no diff (fix
+        // round w5, W4-N4; the Git directory is not checked, on purpose).
+        const top =
+          (await execGit(git, NATIVE_TOPLEVEL_ARGS, options)).stdout.split(/\r?\n/)[0] ?? "";
+        if (!top) throw new Error("git rev-parse printed no folder");
+        if (!(await topLevelHolds(top, host.workdir, nodeChangesFs.realpath)))
+          throw new TopLevelOutside();
+        ({ stdout } = await execGit(git, NATIVE_DIFF_ARGS, options));
       } catch (error) {
+        if (error instanceof GitTooOldError)
+          throw new Error(
+            `${GIT_FLOOR_MESSAGE}. Update Git on this computer, then retry.`,
+          );
+        if (error instanceof TopLevelOutside)
+          throw new Error(
+            "This agent's repository keeps its working files outside the agent's folder, so its diff is not shown.",
+          );
         const detail = String((error as { stderr?: string }).stderr ?? "");
         if (/not a git repository/i.test(detail))
           throw new Error(

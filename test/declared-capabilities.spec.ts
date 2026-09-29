@@ -13,6 +13,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import {
+  CHANGES_RPC,
   DECLARED_CAPABILITIES,
   MISSION_EVENTS,
   MISSION_GOAL_CHECKS,
@@ -72,6 +73,19 @@ describe("DECLARED_CAPABILITIES", () => {
     // test/codex-capability-tokens.pin.spec.ts.
     expect(REQUEST_REASON).toBe("request_reason");
     expect(DECLARED_CAPABILITIES).toContain(REQUEST_REASON);
+  });
+
+  it("declares changes_rpc, because the handler answers it", () => {
+    // The owner's Changes panel (P7 stage 3) sends a frame only to a pairing
+    // that declared this token, so it ships in the same release as
+    // src/changes-handler.ts, and never before it.
+    expect(CHANGES_RPC).toBe("changes_rpc");
+    expect(
+      DECLARED_CAPABILITIES.filter((token) => token === "changes_rpc"),
+    ).toHaveLength(1);
+    expect(CHANGES_RPC).toMatch(CAPABILITY_TOKEN_REGEX);
+    expect(DECLARED_CAPABILITIES.length).toBeLessThanOrEqual(32);
+    expect(Object.isFrozen(DECLARED_CAPABILITIES)).toBe(true);
   });
 
   it("is frozen, so one constant is the single source", () => {

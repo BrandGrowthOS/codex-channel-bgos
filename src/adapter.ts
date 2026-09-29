@@ -115,6 +115,7 @@ import {
   type PlanDoor,
 } from "./plan-card.js";
 import { createSkillsHandler } from "./skills-handler.js";
+import { createChangesHandler } from "./changes-handler.js";
 import type { AuthResolutionOk } from "./auth-mode.js";
 import type { Input } from "@openai/codex-sdk";
 import {
@@ -269,6 +270,7 @@ export class CodexAdapter {
   private readonly cfg: PluginConfig;
   private readonly ws: BgosWs;
   private readonly skillsHandler: ReturnType<typeof createSkillsHandler>;
+  private readonly changesHandler: ReturnType<typeof createChangesHandler>;
   private readonly heartbeat: HeartbeatController;
   private readonly host: CodexHost;
   private readonly tools: HoaiTools;
@@ -483,6 +485,17 @@ export class CodexAdapter {
       onGoalUpdate: (chatId, goal) => this.goalLane.handleGoalUpdate(chatId, goal),
       // And the continuation turn itself, which nobody here asked for.
       onAdoptedTurn: (chatId) => this.adoptGoalTurn(chatId),
+    });
+    // The owner's Changes panel (P7 stage 3). Built after the host because it
+    // reads the host's folder: every agent this daemon runs works in that one
+    // folder, so each owned agent's panel shows it, which is the truth. A
+    // frame for an agent this daemon does not run is not answered at all,
+    // under the same cold scope rule the mission frames use.
+    this.changesHandler = createChangesHandler({
+      api: this.api,
+      workdir: this.host.workdir,
+      owns: (id) => this.ownsAssistantForMission(Number(id)),
+      log: (message) => console.warn(`${LOG} ${message}`),
     });
     // The third argument is not optional in practice: every mission the
     // typed tools write is stamped here, so a backend that sends no
@@ -729,6 +742,9 @@ export class CodexAdapter {
     });
     this.ws.on("skills_rpc", (frame) => {
       void this.skillsHandler(frame);
+    });
+    this.ws.on("changes_rpc", (frame) => {
+      void this.changesHandler(frame);
     });
     this.ws.on("voice_rpc", (frame) => {
       void this.handleControl(frame);

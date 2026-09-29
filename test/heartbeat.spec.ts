@@ -147,6 +147,7 @@ describe("HeartbeatController", () => {
           "request_reason",
           "stop_pauses_mission",
           "sessions_library",
+          "changes_rpc",
         ]);
       } finally {
         hb.stop();
@@ -200,6 +201,7 @@ describe("HeartbeatController", () => {
             "request_reason",
             "stop_pauses_mission",
             "sessions_library",
+            "changes_rpc",
           ]);
       } finally {
         hb.stop();

@@ -13,6 +13,11 @@ import {
 } from "./types.js";
 import type { VoiceRpcResultBody } from "./voice-rpc.js";
 import type { HeartbeatDto } from "./heartbeat.js";
+import {
+  CHANGES_ACK_TIMEOUT_MS,
+  CHANGES_RESULT_TIMEOUT_MS,
+} from "./changes-handler.js";
+import type { ChangesResultBody } from "./git-changes.js";
 
 const SKILLS_RPC_POST_TIMEOUT_MS = 3_000;
 
@@ -895,6 +900,35 @@ export class BgosApi {
       `integrations/skills-rpc/${encodeURIComponent(rpcId)}/result`,
       body,
       { timeout: SKILLS_RPC_POST_TIMEOUT_MS },
+    );
+    return r.data;
+  }
+
+  // -------------------------------------------------------------------
+  // The owner's Changes panel (changes_rpc, see changes-handler.ts)
+  // -------------------------------------------------------------------
+
+  /** ACK a changes_rpc frame: cancels the backend's one 1.5 s re emit. */
+  async changesRpcAck(rpcId: string): Promise<unknown> {
+    const r = await this.http.post(
+      `integrations/changes-rpc/${encodeURIComponent(rpcId)}/ack`,
+      {},
+      { timeout: CHANGES_ACK_TIMEOUT_MS },
+    );
+    return r.data;
+  }
+
+  /** Settle a changes_rpc frame. The body can carry a whole patch, so its
+   *  post gets longer than the control posts; the handler retries once only
+   *  while a retry can still land inside the backend's 20 s hold. */
+  async changesRpcResult(
+    rpcId: string,
+    body: ChangesResultBody,
+  ): Promise<unknown> {
+    const r = await this.http.post(
+      `integrations/changes-rpc/${encodeURIComponent(rpcId)}/result`,
+      body,
+      { timeout: CHANGES_RESULT_TIMEOUT_MS },
     );
     return r.data;
   }
