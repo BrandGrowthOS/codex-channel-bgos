@@ -243,6 +243,9 @@ describe("adopting a turn the app server started by itself", () => {
       generations: new Map<number, number>(),
       chatToAssistant: new Map<number, number>([[20, 10]]),
       assistantToRoute: new Map<number, string>(),
+      // The real constructor makes it: an owner Stop marks the continuation
+      // turn running in a chat (D35).
+      adoptedTurns: new Map<number, AbortController>(),
       goalLane,
       stepsLane,
       outbound: {

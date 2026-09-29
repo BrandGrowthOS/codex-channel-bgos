@@ -23,7 +23,27 @@ import { CommandsSync } from "./commands-sync.js";
 import { CommandUpgrade } from "./command-upgrade.js";
 import { ToolProgressOrchestrator } from "./tool-progress.js";
 import { MissionControlLane } from "./mission-control.js";
-import { MissionLane } from "./mission-lane.js";
+import {
+  MissionLane,
+  type GoalStop,
+  type MissionTurnToken,
+} from "./mission-lane.js";
+import { StopDiscards } from "./stop-discards.js";
+import { abortCauseOf, abortWith, missionAbortOutcome } from "./abort-cause.js";
+import {
+  LIST_SESSIONS,
+  RENAME_SESSION,
+  RESUME_SESSION,
+  SESSION_ID_PATTERN,
+  SESSION_QUERY_MAX,
+  SESSION_RENAME_MAX,
+  SESSIONS_LIST_MAX,
+  STOP_CONFIRMATION_HARD,
+  type ListSessionsAnswer,
+  type RenameSessionAnswer,
+  type ResumeSessionAnswer,
+  type SessionRow,
+} from "./session-controls-contract.js";
 import { GoalLane } from "./goal-lane.js";
 import { StepsLane, stepsChatKindAdmits } from "./steps-lane.js";
 import { MeetingLane } from "./meeting-lane.js";
@@ -48,9 +68,11 @@ import { pendingUnknownStats } from "./pending-unknown-store.js";
 import { pickCapabilitiesText } from "./capabilities.js";
 import {
   CodexHost,
+  ControlRefusal,
   type AdoptedTurn,
   type GeneratedImage,
   type RunTurnResult,
+  type SavedThread,
 } from "./codex-host.js";
 import {
   imageCaption,
@@ -73,9 +95,10 @@ import { HOAI_TOOLS, HoaiTools, type ToolContext } from "./hoai-tools.js";
 import { BGOS_AGENT_HINTS } from "./agent-hints.js";
 import { DECLARED_CAPABILITIES } from "./declared-capabilities.js";
 import { retireOrphanedApprovals, unescapeButton } from "./interactions.js";
-import type { VoiceRpcFrame } from "./voice-rpc.js";
+import type { VoiceRpcFrame, VoiceRpcResultBody } from "./voice-rpc.js";
 import { VoiceRpcHandler } from "./hoai-shared/voice-rpc.js";
 import { buildCodexInput, type InboundFileForCodex } from "./inbound-input.js";
+import { characterCount } from "./clip-text.js";
 import { parseReply } from "./reply-markers.js";
 import {
   PlanLane,
@@ -96,6 +119,7 @@ import type { AuthResolutionOk } from "./auth-mode.js";
 import type { Input } from "@openai/codex-sdk";
 import {
   NativeCommands,
+  RESUMED_SAVED_CONVERSATION,
   parseNativeCommand,
   normalizeNativeCommand,
   type NativeRunOptions,
@@ -114,6 +138,102 @@ const LOG = "[codex-channel-bgos]";
 function promptTextFromInput(input: Input): string {
   if (typeof input === "string") return input;
   return input.find((part) => part.type === "text")?.text ?? "";
+}
+
+/**
+ * Is this turn the OWNER coming back to the chat (P6 stage 3, D11)? A typed
+ * message, the Resume sentence, an owner slash command that starts a turn,
+ * a button they clicked. Never a scheduled wake (sender system), a peer
+ * agent's message or side thread, or a meeting turn; a goal's continuation
+ * turn never reaches executeAndReply at all. And never another person: a
+ * group member or a shared agent's recipient is not the owner, so the sender
+ * must be the owner whoami named, compared exactly as the native session
+ * controls compare it (NativeCommands.handle) and as the Claude plugin reads
+ * D11 (isOwnerAuthoredInbound). A turn with no person on it is not one, and
+ * neither is any turn before the daemon knows who its owner is.
+ */
+function isOwnerAuthoredTurn(
+  source: Partial<DispatchArgs> | undefined,
+  ownerId: string,
+): boolean {
+  if (!source || typeof ownerId !== "string" || !ownerId) return false;
+  if (source.senderType === "agent" || source.senderType === "system") return false;
+  if (source.peerConversationId) return false;
+  if (source.chatKind === "meeting") return false;
+  const sender = source.senderUserId ?? source.userId;
+  return typeof sender === "string" && sender !== "" && sender === ownerId;
+}
+
+/*
+ * The Sessions ops' payloads (P6 stage 3, spec 5.5), read against the
+ * contract file's limits. The backend validates first; these are the
+ * daemon's own check on a frame that crossed a machine boundary, and each
+ * refusal is the contract's `invalid`.
+ */
+
+/** The chat a Sessions op is about. */
+function sessionChatOf(chatId: number): number {
+  if (!Number.isSafeInteger(chatId) || chatId <= 0)
+    throw new ControlRefusal("invalid", "No chat was given for this session request.");
+  return chatId;
+}
+
+/** `list_sessions`' optional search, trimmed, at most SESSION_QUERY_MAX characters. */
+function sessionQueryOf(payload: Record<string, unknown>): string | undefined {
+  const query = payload.query;
+  if (query === undefined || query === null) return undefined;
+  if (typeof query !== "string")
+    throw new ControlRefusal("invalid", "A session search must be text.");
+  const trimmed = query.trim();
+  if (characterCount(trimmed) > SESSION_QUERY_MAX)
+    throw new ControlRefusal(
+      "invalid",
+      `A session search holds at most ${SESSION_QUERY_MAX} characters.`,
+    );
+  return trimmed || undefined;
+}
+
+/** At most SESSIONS_LIST_MAX rows, whatever the frame asks for. */
+function sessionLimitOf(payload: Record<string, unknown>): number {
+  const limit = payload.limit;
+  return typeof limit === "number" && Number.isInteger(limit) && limit >= 1
+    ? Math.min(limit, SESSIONS_LIST_MAX)
+    : SESSIONS_LIST_MAX;
+}
+
+/** A session id, as this daemon lists it and the app sends it back. */
+function sessionIdOf(payload: Record<string, unknown>): string {
+  const id = payload.sessionId;
+  if (typeof id !== "string" || !SESSION_ID_PATTERN.test(id))
+    throw new ControlRefusal("invalid", "That is not a session id.");
+  return id;
+}
+
+/** A new name: 1 to SESSION_RENAME_MAX characters after trimming, one line, no control characters. */
+function sessionTitleOf(payload: Record<string, unknown>): string {
+  const title = typeof payload.title === "string" ? payload.title.trim() : "";
+  if (
+    !title ||
+    characterCount(title) > SESSION_RENAME_MAX ||
+    /[\u0000-\u001f\u007f]/.test(title)
+  )
+    throw new ControlRefusal(
+      "invalid",
+      `A session name needs 1 to ${SESSION_RENAME_MAX} characters on one line.`,
+    );
+  return title;
+}
+
+/** A saved thread as a list answer's row. Codex titles are not withheld: every thread was fed from this HOAI chat (D24). */
+function sessionRowOf(thread: SavedThread): SessionRow {
+  return {
+    id: thread.id,
+    title: thread.name,
+    preview: thread.preview,
+    lastActivityAt: thread.lastActivityAt,
+    branch: thread.branch,
+    current: thread.current,
+  };
 }
 
 export interface FatalInfo {
@@ -154,6 +274,12 @@ export class CodexAdapter {
   private readonly tools: HoaiTools;
   private readonly meetings: MeetingLane;
   private readonly turnControllers = new Map<number, Set<AbortController>>();
+  /**
+   * chat -> the continuation turn the runtime is running there, which the
+   * host adopted outside executeAndReply. An owner Stop marks it, so its
+   * interrupted result is the Stop's and not a reply or an error (D35).
+   */
+  private readonly adoptedTurns = new Map<number, AbortController>();
   private capabilityText = BGOS_AGENT_HINTS;
   private ownerId = "";
   private readonly rpcSeen = new Set<string>();
@@ -270,6 +396,21 @@ export class CodexAdapter {
       // this the first plan of the goal's own first turn would create a
       // SECOND derived mission for one piece of work.
       goalOwnsChat: (chatId) => this.goalLane.owns(chatId),
+      // An owner Stop holds the chat's native goal before it pauses the
+      // mission, so no continuation turn starts ahead of the mission_paused
+      // echo; the owner's next turn gives it back (P6 stage 3, C-32). The
+      // Stop's own hold, never the /goal pause door: it records whether the
+      // goal was running, and only a running goal is given back (D36).
+      pauseGoalForChat: (chatId) => this.goalLane.holdForStop(chatId),
+      resumeGoalForMission: (missionId) => this.goalLane.noteResumed(missionId),
+      // A Stop pause /new or a Sessions resume discarded must not come back
+      // to life at the next restart's first owner turn (review F4).
+      stopDiscards: new StopDiscards(
+        join(
+          process.env.CODEX_BGOS_HOME ?? join(homedir(), ".codex-bgos"),
+          "stop-discards.json",
+        ),
+      ),
     });
     this.goalLane = new GoalLane({
       api: this.api,
@@ -286,6 +427,16 @@ export class CodexAdapter {
       // itself, and an unstamped completion comes back from a backend with no
       // `cleared_by` looking like the owner marking the mission done.
       onSelfWrite: (missionId) => this.missionControl.noteSelfWrite(missionId),
+      // The chats whose goal an owner Stop found held (D36), on disk: a
+      // restart before the owner's next message must not let that
+      // message's resume start the goal again (review F1). The same small
+      // bounded id file as the discards, holding chat ids.
+      keptByStop: new StopDiscards(
+        join(
+          process.env.CODEX_BGOS_HOME ?? join(homedir(), ".codex-bgos"),
+          "goal-kept-by-stop.json",
+        ),
+      ),
       log: (message) => console.warn(`${LOG} ${message}`),
     });
     this.missionControl = new MissionControlLane({
@@ -402,6 +553,10 @@ export class CodexAdapter {
           enforced,
         );
       },
+      // `/resume` leaves the context a Stop paused, as /new and the Sessions
+      // resume do: no later owner turn may resume that mission (review F4).
+      clearStopMarker: (chatId, assistantId) =>
+        this.missionLane.clearStopMarker(chatId, assistantId),
       run: async (args, prompt, options = {}) => {
         const files = args.attachments.map((a) => ({
           path: a.localPath,
@@ -691,8 +846,10 @@ export class CodexAdapter {
     this.stopSecretsWatch();
     this.meetings.stop();
     for (const controller of this.voiceTasks.values()) controller.abort();
+    // Tagged, so the unwind fails the plan's mission with the shutdown's own
+    // words; a mission a Stop already paused is left paused by dispose.
     for (const controllers of this.turnControllers.values())
-      for (const controller of controllers) controller.abort();
+      for (const controller of controllers) abortWith(controller, "shutdown");
     this.host.close();
     this.heartbeat.stop();
     this.ws.disconnect();
@@ -828,21 +985,46 @@ export class CodexAdapter {
       args.senderType !== "system" &&
       ["new", "retry", "status", "stop", "compact"].includes(command.name)
     ) {
+      let goalStop: GoalStop | null = null;
       if (command.name === "stop" || command.name === "new") {
         // Held from BEFORE the abort until the line has posted: the stopped
         // turn's pictures post after it, never racing it to the chat.
         const stopLine = this.holdStopLine(chatId);
         try {
+          const active = this.turnControllers.get(chatId);
           this.nativeCommands.cancel(chatId);
           this.generations.set(
             chatId,
             (this.generations.get(chatId) ?? 0) + 1,
           );
-          for (const controller of this.turnControllers.get(chatId) ?? [])
-            controller.abort();
+          // BEFORE the abort: an owner turn racing the unwind waits for the
+          // pause, so a quick Resume ends active (P6 stage 3, D11).
+          if (command.name === "stop") this.missionLane.noteStopRequested(chatId);
+          // A turn the owner asked for in a Keep working chat: the abort sends
+          // the interrupt at once, so the goal is held first (review F3).
+          if (command.name === "stop")
+            await this.holdGoalBeforeOwnerTurnStop(chatId, active);
+          // /stop is the owner's Stop and pauses the chat's open mission; /new
+          // ends the plan's mission, with its own words.
+          for (const controller of active ?? [])
+            abortWith(controller, command.name === "stop" ? "owner_stop" : "new");
+          // A Keep working chat with no turn of the owner's to unwind (D35):
+          // the goal is held BEFORE the interrupt below.
+          if (command.name === "stop")
+            goalStop = this.stopKeepWorking(chatId, assistantId, !!active?.size);
+          await goalStop?.held;
+          // A later owner turn must not resume a mission from the context /new
+          // just discarded.
+          if (command.name === "new")
+            await this.missionLane.clearStopMarker(chatId, assistantId);
           await this.host.stopTurn(chatId);
           if (command.name === "stop") {
-            await replyHandle.sendText("Stopped.");
+            await replyHandle.sendText(STOP_CONFIRMATION_HARD);
+            // The line has posted, so the stopped turn's pictures may follow
+            // it now rather than wait for the goal hold to settle (the finally
+            // below releases again, which is a no op).
+            stopLine.release();
+            await goalStop?.settled;
             return;
           }
           // A picture the discarded turn had finished still posts, after
@@ -973,6 +1155,12 @@ export class CodexAdapter {
     // refused by the backend's write gate, so the lane must never be handed
     // one. An absent kind is a DM (the REST inbound backfill carries none).
     const stepsAdmitted = stepsChatKindAdmits(source?.chatKind);
+    // The owner coming back resumes the mission their own Stop paused in this
+    // chat, and the first owner turn after a restart asks the server once
+    // (P6 stage 3, D11 and D12). Awaited BEFORE beginTurn, so the plan this
+    // turn makes lands on the resumed mission. Never throws.
+    if (isOwnerAuthoredTurn(source, this.ownerId))
+      await this.missionLane.noteOwnerTurn(chatId, assistantId);
     const missionTurn = this.missionLane.beginTurn({
       assistantId,
       chatId,
@@ -1107,11 +1295,12 @@ export class CodexAdapter {
         // Stop already acknowledges in chat. Native interruption may resolve
         // with partial text and an error; neither is a new assistant reply.
         await progressWork;
-        await this.missionLane.finalizeTurn({
+        await this.settleAbortedMission(
+          assistantId,
           chatId,
-          turnToken: missionTurn,
-          error: "Stopped by you.",
-        });
+          missionTurn,
+          controller.signal,
+        );
         if (stepsAdmitted) await this.stepsLane?.finalizeTurn(chatId);
         await replyHandle.finalizeTurn().catch(() => {});
         // A picture that FINISHED before the Stop is still posted: it exists,
@@ -1123,11 +1312,23 @@ export class CodexAdapter {
         return;
       }
     } catch (err) {
-      await this.missionLane.finalizeTurn({
-        chatId,
-        turnToken: missionTurn,
-        error: err instanceof Error ? err.message : String(err),
-      });
+      // The abort's cause FIRST. This branch used to fail the mission before
+      // it looked at the signal, so an owner Stop that made the runtime throw
+      // read Did not finish. An abort is never a failure of its own.
+      if (controller.signal.aborted) {
+        await this.settleAbortedMission(
+          assistantId,
+          chatId,
+          missionTurn,
+          controller.signal,
+        );
+      } else {
+        await this.missionLane.finalizeTurn({
+          chatId,
+          turnToken: missionTurn,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
       if (stepsAdmitted) await this.stepsLane?.finalizeTurn(chatId);
       if (controller.signal.aborted) {
         await progressWork;
@@ -1176,6 +1377,30 @@ export class CodexAdapter {
       result,
       sentViaTool,
       pictures,
+    });
+  }
+
+  /**
+   * An aborted turn's mission, by the abort's cause (P6 stage 3, D9). An
+   * owner Stop PAUSES it with the contract's reason; /new, a shutdown, a
+   * revoked pairing and an untagged abort FAIL it, each with its own words,
+   * as an abort always did.
+   */
+  private async settleAbortedMission(
+    assistantId: number,
+    chatId: number,
+    turnToken: MissionTurnToken,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const outcome = missionAbortOutcome(abortCauseOf(signal));
+    if (outcome.kind === "pause") {
+      await this.missionLane.stoppedByOwner({ chatId, turnToken, assistantId });
+      return;
+    }
+    await this.missionLane.finalizeTurn({
+      chatId,
+      turnToken,
+      error: outcome.summary,
     });
   }
 
@@ -1507,6 +1732,58 @@ export class CodexAdapter {
   }
 
   /**
+   * An owner Stop (the Stop button or /stop) in a chat Keep working holds,
+   * when no turn the owner asked for was aborted (D35, review F1).
+   *
+   * The runtime runs a goal's continuation turns by itself and the host
+   * adopts them outside executeAndReply, so they have no turn controller and
+   * no unwind: the Stop interrupted one turn, the goal stayed active and the
+   * runtime could start the next one, while the mission kept reading On it.
+   * Here the Stop pauses the goal's mission as D10 pauses a running turn's,
+   * and the owner's next turn resumes both (D11). The continuation turn, if
+   * one is running, is marked stopped by the owner, so its interrupted
+   * result is not posted as a reply or an error.
+   *
+   * Null when there is nothing for this path to do: a turn the owner asked
+   * for was aborted (its own unwind pauses the mission, and
+   * holdGoalBeforeOwnerTurnStop held the goal before that abort), or no goal
+   * this daemon armed holds the chat (a Stop between turns pauses nothing).
+   */
+  private stopKeepWorking(
+    chatId: number,
+    assistantId: number,
+    ownerTurnAborted: boolean,
+  ): GoalStop | null {
+    const continuation = this.adoptedTurns.get(chatId);
+    if (continuation) abortWith(continuation, "owner_stop");
+    if (ownerTurnAborted) return null;
+    const missionId = this.goalLane.missionFor(chatId);
+    if (missionId === null) return null;
+    return this.missionLane.stoppedGoalByOwner({ chatId, assistantId, missionId });
+  }
+
+  /**
+   * An owner Stop about to abort a turn the owner asked for, in a chat Keep
+   * working holds (review F3, D35). The abort's listener sends the runtime's
+   * interrupt at once, and that turn's unwind reaches the goal only after its
+   * read of the chat's mission, so without this the goal stayed active across
+   * that round trip and the runtime could start a continuation turn after
+   * the interrupt, which the host adopts and nothing stops. The goal is held
+   * here, awaited, BEFORE the abort; the pause stays with the unwind (D10).
+   * Nothing to do with no such turn running, or with no goal holding the
+   * chat.
+   */
+  private async holdGoalBeforeOwnerTurnStop(
+    chatId: number,
+    active: Set<AbortController> | undefined,
+  ): Promise<void> {
+    if (!active?.size) return;
+    const missionId = this.goalLane.missionFor(chatId);
+    if (missionId === null) return;
+    await this.missionLane.holdGoalBeforeInterrupt(chatId, missionId);
+  }
+
+  /**
    * Take ownership of a turn the app server started by itself.
    *
    * While a goal is active the runtime runs continuation turns with nobody
@@ -1531,6 +1808,10 @@ export class CodexAdapter {
       { assistantId, chatId },
     );
     let sentViaTool = false;
+    // An owner Stop aborts it (stopKeepWorking, D35): its tool waits end, and
+    // its interrupted result is the Stop's, not a reply.
+    const controller = new AbortController();
+    this.adoptedTurns.set(chatId, controller);
     const context: ToolContext = {
       assistantId,
       chatId,
@@ -1538,7 +1819,7 @@ export class CodexAdapter {
       // owner is the only person it can act for.
       userId: this.ownerId,
       readUserId: this.ownerId,
-      signal: new AbortController().signal,
+      signal: controller.signal,
       onReply: () => {
         sentViaTool = true;
       },
@@ -1551,8 +1832,9 @@ export class CodexAdapter {
     // stopped turn's pictures still uploading: this turn's rows, requests,
     // plan card and reply wait for them (see `pictureTails`). And the stop
     // generation it started under: a /stop, a /new or the voice stop moves
-    // it, and that is how `deliver` knows the owner asked this turn to stop,
-    // because a goal turn has no controller of its own to abort.
+    // it, and that is how `deliver` knows the owner asked this turn to stop.
+    // The controller above is aborted only by an owner Stop's Keep working
+    // path (D35), so a /new is known by the generation alone.
     const earlier = this.pictureTails?.get(chatId);
     const generation = this.generations.get(chatId) ?? 0;
     this.goalLane.noteTurnStarted(chatId);
@@ -1651,45 +1933,76 @@ export class CodexAdapter {
         },
       },
       deliver: async (result) => {
-        await progressWork;
-        // The same clock an ordinary turn notes, in the same place: before
-        // this turn's card is closed inside publishTurnResult.
-        this.noteTurnClock(chatId, result);
-        // Before the reply, exactly where an ordinary turn clears it: a list
-        // left behind is the finished turn's plan sitting under the next
-        // turn's work, re sent by the lane's keepalive until the backend
-        // sweeps it.
-        await this.stepsLane?.finalizeTurn(chatId);
-        if (generation !== (this.generations.get(chatId) ?? 0)) {
-          // The owner stopped this turn: the ordinary turn's Stop branch,
-          // word for word. "Stopped." already answered, so no partial text
-          // and no red error; the card closes now; a picture that finished
-          // posts in the background after the stop line and any earlier
-          // stopped pictures, pictures only, and the next turn waits for it.
-          await replyHandle.finalizeTurn().catch(() => {});
-          this.postStoppedPictures(chatId, replyHandle, result.images, pictures);
+        try {
+          await progressWork;
+          if (controller.signal.aborted && result.error) {
+            // The owner's Stop interrupted it (D35). "Stopped." already said
+            // so, and the partial text and the runtime's "Stopped by you."
+            // are neither a reply nor an error, exactly as for a turn the
+            // owner asked for. A turn that finished before the Stop reached
+            // it has no error and is delivered below as usual. The goal
+            // lane still counts the turn it started. And, as for a turn the
+            // owner asked for, a picture that finished before the Stop still
+            // posts, in the background after the stop line (stage 4).
+            await this.stepsLane?.finalizeTurn(chatId);
+            await replyHandle.finalizeTurn().catch(() => {});
+            this.postStoppedPictures(chatId, replyHandle, result.images, pictures);
+            await this.goalLane.noteTurnFinished(chatId, {
+              text: result.finalAgentMessageText,
+              error: result.error,
+            });
+            return;
+          }
+          // The same clock an ordinary turn notes, in the same place: before
+          // this turn's card is closed inside publishTurnResult.
+          this.noteTurnClock(chatId, result);
+          // Before the reply, exactly where an ordinary turn clears it: a list
+          // left behind is the finished turn's plan sitting under the next
+          // turn's work, re sent by the lane's keepalive until the backend
+          // sweeps it.
+          await this.stepsLane?.finalizeTurn(chatId);
+          // An owner Stop that aborted this turn's controller was settled
+          // above by the result (D35): with an error it is the Stop's, and
+          // with none the turn finished before the Stop reached it and is
+          // delivered below. Otherwise the chat's stop generation decides
+          // (Round 7): a /new moves it without touching the controller.
+          if (
+            !controller.signal.aborted &&
+            generation !== (this.generations.get(chatId) ?? 0)
+          ) {
+            // The owner stopped this turn: the ordinary turn's Stop branch,
+            // word for word. "Stopped." already answered, so no partial text
+            // and no red error; the card closes now; a picture that finished
+            // posts in the background after the stop line and any earlier
+            // stopped pictures, pictures only, and the next turn waits for it.
+            await replyHandle.finalizeTurn().catch(() => {});
+            this.postStoppedPictures(chatId, replyHandle, result.images, pictures);
+            await this.goalLane.noteTurnFinished(chatId, {
+              text: result.finalAgentMessageText,
+              error: result.error,
+            });
+            return;
+          }
+          // A stopped turn's pictures land before this turn's reply.
+          await earlier;
+          await this.publishTurnResult({
+            assistantId,
+            chatId,
+            replyHandle,
+            result,
+            sentViaTool,
+            pictures,
+          });
+          // After the reply, never before: the run report is the record of a
+          // turn that finished, and the cap is only reached at the end of one.
           await this.goalLane.noteTurnFinished(chatId, {
             text: result.finalAgentMessageText,
             error: result.error,
           });
-          return;
+        } finally {
+          if (this.adoptedTurns.get(chatId) === controller)
+            this.adoptedTurns.delete(chatId);
         }
-        // A stopped turn's pictures land before this turn's reply.
-        await earlier;
-        await this.publishTurnResult({
-          assistantId,
-          chatId,
-          replyHandle,
-          result,
-          sentViaTool,
-          pictures,
-        });
-        // After the reply, never before: the run report is the record of a
-        // turn that finished, and the cap is only reached at the end of one.
-        await this.goalLane.noteTurnFinished(chatId, {
-          text: result.finalAgentMessageText,
-          error: result.error,
-        });
       },
     };
   }
@@ -2150,15 +2463,32 @@ export class CodexAdapter {
           throw new Error("No chat to stop.");
         const active = this.turnControllers.get(chatId);
         const stoppedControl = this.nativeCommands.cancel(chatId);
-        const stoppedTurn = !!active?.size;
         // The same hold the typed /stop takes: pictures after the line.
         const stopLine = this.holdStopLine(chatId);
+        let stoppedTurn = false;
+        let goalStop: GoalStop | null = null;
         try {
           this.generations.set(
             chatId,
             (this.generations.get(chatId) ?? 0) + 1,
           );
-          for (const controller of active ?? []) controller.abort();
+          // BEFORE the abort: an owner turn racing the unwind waits for the
+          // pause, so a quick Resume ends active (P6 stage 3, D11).
+          this.missionLane.noteStopRequested(chatId);
+          // A turn the owner asked for in a Keep working chat: the abort below
+          // sends the interrupt at once, so the goal is held first (review F3).
+          await this.holdGoalBeforeOwnerTurnStop(chatId, active);
+          // Read after that hold: a turn that ended while it was taken has
+          // nothing to unwind, and the Keep working path below pauses instead.
+          stoppedTurn = !!active?.size;
+          // The owner's Stop: the unwind pauses the chat's open mission with
+          // "Stopped by you" instead of failing it.
+          for (const controller of active ?? []) abortWith(controller, "owner_stop");
+          // A Keep working chat with no turn of the owner's to unwind (D35):
+          // the goal is held BEFORE the interrupt, so the runtime cannot start
+          // its next continuation turn in between.
+          goalStop = this.stopKeepWorking(chatId, assistantId, stoppedTurn);
+          await goalStop?.held;
           await this.host.stopTurn(chatId);
           // The stop endpoint is advisory: its RPC result does not reach the
           // chat UI. A reply also settles a pending picker or stale Thinking
@@ -2166,7 +2496,7 @@ export class CodexAdapter {
           await this.outbound.sendText({
             assistantId,
             chatId,
-            text: "Stopped.",
+            text: STOP_CONFIRMATION_HARD,
           });
         } finally {
           stopLine.release();
@@ -2175,6 +2505,28 @@ export class CodexAdapter {
           ok: true,
           payload: { stopped: stoppedTurn || stoppedControl, supported: true },
         });
+        await goalStop?.settled;
+        return;
+      }
+      // The Sessions sheet (P6 stage 3, spec 5.6): this chat's own threads,
+      // the set /resume offers, answered with the contract's shapes and
+      // refusal codes.
+      if (frame.op === LIST_SESSIONS) {
+        await this.answerSessionOp(frame.rpcId, () =>
+          this.listSessions(chatId, frame.payload),
+        );
+        return;
+      }
+      if (frame.op === RESUME_SESSION) {
+        await this.answerSessionOp(frame.rpcId, () =>
+          this.resumeSession(assistantId, chatId, frame.payload),
+        );
+        return;
+      }
+      if (frame.op === RENAME_SESSION) {
+        await this.answerSessionOp(frame.rpcId, () =>
+          this.renameSession(chatId, frame.payload),
+        );
         return;
       }
       if (frame.op === "cancel") {
@@ -2332,6 +2684,85 @@ export class CodexAdapter {
         })
         .catch(() => {});
     }
+  }
+
+  /**
+   * Post a Sessions op's answer: its payload, or its refusal. A host refusal
+   * carries the contract's code (busy, not_found, unsupported, invalid);
+   * anything else is `failed`, with the sentence the owner would read.
+   */
+  private async answerSessionOp(
+    rpcId: string,
+    answer: () => Promise<
+      ListSessionsAnswer | ResumeSessionAnswer | RenameSessionAnswer
+    >,
+  ): Promise<void> {
+    let body: VoiceRpcResultBody;
+    try {
+      body = { ok: true, payload: { ...(await answer()) } };
+    } catch (error) {
+      body = {
+        ok: false,
+        error: {
+          code: error instanceof ControlRefusal ? error.code : "failed",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Codex could not complete the request.",
+        },
+      };
+    }
+    await this.api.postVoiceRpcResult(rpcId, body);
+  }
+
+  private async listSessions(
+    chatId: number,
+    payload: Record<string, unknown>,
+  ): Promise<ListSessionsAnswer> {
+    const chat = sessionChatOf(chatId);
+    const query = sessionQueryOf(payload);
+    const limit = sessionLimitOf(payload);
+    const { threads, truncated } = await this.host.listSavedThreads(chat, query);
+    return {
+      sessions: threads.slice(0, limit).map(sessionRowOf),
+      abilities: this.host.sessionAbilities(),
+      truncated: truncated || threads.length > limit,
+      runtime: "codex",
+    };
+  }
+
+  private async resumeSession(
+    assistantId: number,
+    chatId: number,
+    payload: Record<string, unknown>,
+  ): Promise<ResumeSessionAnswer> {
+    const chat = sessionChatOf(chatId);
+    const sessionId = sessionIdOf(payload);
+    const thread = await this.host.resumeSavedThread(chat, sessionId);
+    // The context a Stop paused belongs to the thread just left, so no later
+    // owner turn may resume that mission from it (as on /new, D25).
+    await this.missionLane.clearStopMarker(chat, assistantId);
+    // /resume's own line. The switch has happened whether or not it posts,
+    // so a failed post is logged and never turns the answer into a failure.
+    await this.outbound
+      .sendText({ assistantId, chatId: chat, text: RESUMED_SAVED_CONVERSATION })
+      .catch((error) =>
+        console.warn(
+          `${LOG} the resume line for chat ${chat} was not posted: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      );
+    return { resumed: true, sessionId, title: thread.name };
+  }
+
+  private async renameSession(
+    chatId: number,
+    payload: Record<string, unknown>,
+  ): Promise<RenameSessionAnswer> {
+    const chat = sessionChatOf(chatId);
+    const sessionId = sessionIdOf(payload);
+    const title = sessionTitleOf(payload);
+    const thread = await this.host.renameThread(chat, sessionId, title);
+    return { renamed: true, sessionId, title: thread.name };
   }
 
   // -------------------------------------------------------------------
@@ -2512,8 +2943,10 @@ export class CodexAdapter {
   ): void {
     if (this.fatalLatched) return;
     this.fatalLatched = true;
+    // Tagged, so the unwind fails the plan's mission with the latch's own
+    // words rather than "Stopped by you", which is now a pause reason.
     for (const controllers of this.turnControllers.values())
-      for (const controller of controllers) controller.abort();
+      for (const controller of controllers) abortWith(controller, "revoked");
     for (const controller of this.voiceTasks.values()) controller.abort();
     this.meetings.stop();
     this.nativeCommands.close();

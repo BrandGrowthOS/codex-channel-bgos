@@ -1,10 +1,23 @@
 import type { TodoListItem } from "@openai/codex-sdk";
 
-import type { BgosApi, PatchMissionProgressInput } from "./bgos-api.js";
+import type {
+  BgosApi,
+  MissionSnapshot,
+  PatchMissionProgressInput,
+} from "./bgos-api.js";
+import { STOP_PAUSE_REASON } from "./session-controls-contract.js";
+import { StopDiscards, type StopDiscardStore } from "./stop-discards.js";
 
 const LOG = "[codex-channel-bgos]";
 const DISPOSE_TIMEOUT_MS = 3_000;
 const DISPOSE_SUMMARY = "Daemon stopped before the plan finished";
+/**
+ * How long an owner turn waits for a Stop's own pause to land before it reads
+ * the mission (P6 stage 3, D11). The pause normally lands in well under a
+ * second; the bound only keeps a lost unwind from holding the owner's next
+ * message back for ever.
+ */
+const STOP_SETTLE_MAX_MS = 10_000;
 
 declare const missionTurnTokenBrand: unique symbol;
 
@@ -58,6 +71,30 @@ export interface MissionLaneOptions {
    * mission for one piece of work. Fail closed: no answer means no goal.
    */
   goalOwnsChat?: (chatId: number) => boolean;
+  /**
+   * Hold this chat's native goal (P6 stage 3, C-32). An owner Stop pauses the
+   * chat's open mission, and a goal left active could start a continuation
+   * turn before the mission_paused echo reached the goal lane. Called only
+   * for a chat goalOwnsChat answers yes for, BEFORE the pause PATCH. A
+   * failure is logged, never thrown. The goal lane's hold also records
+   * whether the goal was running when the Stop came (D36).
+   */
+  pauseGoalForChat?: (chatId: number) => Promise<unknown>;
+  /**
+   * Give the goal back when the owner's next turn resumes the mission a Stop
+   * paused. The goal lane answers only for a goal it holds, and starts it
+   * again only if it was running when the Stop held it (D36): a goal held at
+   * its cap, for lack of progress, or by the owner stays held, and the
+   * owner's turn runs as an ordinary one.
+   */
+  resumeGoalForMission?: (missionId: number) => Promise<unknown>;
+  /** The bound on an owner turn's wait for a Stop's pause. Tests shorten it. */
+  stopSettleMaxMs?: number;
+  /**
+   * The Stop pauses /new or a Sessions resume discarded, kept where a
+   * restart can read them (review F4). In memory only when not given.
+   */
+  stopDiscards?: StopDiscardStore;
 }
 
 export interface BeginMissionTurnParams {
@@ -80,6 +117,31 @@ export interface FinalizeMissionTurnParams {
   error?: string | null;
 }
 
+export interface StoppedByOwnerParams {
+  chatId: number;
+  turnToken: MissionTurnToken;
+  assistantId: number;
+}
+
+export interface StoppedGoalByOwnerParams {
+  chatId: number;
+  assistantId: number;
+  /** The mission behind the chat's Keep working goal, as the goal lane names it. */
+  missionId: number;
+}
+
+/** An owner Stop in a Keep working chat, on its way (D35). Neither promise rejects. */
+export interface GoalStop {
+  /**
+   * The chat's native goal is held (or the hold failed and was logged), so
+   * the runtime starts no next continuation turn: the caller interrupts the
+   * running one now, without waiting for the pause to be answered.
+   */
+  held: Promise<void>;
+  /** The pause has been answered, and an owner turn waiting on it may go. */
+  settled: Promise<void>;
+}
+
 /** Host-driven mission lifecycle derived from Codex todo_list events. */
 export class MissionLane {
   private readonly api: BgosApi;
@@ -91,12 +153,48 @@ export class MissionLane {
   private readonly pausedMissions = new Set<number>();
   private readonly onSelfWrite: (missionId: number) => void;
   private readonly goalOwnsChat: (chatId: number) => boolean;
+  private readonly pauseGoalForChat: (chatId: number) => Promise<unknown>;
+  private readonly resumeGoalForMission: (missionId: number) => Promise<unknown>;
+  private readonly stopSettleMaxMs: number;
+  private readonly stopDiscards: StopDiscardStore;
+  /**
+   * chat -> the mission this daemon's own owner Stop paused there, recorded
+   * only when the server answered with STOP_PAUSE_REASON. The owner's next
+   * turn in that chat resumes it.
+   */
+  private readonly stopPausedByChat = new Map<number, number>();
+  /**
+   * chat -> a Stop whose pause PATCH failed (review F2). The server may or
+   * may not have paused the mission (a timeout can land after its answer is
+   * lost), and the chat's native goal may be held. The owner's next turn
+   * reads the chat again: it resumes the pause if it landed, and gives back
+   * a goal this Stop held if the mission is still active.
+   */
+  private readonly stopUnconfirmedByChat = new Map<
+    number,
+    { missionId: number; goalHeld: boolean }
+  >();
+  /**
+   * Chats an owner turn has read the open mission of since this process
+   * started (D12). A restart forgets every marker above, so the first owner
+   * turn in each chat asks the server once.
+   */
+  private readonly checkedChats = new Set<number>();
+  /** chat -> the owner Stop still unwinding there. An owner turn waits on it. */
+  private readonly stopSettles = new Map<
+    number,
+    { promise: Promise<void>; resolve: () => void }
+  >();
 
   constructor(api: BgosApi, options: MissionLaneOptions = {}) {
     this.api = api;
     this.debounceMs = options.debounceMs ?? 600;
     this.onSelfWrite = options.onSelfWrite ?? (() => {});
     this.goalOwnsChat = options.goalOwnsChat ?? (() => false);
+    this.pauseGoalForChat = options.pauseGoalForChat ?? (async () => {});
+    this.resumeGoalForMission = options.resumeGoalForMission ?? (async () => {});
+    this.stopSettleMaxMs = options.stopSettleMaxMs ?? STOP_SETTLE_MAX_MS;
+    this.stopDiscards = options.stopDiscards ?? new StopDiscards(null);
   }
 
   /**
@@ -112,6 +210,13 @@ export class MissionLane {
 
   /** The owner resumed it. Writing may continue, starting with what was held. */
   noteResumed(missionId: number): void {
+    // A resume answers every Stop hold on this mission that was never
+    // confirmed (review F3): the goal lane gives the goal back from that
+    // resume itself, or keeps it held (D36), so the owner's next turn must
+    // not give it back a second time over whatever the owner did since.
+    for (const [chatId, unconfirmed] of this.stopUnconfirmedByChat) {
+      if (unconfirmed.missionId === missionId) this.stopUnconfirmedByChat.delete(chatId);
+    }
     if (!this.pausedMissions.delete(missionId)) return;
     for (const [chatId, state] of this.turnByChat) {
       if (state.missionId !== missionId || state.pendingSnapshot === null) continue;
@@ -211,7 +316,398 @@ export class MissionLane {
       await operation;
     } finally {
       state.operations.delete(operation);
+      // A turn that ended on its own before a Stop reached it settles that
+      // Stop as surely as an unwind does: there is nothing left to pause.
+      this.settleStop(params.chatId);
     }
+  }
+
+  /**
+   * An owner Stop is about to abort this chat's turn (the stop_turn frame or
+   * the owner's /stop). Opens the chat's settle, so an owner turn racing the
+   * unwinding one waits for the pause before it reads the mission (D11): a
+   * quick Resume ends active, never paused. A Stop between turns opens
+   * nothing here and pauses nothing (D10); in a chat Keep working holds,
+   * stoppedGoalByOwner takes it instead (D35).
+   */
+  noteStopRequested(chatId: number): void {
+    if (!this.turnByChat.has(chatId)) return;
+    this.openStopSettle(chatId);
+  }
+
+  /**
+   * An owner Stop in a chat Keep working holds, when no turn the owner asked
+   * for was running there to unwind (D35, review F1). The runtime starts a
+   * continuation turn by itself and the host adopts it outside this lane, so
+   * without this the Stop interrupted one turn, the goal stayed active and
+   * the next continuation began: a Stop that did not stop. The goal's
+   * mission is paused exactly as D10 pauses a running turn's (stamped,
+   * held locally, the goal held, then the PATCH with STOP_PAUSE_REASON), and
+   * the owner's next turn resumes both as D11 says.
+   *
+   * The chat's settle opens at once, before anything is awaited, so an owner
+   * turn racing this Stop waits for the pause. `held` resolves once the goal
+   * is held and `settled` once the pause is answered; neither rejects. A
+   * mission the owner already paused keeps their reason, and their Pause
+   * already holds the goal.
+   */
+  stoppedGoalByOwner(params: StoppedGoalByOwnerParams): GoalStop {
+    const { chatId, assistantId, missionId } = params;
+    // Only the Stop that opened the chat's settle releases it: a second
+    // press while the first pause is in flight must not let a Resume past it.
+    const opened = this.openStopSettle(chatId);
+    let markHeld!: () => void;
+    const held = new Promise<void>((done) => {
+      markHeld = done;
+    });
+    const settled = (async () => {
+      try {
+        // Paused already, by the owner: theirs stands, with their reason.
+        if (this.pausedMissions.has(missionId)) return;
+        await this.pauseForStop(assistantId, chatId, missionId, markHeld);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `${LOG} mission stop pause failed chat=` + chatId + " err=" + errorText(err),
+        );
+      } finally {
+        markHeld();
+        if (opened) this.settleStop(chatId);
+      }
+    })();
+    return { held, settled };
+  }
+
+  /**
+   * An owner Stop is about to abort a turn the owner asked for, in a chat
+   * Keep working holds (review F3, D35). The abort sends the runtime's
+   * interrupt at once, and that turn's unwind holds the goal only after its
+   * flush and its read of the chat's mission, so the native goal stayed
+   * active across that round trip and the runtime could start a
+   * continuation turn after the interrupt, which nothing then stopped. The
+   * adapter awaits this BEFORE the abort. The pause itself stays with the
+   * unwind (D10), which holds the goal again on its way, a no op.
+   *
+   * Recorded as a Stop hold not yet confirmed, as a failed pause is (review
+   * F2): an unwind that pauses nothing (its read failed, the turn was
+   * replaced) must not leave the goal held for good, so the owner's next
+   * turn gives it back if the mission is still active. A resume of the
+   * mission ends the record. Never throws.
+   */
+  async holdGoalBeforeInterrupt(chatId: number, missionId: number): Promise<void> {
+    if (!this.goalOwnsChat(chatId)) return;
+    try {
+      await this.pauseGoalForChat(chatId);
+    } catch (err) {
+      // The unwind tries again, after the interrupt, as it always did.
+      // eslint-disable-next-line no-console
+      console.warn(
+        `${LOG} goal hold before the interrupt failed chat=` + chatId + " err=" + errorText(err),
+      );
+      return;
+    }
+    this.stopUnconfirmedByChat.set(chatId, { missionId, goalHeld: true });
+  }
+
+  /**
+   * `/new` or a Sessions resume: the context this chat's Stop paused is
+   * gone, so no later owner turn may resume that mission from it (spec 4.2,
+   * D25), in this process or after a restart (review F4). The mission stays
+   * paused on the server exactly as it is, for the owner to resume from the
+   * Mission view; its id goes into the discards, which the restart's first
+   * owner turn reads (D12). With no marker in memory and the chat not yet
+   * read by this process (a restart came in between), the chat's open
+   * mission is read once to find the pause. Never throws.
+   */
+  async clearStopMarker(chatId: number, assistantId: number): Promise<void> {
+    const marked = this.stopPausedByChat.get(chatId);
+    const unconfirmed = this.stopUnconfirmedByChat.get(chatId);
+    const read = this.checkedChats.has(chatId);
+    this.stopPausedByChat.delete(chatId);
+    this.stopUnconfirmedByChat.delete(chatId);
+    this.checkedChats.add(chatId);
+    if (marked !== undefined) this.stopDiscards.add(marked);
+    // A pause whose answer was lost may have landed all the same.
+    if (unconfirmed !== undefined) this.stopDiscards.add(unconfirmed.missionId);
+    if (marked !== undefined || unconfirmed !== undefined || read) return;
+    try {
+      const active = await this.api.getActiveMission(assistantId, { chatId });
+      if (isStopPausedIn(active, chatId)) this.stopDiscards.add(active.id);
+    } catch (err) {
+      // The chat stays read, so this process resumes nothing from the
+      // discarded context; only a second restart could, and only if the
+      // server was unreachable at this very moment.
+      // eslint-disable-next-line no-console
+      console.warn(
+        `${LOG} mission read on /new failed chat=` + chatId + " err=" + errorText(err),
+      );
+    }
+  }
+
+  /**
+   * The owner Stop aborted this turn: PAUSE the chat's open mission with
+   * STOP_PAUSE_REASON, never fail it (D9, D10). The mission is the turn's
+   * own managed one, else the chat's active mission read from the server,
+   * which covers a Keep working goal and an owner started mission. A mission
+   * already paused keeps its owner's reason. Never throws: a refused PATCH is
+   * logged and the mission stays as the server has it.
+   */
+  async stoppedByOwner(params: StoppedByOwnerParams): Promise<void> {
+    try {
+      const state = this.turnByChat.get(params.chatId);
+      if (!state || state.token !== params.turnToken) return;
+      const operation = this.stoppedByOwnerForState(params, state);
+      state.operations.add(operation);
+      try {
+        await operation;
+      } finally {
+        state.operations.delete(operation);
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `${LOG} mission stop pause failed chat=` +
+          params.chatId +
+          " err=" +
+          errorText(err),
+      );
+    } finally {
+      this.settleStop(params.chatId);
+    }
+  }
+
+  /**
+   * The owner's own turn is about to begin in this chat: a typed message,
+   * Resume, an owner slash command that starts a turn. Resumes the mission
+   * this daemon's own Stop paused there, and nothing else (D11): an owner's
+   * Pause from the Mission view carries no reason and is never undone by a
+   * message. Wakes, peer messages, meeting turns and goal continuation turns
+   * never call this. The first owner turn in a chat after the daemon starts
+   * asks the server once (D12). Never throws and never blocks the turn: a
+   * failure is logged and the next owner turn tries again.
+   */
+  async noteOwnerTurn(chatId: number, assistantId: number): Promise<void> {
+    const settle = this.stopSettles.get(chatId);
+    if (settle) await waitAtMost(settle.promise, this.stopSettleMaxMs);
+    const unconfirmed = this.stopUnconfirmedByChat.get(chatId);
+    if (
+      !this.stopPausedByChat.has(chatId) &&
+      unconfirmed === undefined &&
+      this.checkedChats.has(chatId)
+    )
+      return;
+    try {
+      const active = await this.api.getActiveMission(assistantId, { chatId });
+      if (isStopPausedIn(active, chatId)) {
+        // A pause /new or a Sessions resume discarded stays paused, even
+        // when a restart has emptied every marker above (review F4).
+        if (!this.stopDiscards.has(active.id))
+          await this.resumeStopPause(assistantId, chatId, active);
+      } else if (
+        unconfirmed?.goalHeld === true &&
+        active !== null &&
+        active.id === unconfirmed.missionId &&
+        active.status === "active"
+      ) {
+        // The Stop's pause never landed: the mission is still active on the
+        // server, and the goal the Stop held is all there is to give back.
+        // A mission the owner paused since then keeps its goal held.
+        await this.giveGoalBack(chatId, active.id);
+      }
+      this.stopPausedByChat.delete(chatId);
+      this.stopUnconfirmedByChat.delete(chatId);
+      this.checkedChats.add(chatId);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `${LOG} mission stop resume failed chat=` +
+          chatId +
+          " err=" +
+          errorText(err),
+      );
+    }
+  }
+
+  private async stoppedByOwnerForState(
+    params: StoppedByOwnerParams,
+    state: TurnState,
+  ): Promise<void> {
+    const { chatId, assistantId } = params;
+    await state.predecessor;
+    if (this.turnByChat.get(chatId) !== state || state.token !== params.turnToken) {
+      return;
+    }
+    if (state.pendingFlush) {
+      clearTimeout(state.pendingFlush);
+      state.pendingFlush = null;
+    }
+    try {
+      // What the work really reached goes out first, unless the mission is
+      // already paused: a paused drain leaves its snapshot in place, which
+      // would spin this loop.
+      const managed = state.managedThisTurn ? state.missionId : null;
+      if (managed !== null && !this.pausedMissions.has(managed)) {
+        do {
+          await this.flush(chatId, state);
+        } while (
+          this.turnByChat.get(chatId) === state &&
+          (state.flushInFlight !== null || state.pendingSnapshot !== null)
+        );
+      }
+      if (this.turnByChat.get(chatId) !== state) return;
+
+      const missionId =
+        state.managedThisTurn && state.missionId !== null
+          ? state.missionId
+          : await this.openMissionIn(assistantId, chatId);
+      if (missionId === null) return;
+      // Paused already, by the owner: theirs stands, with their reason.
+      if (this.pausedMissions.has(missionId)) return;
+      await this.pauseForStop(assistantId, chatId, missionId);
+    } finally {
+      // The turn is over. storedByChat is kept, so the next plan adopts.
+      if (this.turnByChat.get(chatId) === state) this.turnByChat.delete(chatId);
+    }
+  }
+
+  /** The chat's active mission, when the server says it is open in this chat. */
+  private async openMissionIn(
+    assistantId: number,
+    chatId: number,
+  ): Promise<number | null> {
+    let active: MissionSnapshot | null = null;
+    try {
+      active = await this.api.getActiveMission(assistantId, { chatId });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `${LOG} mission active GET failed chat=` + chatId + " err=" + errorText(err),
+      );
+      return null;
+    }
+    if (active === null || active.status !== "active") return null;
+    return belongsToChat(active, chatId) ? active.id : null;
+  }
+
+  private async pauseForStop(
+    assistantId: number,
+    chatId: number,
+    missionId: number,
+    onGoalHeld: () => void = () => {},
+  ): Promise<void> {
+    // Stamped BEFORE the write, as a close is: the gateway emits
+    // mission_paused from inside the request, and an unstamped frame would be
+    // told to the model as the OWNER pausing its mission.
+    this.onSelfWrite(missionId);
+    // Held locally first: no progress and no close from here on, and a
+    // native goal cannot start a continuation turn before the echo.
+    this.notePaused(missionId);
+    let goalHeld = false;
+    if (this.goalOwnsChat(chatId)) {
+      try {
+        await this.pauseGoalForChat(chatId);
+        goalHeld = true;
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `${LOG} goal hold on stop failed chat=` + chatId + " err=" + errorText(err),
+        );
+      }
+    }
+    onGoalHeld();
+    try {
+      const answer = await this.api.pauseMission(assistantId, missionId, {
+        reason: STOP_PAUSE_REASON,
+      });
+      // Ours only when the server says so. A mission the owner had already
+      // paused comes back unchanged, with their reason, and is not ours to
+      // resume on their next message.
+      if (answer?.pausedReason === STOP_PAUSE_REASON) {
+        this.stopPausedByChat.set(chatId, missionId);
+        // A fresh Stop in the context the owner is in now: theirs to resume,
+        // whatever an older /new discarded for the same mission.
+        this.stopDiscards.delete(missionId);
+      }
+    } catch (err) {
+      // Refused or unreachable: the mission stays as the server has it, so it
+      // is not held as paused here either, or this lane would never write to
+      // it again.
+      this.pausedMissions.delete(missionId);
+      if (isNotFound(err)) this.forgetMission(missionId);
+      // The goal stays held: giving it back now would start a continuation
+      // turn the moment after the owner pressed Stop. The owner's next turn
+      // settles it instead, from what the server then says.
+      this.stopUnconfirmedByChat.set(chatId, { missionId, goalHeld });
+      // eslint-disable-next-line no-console
+      console.warn(
+        `${LOG} mission pause PATCH failed chat=` +
+          chatId +
+          " mission=" +
+          missionId +
+          " err=" +
+          errorText(err),
+      );
+    }
+  }
+
+  private async resumeStopPause(
+    assistantId: number,
+    chatId: number,
+    mission: MissionSnapshot,
+  ): Promise<void> {
+    this.onSelfWrite(mission.id);
+    await this.api.resumeMission(assistantId, mission.id);
+    this.noteResumed(mission.id);
+    await this.giveGoalBack(chatId, mission.id);
+    // A derived plan mission is this lane's own work again, so canAdopt takes
+    // it when the plan arrives instead of creating a second one; after a
+    // restart nothing else would tell the lane. A goal's mission is not: the
+    // goal lane owns it and closes nothing on shutdown, the plan lane stands
+    // down for its chat, and registering it here would hand it to dispose.
+    if (
+      mission.origin === "derived" &&
+      mission.keepWorking !== true &&
+      !this.goalOwnsChat(chatId)
+    ) {
+      this.createdMissionIds.add(mission.id);
+      if (this.storedByChat.get(chatId)?.missionId !== mission.id) {
+        this.storedByChat.set(chatId, {
+          assistantId,
+          missionId: mission.id,
+          lastSnapshot: [],
+        });
+      }
+    }
+  }
+
+  /** The native goal a Stop held, back to the goal lane. Logged, never thrown. */
+  private async giveGoalBack(chatId: number, missionId: number): Promise<void> {
+    try {
+      await this.resumeGoalForMission(missionId);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `${LOG} goal resume on owner turn failed chat=` + chatId + " err=" + errorText(err),
+      );
+    }
+  }
+
+  /** Opens the chat's settle unless one is open. True when this call opened it. */
+  private openStopSettle(chatId: number): boolean {
+    if (this.stopSettles.has(chatId)) return false;
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => {
+      resolve = done;
+    });
+    this.stopSettles.set(chatId, { promise, resolve });
+    return true;
+  }
+
+  private settleStop(chatId: number): void {
+    const settle = this.stopSettles.get(chatId);
+    if (!settle) return;
+    this.stopSettles.delete(chatId);
+    settle.resolve();
   }
 
   private async finalizeTurnForState(
@@ -301,13 +797,21 @@ export class MissionLane {
     }
   }
 
-  /** Fail managed missions, cancel deferred work, and forget ownership. */
+  /**
+   * Fail managed missions, cancel deferred work, and forget ownership.
+   *
+   * A PAUSED mission is left paused (D12): it has no work in flight, so
+   * "Daemon stopped before the plan finished" is not what happened to it,
+   * and failing it would turn every Stop into Did not finish at the next
+   * update restart.
+   */
   async dispose(): Promise<void> {
     const managed = new Map<
       string,
       { assistantId: number; missionId: number }
     >();
     for (const stored of this.storedByChat.values()) {
+      if (this.pausedMissions.has(stored.missionId)) continue;
       managed.set(`${stored.assistantId}:${stored.missionId}`, {
         assistantId: stored.assistantId,
         missionId: stored.missionId,
@@ -315,7 +819,11 @@ export class MissionLane {
     }
     for (const state of this.turnByChat.values()) {
       if (state.pendingFlush) clearTimeout(state.pendingFlush);
-      if (state.managedThisTurn && state.missionId !== null) {
+      if (
+        state.managedThisTurn &&
+        state.missionId !== null &&
+        !this.pausedMissions.has(state.missionId)
+      ) {
         managed.set(`${state.assistantId}:${state.missionId}`, {
           assistantId: state.assistantId,
           missionId: state.missionId,
@@ -326,6 +834,11 @@ export class MissionLane {
     this.storedByChat.clear();
     this.createdMissionIds.clear();
     this.pausedMissions.clear();
+    this.stopPausedByChat.clear();
+    this.stopUnconfirmedByChat.clear();
+    this.checkedChats.clear();
+    for (const settle of this.stopSettles.values()) settle.resolve();
+    this.stopSettles.clear();
 
     await Promise.all(
       Array.from(managed.values(), async ({ assistantId, missionId }) => {
@@ -600,6 +1113,47 @@ export class MissionLane {
     state.pendingWorkedText = null;
     state.managedThisTurn = false;
     state.missionId = null;
+  }
+}
+
+/**
+ * Paused in this chat by an owner Stop: the exact contract reason. The guard
+ * names a PAUSED snapshot, so a false answer still leaves the mission in
+ * hand: it may be an active one, which a failed Stop's read goes on to check
+ * (review F2). A bare `mission is MissionSnapshot` narrowed it to null there.
+ */
+function isStopPausedIn(
+  mission: MissionSnapshot | null,
+  chatId: number,
+): mission is MissionSnapshot & { status: "paused" } {
+  return (
+    mission !== null &&
+    mission.status === "paused" &&
+    mission.pausedReason === STOP_PAUSE_REASON &&
+    belongsToChat(mission, chatId)
+  );
+}
+
+/** An old backend echoes no chat; a chat scoped one must echo this one. */
+function belongsToChat(mission: MissionSnapshot, chatId: number): boolean {
+  return (
+    mission.chatId === undefined ||
+    mission.chatId === null ||
+    mission.chatId === chatId
+  );
+}
+
+async function waitAtMost(promise: Promise<void>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      promise,
+      new Promise<void>((done) => {
+        timer = setTimeout(done, ms);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 

@@ -126,7 +126,16 @@ function fixture(runTurn: (callbacks: any) => Promise<unknown>) {
     missionLane: {
       beginTurn: vi.fn(() => 1),
       finalizeTurn: vi.fn(async () => {}),
+      // P6 stage 3 (#20): a Stop opens the chat's settle before it aborts,
+      // and an owner Stop PAUSES the turn's mission instead of failing it.
+      noteStopRequested: vi.fn(),
+      stoppedByOwner: vi.fn(async () => {}),
+      stoppedGoalByOwner: vi.fn(),
     },
+    // No Keep working goal holds the chat (P6 stage 3, D35), and the real
+    // constructor makes the continuation turn record an owner Stop reads.
+    goalLane: { missionFor: vi.fn(() => null) },
+    adoptedTurns: new Map<number, AbortController>(),
     missionControl: {
       applyBulletin: (_chatId: number, input: unknown) => input,
     },
@@ -529,6 +538,9 @@ describe("an adopted goal turn posts its pictures through the same path", () => 
       generations: new Map<number, number>(),
       chatToAssistant: new Map<number, number>([[20, 10]]),
       assistantToRoute: new Map<number, string>(),
+      // The real constructor makes it: an owner Stop marks the continuation
+      // turn running in a chat (P6 stage 3, D35).
+      adoptedTurns: new Map<number, AbortController>(),
       goalLane: {
         owns: () => true,
         noteTurnStarted: vi.fn(),
@@ -592,6 +604,9 @@ describe("an adopted goal turn posts its pictures through the same path", () => 
       generations: new Map<number, number>(),
       chatToAssistant: new Map<number, number>([[20, 10]]),
       assistantToRoute: new Map<number, string>(),
+      // The real constructor makes it: an owner Stop marks the continuation
+      // turn running in a chat (P6 stage 3, D35).
+      adoptedTurns: new Map<number, AbortController>(),
       goalLane: {
         owns: () => true,
         noteTurnStarted: vi.fn(),
@@ -744,7 +759,11 @@ describe("a stopped turn's pictures hold nothing up", () => {
     );
     await turn;
     expect(order).toEqual(["finalize"]);
-    expect(adapter.missionLane.finalizeTurn).toHaveBeenCalledTimes(1);
+    // The mission settles once, before the picture. Since P6 stage 3 (#20)
+    // an owner /stop settles it by PAUSING it ("Stopped by you"), never by
+    // failing it, so the one call is the pause and finalizeTurn stays unused.
+    expect(adapter.missionLane.stoppedByOwner).toHaveBeenCalledTimes(1);
+    expect(adapter.missionLane.finalizeTurn).toHaveBeenCalledTimes(0);
     expect(reply.sendImageBytes).not.toHaveBeenCalled();
     answered();
     await stop;
@@ -958,6 +977,10 @@ describe("a goal turn follows the Stop picture rules", () => {
         owns: () => true,
         noteTurnStarted: vi.fn(),
         noteTurnFinished: vi.fn(async () => {}),
+        // No mission this daemon armed, so a Stop pauses nothing here (P6
+        // stage 3, D35); the Stop's pause has its own cases in
+        // test/adapter-stop-control.spec.ts. These cases are the pictures.
+        missionFor: vi.fn(() => null),
       },
     });
     adapter.chatToAssistant.set(20, 10);
