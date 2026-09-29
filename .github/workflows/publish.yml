@@ -54,7 +54,13 @@ jobs:
           # renderable, relabel the three `plan:` chip codes and read a chat's
           # session mode off a column that ships with the stage 3 backend. It
           # also inherits 0.10.1's approval hold. Held for both.
-          HELD_FROM_LATEST="0.10.1 0.11.0"
+          # 0.12.0: the file change card's `approvalMeta.change_summary` and
+          # `approvalMeta.diff`. The backend's ApprovalMetaDto strips a field
+          # it does not declare, silently, with a 201, so against a backend
+          # without the stage 4 DTO this daemon masks and caps a patch for
+          # nothing and the card still reads "Apply file changes". It also
+          # inherits both holds above. Held for all three.
+          HELD_FROM_LATEST="0.10.1 0.11.0 0.12.0"
           DIST_TAG=latest
           for held in $HELD_FROM_LATEST; do
             if [ "$CURRENT" = "$held" ]; then

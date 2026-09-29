@@ -203,14 +203,27 @@ const PRIVATE_KEY_BEGIN_RE =
 /** Any END marker closes the block, whatever the key type says. */
 const PRIVATE_KEY_END = "-----END";
 /** The one line a key body becomes. */
-const PRIVATE_KEY_BODY = "[private key removed]";
+export const PRIVATE_KEY_BODY = "[private key removed]";
+
+/** The three characters a unified diff's BODY lines begin with. */
+const DIFF_GUTTERS = " +-";
 
 /**
- * The text with every matched secret masked, and the body of any private key
- * block removed. A clean string comes back exactly as it went in, apart from
- * CR LF becoming LF.
+ * The gutter character a collapsed key block's placeholder inherits, read off
+ * the FIRST line of the body it replaces, or "" when that line carries none.
  */
-export function redactOutput(raw: unknown): string {
+export function patchGutterOf(line: string): string {
+  const first = line.charAt(0);
+  return first.length > 0 && DIFF_GUTTERS.includes(first) ? first : "";
+}
+
+/**
+ * The walk both public forms share: mask every line, and collapse the body of
+ * a private key block into one placeholder line. `keepGutter` decides whether
+ * that placeholder keeps the leading `+`, `-` or space of the first body line
+ * it stands for, which is the whole difference between output and a patch.
+ */
+function redactBlocks(raw: unknown, keepGutter: boolean): string {
   const text = typeof raw === "string" ? raw : "";
   if (text.length === 0) return "";
   const out: string[] = [];
@@ -221,7 +234,9 @@ export function redactOutput(raw: unknown): string {
   for (const line of text.split(/\r?\n/)) {
     if (insideKey) {
       if (!placeheld) {
-        out.push(PRIVATE_KEY_BODY);
+        out.push(
+          keepGutter ? `${patchGutterOf(line)}${PRIVATE_KEY_BODY}` : PRIVATE_KEY_BODY,
+        );
         placeheld = true;
       }
       if (line.includes(PRIVATE_KEY_END)) insideKey = false;
@@ -234,4 +249,37 @@ export function redactOutput(raw: unknown): string {
     }
   }
   return out.join("\n");
+}
+
+/**
+ * The text with every matched secret masked, and the body of any private key
+ * block removed. A clean string comes back exactly as it went in, apart from
+ * CR LF becoming LF.
+ *
+ * This is the form for a command's OUTPUT, where a line has no structure and
+ * the placeholder stands alone. A unified PATCH needs `redactPatch` instead.
+ */
+export function redactOutput(raw: unknown): string {
+  return redactBlocks(raw, false);
+}
+
+/**
+ * The same masking for a UNIFIED PATCH, with one difference: the collapsed key
+ * block keeps the gutter character of the first body line it replaced, so the
+ * text is still a unified diff after the redactor has had its turn.
+ *
+ * WHY THIS EXISTS AND IS NOT AN OPTION ON THE CALLER. A patch is the one thing
+ * this daemon sends that a READER PARSES. The app's `diffModel.parsePatch`
+ * ends a hunk at the first line inside it that does not begin with one of the
+ * three body markers, and it has to: removing the source line `--` produces
+ * the diff line `---`, so nothing there may be classified by what a header
+ * LOOKS like. A bare `[private key removed]` inside a hunk therefore does not
+ * merely draw oddly, it ENDS the hunk, and every line of that file after the
+ * key block is dropped from the panel on the one card whose job is to say what
+ * the owner is authorising. One character keeps the format valid, and the
+ * platform's own second mask (backend/src/services/approval-diff.ts through
+ * `redactSecretsInPatch`) does the same thing for the same reason.
+ */
+export function redactPatch(raw: unknown): string {
+  return redactBlocks(raw, true);
 }

@@ -72,7 +72,12 @@ Tool rows also carry what a command printed and its exit code, and an edit row
 carries the lines it added and removed: the host reads all of it off the completed
 commandExecution and fileChange items, masks secrets, caps the output and counts
 the diff for you, and it reports this turn's own start and finish from
-turn/completed. You fill none of these fields. Do not paste command output into
+turn/completed. A diff body leaves the machine in exactly one case: on a file
+change approval card, masked by the redactor, cut to 400 lines a file and 64 KB
+in all, and never on an activity row; the host builds that card from the
+runtime's own item, so it names the files and their changes for you and the
+owner sees the red and green lines only with their own technical details switch
+on. You fill none of these fields. Do not paste command output into
 your answer, do not restate an exit code or a line count in prose, and do not end
 a turn with a summary of the work, because the folded card already carries one.
 When you spawn a collab agent, this host draws each child as its own row on
