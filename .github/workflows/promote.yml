@@ -1,0 +1,80 @@
+name: Promote a published version to npm latest
+
+# WHY THIS EXISTS. Retiring a hold ends in a one line hand command, the one the
+# README prints: `npm dist-tag add codex-channel-bgos@<version> latest`, run by
+# whoever happens to hold npm auth. On 2026-09-30 Kc authorised promoting
+# 0.18.0, the machine doing the release had no npm auth, and this repo's CI had
+# held an NPM_TOKEN all along. A release step that depends on which computer you
+# are sitting at is a release step that waits.
+#
+# WHAT THIS IS NOT. It does not decide whether a version MAY be promoted. The
+# holds in publish.yml and in the RELEASE ORDER comment in src/interactions.ts
+# are that record, a human reads them, and this workflow deliberately does not
+# consult them: a gate that reads the list would also have to be edited to
+# retire a hold, which is how a guard quietly becomes a second source of truth.
+# `reason` is required so the dispatch itself carries the evidence.
+#
+# It verifies the REGISTRY afterwards rather than trusting npm's exit code,
+# because `npm dist-tag add` reports success on the request, and the thing we
+# actually care about is what an install resolves to.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Published version to point latest at, for example 0.18.0"
+        required: true
+      reason:
+        description: "Why its hold is met: the evidence, not the word approved"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: The version must already be published
+        run: |
+          set -euo pipefail
+          V="${{ inputs.version }}"
+          # Pointing a tag at a version that does not exist fails anyway. This
+          # step exists so the log says WHICH of the two things was wrong.
+          npm view "codex-channel-bgos@$V" version
+          echo "reason given: ${{ inputs.reason }}"
+
+      - name: Record what latest was, so the move is reversible
+        id: before
+        run: |
+          set -euo pipefail
+          BEFORE=$(npm view codex-channel-bgos dist-tags.latest)
+          echo "before=$BEFORE" >> "$GITHUB_OUTPUT"
+          echo "::notice::latest was $BEFORE. To undo: npm dist-tag add codex-channel-bgos@$BEFORE latest"
+
+      - name: Promote
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm dist-tag add "codex-channel-bgos@${{ inputs.version }}" latest
+
+      - name: Verify the registry, not the command's exit code
+        run: |
+          set -euo pipefail
+          V="${{ inputs.version }}"
+          NOW=""
+          for attempt in 1 2 3 4 5; do
+            NOW=$(npm view codex-channel-bgos dist-tags.latest --prefer-online || true)
+            if [ "$NOW" = "$V" ]; then
+              echo "latest now resolves to $NOW"
+              exit 0
+            fi
+            echo "latest reads '$NOW', not $V yet (attempt $attempt)"
+            sleep 10
+          done
+          echo "::error::latest still reads '$NOW', not $V. The promote did not take."
+          exit 1
