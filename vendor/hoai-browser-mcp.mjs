@@ -40,6 +40,7 @@ const RELAY_WAIT_MS = 45_000;
 // Longer than any engine timeout (navigation 30 s, browser_wait_for 30 s).
 const RELAY_TOTAL_MS = Number(process.env.HOAI_RELAY_TOTAL_MS) || 180_000;
 const RELAY_PROBE_MS = Number(process.env.HOAI_RELAY_PROBE_MS) || 20_000;
+const CANCEL_DELIVERY_MS = 5_000;
 const RELAY_MCP_PATH = "/api/v1/integrations/browser/mcp";
 const RELAY_HOST_PATH = "/api/v1/integrations/browser/host";
 
@@ -177,10 +178,10 @@ function setMode(next) {
 
 // ─── Local door (the loopback endpoint on this machine) ──────────────────────
 
-async function post(body, { url, token, sessionId }) {
+async function post(body, { url, token, sessionId }, signal) {
   const headers = { "Content-Type": "application/json", Accept: "application/json, text/event-stream", Authorization: `Bearer ${token}` };
   if (sessionId) headers["mcp-session-id"] = sessionId;
-  const res = await fetch(url, { method: "POST", headers, body: JSON.stringify(body) });
+  const res = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal });
   const sid = res.headers.get("mcp-session-id");
   const ctype = res.headers.get("content-type") || "";
   let payload = null;
@@ -227,10 +228,10 @@ async function ensureLocal(doc) {
 
 // ─── Relay door (through the owner's HOAI account to their desktop app) ──────
 
-async function relayFetch(method, pathname, body) {
+async function relayFetch(method, pathname, body, signal) {
   const headers = { Accept: "application/json", ...RELAY.headers };
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  const res = await fetch(RELAY.backendUrl + pathname, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  const res = await fetch(RELAY.backendUrl + pathname, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal });
   let payload = null;
   const text = await res.text();
   if (text) {
@@ -315,8 +316,13 @@ function droppedHostSuffix(payload) {
   return "";
 }
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    const abort = () => { clearTimeout(timer); reject(signal.reason); };
+    const timer = setTimeout(() => { signal?.removeEventListener("abort", abort); resolve(); }, ms);
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+  });
 }
 
 /**
@@ -325,15 +331,17 @@ function sleep(ms) {
  * { ok: false, code, text, transport? } where transport marks a network
  * failure (the relay itself is unreachable) as opposed to an honest answer.
  */
-async function relaySend(message) {
+async function relaySend(message, signal) {
+  signal?.throwIfAborted();
   const body = { clientId: CLIENT_ID, message, waitMs: RELAY_WAIT_MS };
   if (RELAY.assistantId) body.assistantId = RELAY.assistantId;
   const startedAt = Date.now();
   let collecting = false; // true once the call went pending: from then on it was SENT, whatever the answer
   let r;
   try {
-    r = await relayFetch("POST", RELAY_MCP_PATH, body);
+    r = await relayFetch("POST", RELAY_MCP_PATH, body, signal);
   } catch (e) {
+    signal?.throwIfAborted();
     const error = String(e?.message || e);
     return { ok: false, code: "relay_unreachable", transport: true, error, text: `The HOAI relay is unreachable (${error}). Retry in a moment.` };
   }
@@ -351,11 +359,12 @@ async function relaySend(message) {
     if (ok2xx && r.payload && r.payload.status === "done") return { ok: true, message: r.payload.message || {} };
     if (ok2xx && r.payload && r.payload.status === "pending" && r.payload.rpcId) {
       if (Date.now() - startedAt > RELAY_TOTAL_MS) return { ok: false, code: "host_timeout", text: RELAY_ERROR_TEXT.host_timeout };
-      await sleep(Math.max(250, Number(r.payload.pollAfterMs) || 2000));
+      await sleep(Math.max(250, Number(r.payload.pollAfterMs) || 2000), signal);
       try {
         collecting = true;
-        r = await relayFetch("GET", `${RELAY_MCP_PATH}/${encodeURIComponent(r.payload.rpcId)}`);
+        r = await relayFetch("GET", `${RELAY_MCP_PATH}/${encodeURIComponent(r.payload.rpcId)}`, undefined, signal);
       } catch (e) {
+        signal?.throwIfAborted();
         // The collect never came back, but the call it collects WAS SENT.
         const error = String(e?.message || e);
         return { ok: false, code: "relay_unreachable", transport: true, sent: true, error, text: sentCallText("relay_unreachable", 0, "", error) };
@@ -479,14 +488,68 @@ probe.unref();
 
 // ─── The stdio side ──────────────────────────────────────────────────────────
 
-async function handle(msg) {
+// Track queued as well as dispatched requests. A cancellation never waits
+// behind the very tool it is trying to stop. Map keys retain JSON-RPC ID type.
+const requests = new Map();
+
+async function cancelRequest(notification) {
+  const entry = requests.get(notification.params?.requestId);
+  // initialize is not cancellable in MCP. Unknown, completed and duplicate
+  // cancellations are harmless, and never get forwarded to another session.
+  if (!entry || entry.cancelled || entry.method === "initialize") return;
+  entry.cancelled = true;
+  const destination = entry.destination;
+  entry.cancelling = !!destination;
+  entry.controller.abort(new Error("Request cancelled by caller"));
+  if (!destination) return; // Still queued/connecting: no tool was sent.
+  const message = { jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: entry.id, reason: "Caller cancelled the request" } };
+  try {
+    // This notification has its own short deadline: aborting result collection
+    // must not abort delivery of cancellation to the host's SDK AbortSignal.
+    const signal = AbortSignal.timeout(CANCEL_DELIVERY_MS);
+    if (destination.mode === "local") {
+      const response = await post(message, destination.up, signal);
+      if (response.status < 200 || response.status >= 300) throw new Error("Cancellation refused");
+    } else {
+      const response = await relaySend(message, signal);
+      if (!response.ok) throw new Error("Cancellation refused");
+    }
+  } catch {
+    // No tokens, endpoint, page data, request arguments or caller reason.
+    // Delivery failure never replays the original potentially mutating call.
+    process.stderr.write("HOAI browser: cancellation delivery was not confirmed; the action may still be running.\n");
+  } finally {
+    entry.cancelling = false;
+    if (entry.finished && requests.get(entry.id) === entry) requests.delete(entry.id);
+  }
+}
+
+async function handle(msg, entry) {
   const { id, method, params } = msg;
-  const reply = (result) => write({ jsonrpc: "2.0", id, result });
-  const fail = (code, message) => write({ jsonrpc: "2.0", id, error: { code, message } });
+  const send = response => { if (!entry?.cancelled) write(response); };
+  const reply = (result) => send({ jsonrpc: "2.0", id, result });
+  const fail = (code, message) => send({ jsonrpc: "2.0", id, error: { code, message } });
+  const signal = entry?.controller.signal;
+  const resolveRequestMode = async () => {
+    signal?.throwIfAborted();
+    const resolved = await resolveMode();
+    signal?.throwIfAborted();
+    return resolved;
+  };
+  const localRequest = async (body, up) => {
+    signal?.throwIfAborted();
+    if (entry) entry.destination = { mode: "local", up: { ...up } };
+    return post(body, up, signal).catch(() => { signal?.throwIfAborted(); return null; });
+  };
+  const relayRequest = async body => {
+    signal?.throwIfAborted();
+    if (entry) entry.destination = { mode: "relay" };
+    return relaySend(body, signal);
+  };
   if (method === "initialize") {
     clientInfo = params?.clientInfo || null;
     clientProtocol = params?.protocolVersion || PROTOCOL_VERSION;
-    const r = await resolveMode();
+    const r = await resolveRequestMode();
     const instructions = r.mode === "local" ? r.up.instructions : r.mode === "relay" ? r.relay.instructions : "";
     return reply({
       protocolVersion: clientProtocol,
@@ -498,48 +561,57 @@ async function handle(msg) {
   if (method && method.startsWith("notifications/")) return; // no reply to notifications
   if (method === "ping") return reply({});
   if (method === "tools/list") {
-    const r = await resolveMode();
+    const r = await resolveRequestMode();
     if (r.mode === "offline") return reply({ tools: [OFFLINE_TOOL] });
     if (r.mode === "local") {
-      const res = await post({ jsonrpc: "2.0", id, method, params: params || {} }, r.up).catch(() => null);
+      const res = await localRequest({ jsonrpc: "2.0", id, method, params: params || {} }, r.up);
       if (!res?.payload) {
         upstream = null;
         return reply({ tools: [OFFLINE_TOOL] });
       }
-      return write({ ...res.payload, id });
+      return send({ ...res.payload, id });
     }
-    const res = await relaySend({ jsonrpc: "2.0", id, method, params: params || {} });
+    const res = await relayRequest({ jsonrpc: "2.0", id, method, params: params || {} });
     if (!res.ok || !res.message || !res.message.result) {
       dropRelay(res.code);
       if (!relay) setMode("offline");
       return reply({ tools: [OFFLINE_TOOL] });
     }
-    return write({ ...res.message, id });
+    return send({ ...res.message, id });
   }
   if (method === "tools/call") {
-    const r = await resolveMode();
+    const r = await resolveRequestMode();
     if (r.mode === "offline") return reply({ content: [{ type: "text", text: offlineText(r.refusal) }], isError: params?.name !== "hoai_browser_status" });
     if (r.mode === "local") {
-      const res = await post({ jsonrpc: "2.0", id, method, params }, r.up).catch(() => null);
+      const res = await localRequest({ jsonrpc: "2.0", id, method, params }, r.up);
       if (!res?.payload) {
         upstream = null;
         return reply({ content: [{ type: "text", text: "The HOAI Agent Browser stopped answering (the desktop app may have quit). " + offlineText() }], isError: true });
       }
-      return write({ ...res.payload, id });
+      return send({ ...res.payload, id });
     }
-    const res = await relaySend({ jsonrpc: "2.0", id, method, params });
+    const res = await relayRequest({ jsonrpc: "2.0", id, method, params });
     if (!res.ok) {
       dropRelay(res.code);
       if (!relay) setMode("offline");
       return reply({ content: [{ type: "text", text: res.text }], isError: params?.name !== "hoai_browser_status" || res.code !== "host_offline" });
     }
     if (params?.name === "hoai_browser_status" && res.message?.result && !res.message.result.isError && r.relay.hostLabel) {
-      // Say where the browser is: the owner may have more than one computer.
+      // Say WHERE the browser is and claim nothing about WHOSE it is. This
+      // used to read "Reached through your owner's account on <host>", which
+      // was already loose about an account versus an app and became wrong
+      // outright when the acting-principal election shipped (#1846): the
+      // backend elects a desktop belonging to the ACTING human, and
+      // desktop-host.js refuses a `user-` principal that is not that
+      // desktop's signed-in owner. So for a shared agent the page does not run
+      // on the owner's machine at all, and the old sentence could name the
+      // wrong person. The host label answers the question the line exists for,
+      // which is which computer, since a person may have several.
       const result = res.message.result;
       const content = Array.isArray(result.content) ? result.content : [];
-      return write({ ...res.message, id, result: { ...result, content: [...content, { type: "text", text: `Reached through your owner's account on ${r.relay.hostLabel}.` }] } });
+      return send({ ...res.message, id, result: { ...result, content: [...content, { type: "text", text: `Reached on ${r.relay.hostLabel}.` }] } });
     }
-    return write({ ...res.message, id });
+    return send({ ...res.message, id });
   }
   return fail(-32601, `Method not found: ${method}`);
 }
@@ -554,8 +626,23 @@ rl.on("line", (line) => {
   } catch {
     return;
   }
-  chain = chain.then(() => handle(msg)).catch((e) => {
-    if (msg.id !== undefined) write({ jsonrpc: "2.0", id: msg.id, error: { code: -32000, message: String(e?.message || e) } });
+  if (!msg || typeof msg !== "object") return;
+  if (msg.method === "notifications/cancelled" && msg.id === undefined) {
+    void cancelRequest(msg);
+    return;
+  }
+  const hasId = typeof msg.id === "string" || (typeof msg.id === "number" && Number.isFinite(msg.id));
+  if (hasId && requests.has(msg.id)) {
+    write({ jsonrpc: "2.0", id: msg.id, error: { code: -32600, message: "Request ID is already in flight" } });
+    return;
+  }
+  const entry = hasId ? { id: msg.id, method: msg.method, controller: new AbortController(), destination: null, cancelled: false } : null;
+  if (entry) requests.set(msg.id, entry);
+  chain = chain.then(() => { if (!entry?.cancelled) return handle(msg, entry); }).catch((e) => {
+    if (hasId && !entry.cancelled) write({ jsonrpc: "2.0", id: msg.id, error: { code: -32000, message: String(e?.message || e) } });
+  }).finally(() => {
+    if (entry) entry.finished = true;
+    if (entry && !entry.cancelling && requests.get(msg.id) === entry) requests.delete(msg.id);
   });
 });
 rl.on("close", () => process.exit(0));
