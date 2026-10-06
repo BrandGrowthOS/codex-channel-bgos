@@ -313,6 +313,7 @@ describe("npm next to node", () => {
   const KEG_LIB = posixJoin(KEG, "lib", "node_modules", ...cli);
   const BREW_PREFIX = posixJoin("/opt/homebrew", "lib", "node_modules", ...cli);
   const LIBEXEC = posixJoin(KEG, "libexec", "lib", "node_modules", ...cli);
+  const DEBIAN = posixJoin("/usr", "share", "nodejs", ...cli);
   const table: Array<[string, string, string, string[], string | null]> = [
     ["a plain prefix (official installer, nvm, the HOAI private node)", "/opt/node/bin/node", "darwin", [posixJoin("/opt/node", "lib", "node_modules", ...cli)], posixJoin("/opt/node", "lib", "node_modules", ...cli)],
     ["Homebrew: the brew prefix's npm, the one the keg's bin/npm runs", BREW_NODE, "darwin", [BREW_PREFIX, LIBEXEC], BREW_PREFIX],
@@ -323,6 +324,11 @@ describe("npm next to node", () => {
     ["a node outside a Cellar never looks for a brew prefix", "/opt/x/node/25.6.1/bin/node", "darwin", [posixJoin("/opt", "lib", "node_modules", ...cli)], null],
     ["Windows: <dir>\\node_modules\\npm only", "C:\\HOAI\\node\\node.exe", "win32", [winJoin("C:\\HOAI\\node", "node_modules", ...cli)], winJoin("C:\\HOAI\\node", "node_modules", ...cli)],
     ["Homebrew with no npm anywhere", BREW_NODE, "darwin", [], null],
+    // Debian 13, Ubuntu 25.10 and 26.04 (apt's nodejs and npm, node 20 or
+    // newer, so the desktop installer keeps it): npm lives under
+    // /usr/share/nodejs, and /usr/lib/node_modules holds nothing (review F8).
+    ["Debian and Ubuntu apt: /usr/share/nodejs/npm", "/usr/bin/node", "linux", [DEBIAN], DEBIAN],
+    ["an official layout under /usr still comes first", "/usr/bin/node", "linux", [posixJoin("/usr", "lib", "node_modules", ...cli), DEBIAN], posixJoin("/usr", "lib", "node_modules", ...cli)],
   ];
   for (const [name, execPath, platform, present, expected] of table)
     it(name, () => {
@@ -333,6 +339,7 @@ describe("npm next to node", () => {
     expect(npmCliCandidates(BREW_NODE, "darwin")).toEqual([KEG_LIB, BREW_PREFIX, LIBEXEC]);
     expect(npmCliCandidates("/opt/node/bin/node", "linux")).toEqual([
       posixJoin("/opt/node", "lib", "node_modules", ...cli),
+      posixJoin("/opt/node", "share", "nodejs", ...cli),
     ]);
     expect(npmCliCandidates("C:\\HOAI\\node\\node.exe", "win32")).toEqual([
       winJoin("C:\\HOAI\\node", "node_modules", ...cli),

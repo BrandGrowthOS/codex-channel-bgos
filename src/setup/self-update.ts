@@ -434,12 +434,19 @@ const NPM_CLI = ["node_modules", "npm", "bin", "npm-cli.js"];
  *   `<keg>/libexec/lib/node_modules/npm` (what post install copies there)
  *   is the fallback. `<brew>` is the folder holding `Cellar`, so Apple
  *   silicon, Intel (/usr/local) and Linuxbrew all resolve.
+ * - Debian and Ubuntu's own packages (apt's nodejs and npm). Node is
+ *   /usr/bin/node, npm is /usr/share/nodejs/npm and /usr/lib/node_modules
+ *   holds nothing. Debian 13 and Ubuntu 25.10 and 26.04 ship node 20 or newer,
+ *   which the desktop installer keeps, so without this every stage there
+ *   failed with "npm was not found" (review F8).
  */
 export function npmCliCandidates(execPath: string, platform: string): string[] {
   if (platform === "win32")
     return [win32.join(win32.dirname(execPath), ...NPM_CLI)];
   const prefix = posix.dirname(posix.dirname(execPath));
   const candidates = [posix.join(prefix, "lib", ...NPM_CLI)];
+  if (platform === "linux")
+    candidates.push(posix.join(prefix, "share", "nodejs", ...NPM_CLI.slice(1)));
   const formula = posix.dirname(prefix);
   if (posix.basename(posix.dirname(formula)) === "Cellar")
     candidates.push(
