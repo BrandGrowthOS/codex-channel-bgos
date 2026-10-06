@@ -258,7 +258,7 @@ export async function installBackgroundService(
     writeFileSync(
       launcher,
       Buffer.from(
-        "﻿" + renderWindowsLauncher(process.execPath, cli, home, env),
+        "\ufeff" + renderWindowsLauncher(process.execPath, cli, home, env),
         "utf16le",
       ),
     );
