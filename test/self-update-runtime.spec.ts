@@ -18,6 +18,7 @@ import { dirname, join } from "node:path";
 
 import {
   CHECK_RETRY_MS,
+  CONFIRM_MAX_BOOTS,
   CONFIRM_WINDOW_MS,
   FIRST_CHECK_DELAY_MS,
   QUIET_WINDOW_MS,
@@ -749,6 +750,59 @@ describe("SelfUpdater flows", () => {
     h.setNow(h.now + 15_000);
     await updater.tick();
     expect(h.deps.rollback).toHaveBeenCalledTimes(ROLLBACK_MAX_ATTEMPTS);
+  });
+
+  it("review F10: a version whose supervisor keeps dying before its first pass is rolled back by the next start, before anything else runs", async () => {
+    const home = tempHome();
+    writeUpdateState(home, {
+      ...emptyUpdateState(),
+      pendingConfirm: { version: "0.19.2", previousVersion: "0.19.0", appliedAt: iso(T0 - 60_000), boots: CONFIRM_MAX_BOOTS, rollbackFailures: 0 },
+    });
+    const h = harness(home, { currentVersion: "0.19.2" });
+    const updater = new SelfUpdater(h.deps);
+    updater.boot();
+    expect(updater.rollbackDue).toBe(true);
+    expect(await updater.rollBackBeforeStart()).toBe(true);
+    // No child runs yet: nothing is asked, held or killed.
+    expect(h.events).toEqual(["rollback", "restartSupervisor"]);
+    const state = readUpdateState(home)!;
+    expect(state.pendingConfirm).toBeNull();
+    expect(state.rolledBack).toEqual(["0.19.2"]);
+  });
+
+  it("review F10: nothing is owed on an ordinary boot", async () => {
+    const home = tempHome();
+    writeUpdateState(home, {
+      ...emptyUpdateState(),
+      pendingConfirm: { version: "0.19.2", previousVersion: "0.19.0", appliedAt: iso(T0 - 60_000), boots: 0, rollbackFailures: 0 },
+    });
+    const h = harness(home, { currentVersion: "0.19.2" });
+    const updater = new SelfUpdater(h.deps);
+    updater.boot();
+    expect(updater.rollbackDue).toBe(false);
+    expect(await updater.rollBackBeforeStart()).toBe(false);
+    expect(h.events).toEqual([]);
+  });
+
+  it("review F10 with F3: a rollback before start that fails stays owed, and the child is not relaunched", async () => {
+    const home = tempHome();
+    writeUpdateState(home, {
+      ...emptyUpdateState(),
+      pendingConfirm: { version: "0.19.2", previousVersion: "0.19.0", appliedAt: iso(T0 - 60_000), boots: 0, rollbackFailures: 1 },
+    });
+    const h = harness(home, {
+      currentVersion: "0.19.2",
+      rollback: vi.fn(() => {
+        throw new Error("EBUSY");
+      }),
+    });
+    const updater = new SelfUpdater(h.deps);
+    updater.boot();
+    expect(await updater.rollBackBeforeStart()).toBe(false);
+    expect(updater.rollbackDue).toBe(true);
+    expect(readUpdateState(home)!.pendingConfirm).toMatchObject({ rollbackFailures: 2 });
+    expect(h.deps.resumeChild).not.toHaveBeenCalled();
+    expect(h.deps.requestChildStop).not.toHaveBeenCalled();
   });
 
   it("a rollback waits for a busy child too", async () => {

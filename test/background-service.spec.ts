@@ -417,20 +417,38 @@ describe("supervisorUpdateControls: how the updater reaches the child and hands 
   });
 });
 
-describe("startSelfUpdate: boot, launch, then a pass every 15 s", () => {
-  function setup(tick: () => Promise<string>) {
+describe("startSelfUpdate: boot, an owed rollback, serve, launch, then a pass every 15 s", () => {
+  function setup(
+    tick: () => Promise<string>,
+    opts: {
+      rolledBackBeforeStart?: boolean;
+      rollbackDue?: boolean;
+      serve?: () => Promise<void>;
+    } = {},
+  ) {
     const events: string[] = [];
     const intervals: Array<{ fn: () => void; ms: number }> = [];
     const log = vi.fn();
     const timer = startSelfUpdate({
       updater: {
         boot: () => void events.push("boot"),
+        rollBackBeforeStart: async () => {
+          events.push("rollBackBeforeStart");
+          return opts.rolledBackBeforeStart ?? false;
+        },
+        get rollbackDue() {
+          return opts.rollbackDue ?? false;
+        },
         tick: async () => {
           events.push("tick");
           return tick();
         },
       },
       runner: { launch: () => void events.push("launch") },
+      serve: async () => {
+        events.push("serve");
+        await opts.serve?.();
+      },
       log,
       every: (fn, ms) => {
         intervals.push({ fn, ms });
@@ -440,25 +458,57 @@ describe("startSelfUpdate: boot, launch, then a pass every 15 s", () => {
     return { events, intervals, log, timer };
   }
 
-  it("claims the update state before the child starts (the child reports only its own supervisor's state)", () => {
-    const { events } = setup(async () => "idle");
-    expect(events).toEqual(["boot", "launch"]);
+  it("claims the update state before the child starts (the child reports only its own supervisor's state)", async () => {
+    const { events, timer } = setup(async () => "idle");
+    expect(await timer).toBe("timer-1");
+    expect(events).toEqual(["boot", "rollBackBeforeStart", "serve", "launch"]);
+  });
+
+  it("review F10: the boot is counted before anything of this version can throw (the control server, service.json)", async () => {
+    const { events, timer } = setup(async () => "idle", {
+      serve: async () => {
+        throw new Error("Background control socket failed.");
+      },
+    });
+    await expect(timer).rejects.toThrow("control socket");
+    // Counted, so a release that dies here on every start still reaches
+    // CONFIRM_MAX_BOOTS and is rolled back by a later start.
+    expect(events).toEqual(["boot", "rollBackBeforeStart", "serve"]);
+  });
+
+  it("review F10: an owed rollback runs before the control server and the child, and then nothing else starts", async () => {
+    const { events, intervals, timer } = setup(async () => "idle", {
+      rolledBackBeforeStart: true,
+    });
+    expect(await timer).toBeNull();
+    expect(events).toEqual(["boot", "rollBackBeforeStart"]);
+    expect(intervals).toEqual([]);
+  });
+
+  it("review F3: a rollback still owed after a failed try keeps the child down; the passes retry it", async () => {
+    const { events, intervals, timer } = setup(async () => "rollback_failed", {
+      rollbackDue: true,
+    });
+    expect(await timer).toBe("timer-1");
+    expect(events).toEqual(["boot", "rollBackBeforeStart", "serve"]);
+    expect(intervals.map((i) => i.ms)).toEqual([UPDATE_TICK_MS]);
   });
 
   it("runs an update pass every UPDATE_TICK_MS and returns the timer stop() clears", async () => {
     const { events, intervals, timer } = setup(async () => "idle");
+    expect(await timer).toBe("timer-1");
     expect(intervals.map((i) => i.ms)).toEqual([UPDATE_TICK_MS]);
     expect(UPDATE_TICK_MS).toBe(15_000);
-    expect(timer).toBe("timer-1");
     intervals[0].fn();
     intervals[0].fn();
-    expect(events).toEqual(["boot", "launch", "tick", "tick"]);
+    expect(events).toEqual(["boot", "rollBackBeforeStart", "serve", "launch", "tick", "tick"]);
   });
 
   it("a pass that throws is logged, never an unhandled rejection that ends the supervisor", async () => {
-    const { intervals, log } = setup(async () => {
+    const { intervals, log, timer } = setup(async () => {
       throw new Error("EACCES update-state.json");
     });
+    await timer;
     intervals[0].fn();
     await new Promise((resolve) => setImmediate(resolve));
     expect(log).toHaveBeenCalledWith("update pass failed: EACCES update-state.json");

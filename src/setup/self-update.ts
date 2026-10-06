@@ -326,6 +326,15 @@ export function decideApply(input: {
   return { action: "apply", version: input.stagedVersion };
 }
 
+/**
+ * A rollback is owed whatever the child says: the new supervisor booted more
+ * than CONFIRM_MAX_BOOTS times without confirming, or a rollback was decided
+ * and failed (review F3).
+ */
+export function rollbackOwed(pending: PendingConfirm): boolean {
+  return pending.boots > CONFIRM_MAX_BOOTS || pending.rollbackFailures > 0;
+}
+
 /** After an apply: did the new version come up, is it still starting, or roll back? */
 export function decideConfirmation(input: {
   pending: PendingConfirm;
@@ -335,10 +344,9 @@ export function decideConfirmation(input: {
   nowMs: number;
 }): "confirmed" | "wait" | "rollback" {
   const { pending, heartbeat, childPid, startedAtMs, nowMs } = input;
-  if (pending.boots > CONFIRM_MAX_BOOTS) return "rollback";
   // The verdict was taken and the rollback failed: it is owed, whatever the
   // child does in the meantime (review F3).
-  if (pending.rollbackFailures > 0) return "rollback";
+  if (rollbackOwed(pending)) return "rollback";
   if (
     heartbeat &&
     childPid !== null &&
@@ -886,6 +894,28 @@ export class SelfUpdater {
     return JSON.parse(JSON.stringify(this.state));
   }
 
+  /** A rollback is owed now, before any child should run (rollbackOwed). */
+  get rollbackDue(): boolean {
+    const pending = this.state.pendingConfirm;
+    return pending !== null && rollbackOwed(pending);
+  }
+
+  /**
+   * Review F10. Run right after boot(), which supervise calls as soon as it
+   * holds the lock, before the control server, service.json or the child: a
+   * new version whose supervisor dies anywhere after that still had its boot
+   * counted, and the start that finds CONFIRM_MAX_BOOTS exceeded rolls it
+   * back here, before running anything else of it. No child runs yet, so
+   * nothing is asked or stopped. True when it rolled back and handed over;
+   * false when nothing was owed or the rollback failed and stays owed (the
+   * child then stays down and the passes retry it).
+   */
+  async rollBackBeforeStart(): Promise<boolean> {
+    const pending = this.state.pendingConfirm;
+    if (!pending || !rollbackOwed(pending)) return false;
+    return (await this.rollBack(pending, false)) === "rolled_back";
+  }
+
   /** Claim the state for this supervisor and count a boot of an applied version. */
   boot(): void {
     const s = this.state;
@@ -1132,6 +1162,20 @@ export class SelfUpdater {
       !(await this.deps.waitChildExit(CHILD_STOP_GRACE_MS))
     )
       await this.deps.forceStopChild();
+    return this.rollBack(pending, true);
+  }
+
+  /**
+   * Swap runtime.prev back with no child running, record the version as
+   * rolled back and hand over to the previous version's supervisor.
+   * `relaunchOnGiveUp`: after ROLLBACK_MAX_ATTEMPTS the child is relaunched
+   * here; before start, supervise launches it itself.
+   */
+  private async rollBack(
+    pending: PendingConfirm,
+    relaunchOnGiveUp: boolean,
+  ): Promise<"rolled_back" | "rollback_failed"> {
+    const s = this.state;
     if (!s.rolledBack.includes(pending.version))
       s.rolledBack = [...s.rolledBack, pending.version].slice(-ROLLED_BACK_KEEP);
     try {
@@ -1153,7 +1197,7 @@ export class SelfUpdater {
       };
       this.save();
       this.deps.log(s.lastError.message);
-      if (giveUp) this.deps.resumeChild();
+      if (giveUp && relaunchOnGiveUp) this.deps.resumeChild();
       return "rollback_failed";
     }
     s.pendingConfirm = null;

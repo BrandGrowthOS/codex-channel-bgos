@@ -495,20 +495,37 @@ export function supervisorUpdateControls<C extends { pid?: number }>(deps: {
 }
 
 /**
- * The updater's start: it claims update-state.json for this supervisor
- * BEFORE the child starts (the child reports only its own supervisor's
- * state), then a pass every UPDATE_TICK_MS. A pass that throws is logged:
- * an unhandled rejection would end the supervisor, and with it the agent.
- * Returns the timer the supervisor clears when it stops.
+ * The supervisor's start, in the order that matters (review F10):
+ * - boot() claims update-state.json for this supervisor BEFORE the child
+ *   starts (the child reports only its own supervisor's state) and counts a
+ *   boot of an applied version. It runs first, right after the lock, so a
+ *   new version that dies anywhere later still has its boots counted;
+ * - an owed rollback runs before anything else of this version (the control
+ *   server, service.json, the child); when it hands over, nothing starts;
+ * - `serve` opens the control server and writes service.json;
+ * - the child is launched unless a rollback is still owed (it failed and
+ *   the passes retry it, with the child down);
+ * - then a pass every UPDATE_TICK_MS. A pass that throws is logged: an
+ *   unhandled rejection would end the supervisor, and with it the agent.
+ * Returns the timer the supervisor clears when it stops, or null when it
+ * rolled back and handed over.
  */
-export function startSelfUpdate<T>(deps: {
-  updater: { boot: () => void; tick: () => Promise<string> };
+export async function startSelfUpdate<T>(deps: {
+  updater: {
+    boot: () => void;
+    rollBackBeforeStart: () => Promise<boolean>;
+    readonly rollbackDue: boolean;
+    tick: () => Promise<string>;
+  };
   runner: { launch: () => void };
+  serve: () => Promise<void>;
   log: (message: string) => void;
   every: (fn: () => void, ms: number) => T;
-}): T {
+}): Promise<T | null> {
   deps.updater.boot();
-  deps.runner.launch();
+  if (await deps.updater.rollBackBeforeStart()) return null;
+  await deps.serve();
+  if (!deps.updater.rollbackDue) deps.runner.launch();
   return deps.every(() => {
     void deps.updater.tick().catch((error) =>
       deps.log(
@@ -644,18 +661,11 @@ export async function supervise(home: string): Promise<void> {
   };
   process.on("SIGTERM", () => void stop());
   process.on("SIGINT", () => void stop());
-  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
-  const address = server.address();
-  if (!address || typeof address === "string")
-    throw new Error("Background control socket failed.");
-  writeFileSync(
-    join(home, "service.json"),
-    JSON.stringify({ pid: process.pid, port: address.port, token }),
-    { mode: 0o600 },
-  );
 
   // Self update (design 2.2, decision D7): owned here because this process
-  // outlives the agent it restarts. See self-update.ts.
+  // outlives the agent it restarts. See self-update.ts. Built before the
+  // control server opens: startSelfUpdate counts this boot first (review
+  // F10).
   const cli = entry();
   const updater = new SelfUpdater({
     home,
@@ -722,5 +732,24 @@ export async function supervise(home: string): Promise<void> {
     }),
     log,
   });
-  updateTimer = startSelfUpdate({ updater, runner, log, every: setInterval });
+  const timer = await startSelfUpdate({
+    updater,
+    runner,
+    serve: async () => {
+      await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+      const address = server.address();
+      if (!address || typeof address === "string")
+        throw new Error("Background control socket failed.");
+      writeFileSync(
+        join(home, "service.json"),
+        JSON.stringify({ pid: process.pid, port: address.port, token }),
+        { mode: 0o600 },
+      );
+    },
+    log,
+    every: setInterval,
+  });
+  // A stop that landed while this started has nothing of ours to clear yet.
+  if (timer && stopping) clearInterval(timer);
+  else if (timer) updateTimer = timer;
 }
