@@ -702,7 +702,8 @@ const tail = (text: string) =>
 
 /**
  * Install `version` into runtime.next next to the Codex version the live
- * runtime has, then prove the staged CLI runs and the Codex pin held.
+ * runtime has (or `codexVersion`, for a first install by connect
+ * --keep-alive), then prove the staged CLI runs and the Codex pin held.
  */
 export async function stageRuntime(input: {
   home: string;
@@ -712,10 +713,13 @@ export async function stageRuntime(input: {
   exec: Exec;
   fs?: RuntimeFs;
   read?: (path: string) => string;
+  codexVersion?: string;
 }): Promise<void> {
   const fs = input.fs ?? nodeRuntimeFs;
   const { runtime, next } = runtimePaths(input.home);
-  const codexVersion = installedPackageVersion(runtime, CODEX_PACKAGE, input.read);
+  const codexVersion =
+    input.codexVersion ??
+    installedPackageVersion(runtime, CODEX_PACKAGE, input.read);
   if (!codexVersion)
     throw new Error("The installed Codex runtime version is unknown, so nothing was staged.");
   const npmCli = npmCliPath(input.execPath, input.platform, fs.exists);

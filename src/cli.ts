@@ -3,7 +3,10 @@
  * codex-channel-bgos daemon CLI.
  *
  *   codex-channel-bgos connect <CODE>   pair with a BGOS code, then start
+ *   codex-channel-bgos connect <CODE> --assistant-id <id> --keep-alive
+ *                                       pair, then install the background service
  *   codex-channel-bgos start            start from the stored pairing token
+ *   codex-channel-bgos --version        print this version (the self update probe)
  *   codex-channel-bgos install-service  install launchd/systemd persistence
  *   codex-channel-bgos --help
  *
@@ -14,6 +17,7 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { pairBgos } from "./pair-cli.js";
 import { loadConfig } from "./load-config.js";
@@ -37,7 +41,18 @@ import { setupAgent, progress } from "./setup/setup-agent.js";
 import {
   supervise,
   pauseBackgroundService,
+  installBackgroundService,
 } from "./setup/background-service.js";
+import { attachChildControl } from "./child-control.js";
+import {
+  KEEP_ALIVE_FLAG,
+  finishConnect,
+  keepAlivePrecheck,
+  ownCodexVersion,
+  setUpKeepAlive,
+  takeFlag,
+} from "./keep-alive.js";
+import { nodeExec } from "./setup/self-update.js";
 
 const DEFAULT_BASE_URL = "https://api.brandgrowthos.ai";
 const LOG = "[codex-channel-bgos]";
@@ -90,8 +105,10 @@ function usage(): void {
     `codex-channel-bgos v${getPackageVersion()}\n\n` +
       `Usage:\n` +
       `  codex-channel-bgos connect <CODE>   Pair with a BGOS code, then start the daemon\n` +
+      `      --assistant-id <id> --keep-alive  ...and run it as a background service (recommended)\n` +
       `  codex-channel-bgos start            Start from the stored pairing token\n` +
       `  codex-channel-bgos install-service  Install launchd/systemd persistence\n` +
+      `  codex-channel-bgos --version\n` +
       `  codex-channel-bgos --help\n\n` +
       `Auth (D7): prefers an existing 'codex login', else OPENAI_API_KEY.\n` +
       `Override with CODEX_BGOS_AUTH_MODE=auto|chatgpt|apikey.\n`,
@@ -148,17 +165,42 @@ async function runStart(): Promise<void> {
   process.on("SIGTERM", shutdown);
 
   await adapter.start();
+  // Under supervise (an IPC channel exists): answer the one question asked
+  // before an update, "stop if you are idle", from this process's live state
+  // (child-control.ts; finding 9: never restart an agent mid job).
+  if (typeof process.send === "function")
+    attachChildControl({
+      channel: process,
+      busyNow: () => adapter.isAnyBusy(),
+      backgroundJobs: () => adapter.backgroundJobCount(),
+      shutdown,
+      log: (message) => process.stdout.write(`${LOG} ${message}\n`),
+    });
   process.stdout.write(`${LOG} ready, waiting for BGOS messages\n`);
 }
 
 async function runConnect(
   code: string | undefined,
   assistantId?: number,
+  keepAlive = false,
 ): Promise<void> {
   const auth = await resolveAuth();
   if (!auth.ok) {
     process.stderr.write(`${LOG} ${auth.error}\n`);
     process.exit(1);
+  }
+  if (keepAlive) {
+    // Before pairing, so a refusal never spends the one time code.
+    const problem = keepAlivePrecheck({
+      assistantId,
+      authMode: auth.mode,
+      platform: process.platform,
+    });
+    if (problem) {
+      process.stderr.write(`${LOG} ${problem}\n`);
+      process.exit(2);
+      return;
+    }
   }
   printPreflight();
   process.stdout.write(
@@ -239,11 +281,42 @@ async function runConnect(
     return;
   }
 
+  // Design 2.2: the manual path installed nothing, so the agent died with
+  // this terminal. With --keep-alive it gets the desktop setup's per agent
+  // service; without it, one line recommends that.
+  const mode = await finishConnect({
+    keepAlive,
+    setUp: () =>
+      setUpKeepAlive({
+        home: process.env.CODEX_BGOS_HOME!,
+        currentCli: fileURLToPath(import.meta.url),
+        version: getPackageVersion(),
+        codexVersion: ownCodexVersion(),
+        execPath: process.execPath,
+        platform: process.platform,
+        exec: nodeExec,
+        pause: pauseBackgroundService,
+        install: (home, cli) => installBackgroundService(home, { cli }),
+      }),
+    out: (line) => process.stdout.write(`${LOG} ${line}\n`),
+    err: (line) => process.stderr.write(`${LOG} ${line}\n`),
+  });
+  if (mode === "service") {
+    process.exit(0);
+    return;
+  }
   await runStart();
 }
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
+  // First, before any settings are read: the supervisor probes a staged
+  // update with exactly this, and exits on its own (self-update.ts).
+  if (argv[0] === "--version" || argv[0] === "-v") {
+    process.stdout.write(`${getPackageVersion()}\n`, () => process.exit(0));
+    return;
+  }
+  const keepAlive = takeFlag(argv, KEEP_ALIVE_FLAG);
   const pinIndex = argv.indexOf("--assistant-id");
   let assistantId: number | undefined;
   if (pinIndex >= 0) {
@@ -308,7 +381,7 @@ async function main(): Promise<void> {
   }
   if (verb === "connect") {
     const code = argv.slice(1).find((a) => !a.startsWith("-"));
-    await runConnect(code, assistantId);
+    await runConnect(code, assistantId, keepAlive);
     return;
   }
   if (verb === "start" || verb === undefined) {
