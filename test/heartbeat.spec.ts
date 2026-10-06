@@ -382,6 +382,26 @@ describe("identity, update readiness and the busy signal", () => {
     }
   });
 
+  it("review F1: an inbound message is written to the file at once, not at the next 30 s beat", () => {
+    let now = Date.parse("2026-10-06T20:00:00.000Z");
+    const hb = new HeartbeatController({
+      version: "0.19.0",
+      postHeartbeat: async () => {},
+      now: () => now,
+    });
+    hb.start();
+    try {
+      now += 11 * 60_000;
+      hb.recordInbound();
+      expect(heartbeatFile(tempHome)).toMatchObject({
+        lastInboundAt: "2026-10-06T20:11:00.000Z",
+        lastActivityAt: "2026-10-06T20:11:00.000Z",
+      });
+    } finally {
+      hb.stop();
+    }
+  });
+
   it("an inbound or outbound message is activity too", () => {
     let now = Date.parse("2026-10-06T20:00:00.000Z");
     const hb = new HeartbeatController({

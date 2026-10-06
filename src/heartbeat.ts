@@ -208,9 +208,15 @@ export class HeartbeatController {
     this.pairingId = id;
   }
 
+  /**
+   * Written at once, like a busy edge (review F1): the supervisor's safe
+   * moment reads the file, and a message whose turn has not started yet
+   * must not read as 10 quiet minutes until the next 30 s beat.
+   */
   recordInbound(): void {
     this.lastInboundAt = new Date(this.now()).toISOString();
     this.lastActivityAt = this.lastInboundAt;
+    this.writeFile();
   }
 
   recordOutbound(): void {

@@ -32,7 +32,10 @@ interface ChildChannel {
 /** Child side: answer the supervisor's stop request from live state. */
 export function attachChildControl(opts: {
   channel: ChildChannel;
-  /** Any chat's turn running or queued (CodexHost.isAnyBusy). */
+  /**
+   * Any chat's turn running or queued, or a message, tap or voice task taken
+   * whose turn has not reached the host yet (CodexAdapter.isAnyBusy).
+   */
   busyNow: () => boolean;
   /** Background terminals still running; throws when it cannot tell. */
   backgroundJobs: () => Promise<number>;

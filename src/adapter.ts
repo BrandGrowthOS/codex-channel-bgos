@@ -409,6 +409,13 @@ export class CodexAdapter {
    */
   private readonly chatAssistants?: ChatAssistantStore;
   private readonly replyQueues = new Map<number, Promise<void>>();
+  /**
+   * Frames taken from the socket whose handling has not settled (review F1):
+   * a message whose cursor is saved but whose turn has not reached the host
+   * yet, while an attachment downloads, a native command runs or the first
+   * owner turn asks for its mission. isAnyBusy counts them.
+   */
+  private takenWork = 0;
   private readonly generations = new Map<number, number>();
   private readonly assistantToRoute = new Map<number, string>();
   /**
@@ -847,8 +854,11 @@ export class CodexAdapter {
       onUnknownAssistant: () => this.refreshScopeRateLimited(),
     });
 
+    // Every frame that can start a turn counts as busy from its first
+    // synchronous step (review F1): the supervisor's stop-if-idle question is
+    // a separate task, so it can land while one of these awaits.
     this.ws.on("inbound_message", (msg) => {
-      void inboundHandler(msg);
+      void this.whileTaken(() => inboundHandler(msg));
     });
     this.ws.on("skills_rpc", (frame) => {
       void this.skillsHandler(frame);
@@ -857,16 +867,18 @@ export class CodexAdapter {
       void this.changesHandler(frame);
     });
     this.ws.on("voice_rpc", (frame) => {
-      void this.handleControl(frame);
+      // A voice call is the owner's activity too, for the supervisor's file.
+      this.heartbeat.recordInbound();
+      void this.whileTaken(() => this.handleControl(frame));
     });
     this.ws.on("mission_event", (frame) => {
       void this.missionControl.handle(frame);
     });
     this.ws.on("meeting_event", (event) => {
-      void (async () => {
+      void this.whileTaken(async () => {
         if (!this.identityReady) await this.refreshScopeRateLimited();
         await this.meetings.handle(event);
-      })();
+      });
     });
     this.ws.on("inbound_click", (click) => this.handleInboundClick(click));
     this.ws.on("assistant_bound", (p: AssistantBoundPayload) => {
@@ -963,9 +975,36 @@ export class CodexAdapter {
    * The supervisor's stop-if-idle question (child-control.ts, finding 9):
    * any chat's turn running or queued, and the background terminals a turn
    * left running.
+   *
+   * Not the host alone (review F1). A message is consumed (its cursor saved)
+   * before its turn reaches the host, and a voice task or a tap waits on the
+   * backend first; a stop answered in that gap lost the message for good,
+   * since the restart's backfill starts after the saved cursor. So work
+   * taken from the socket, a chat's reply queue and a voice task all count.
    */
   isAnyBusy(): boolean {
-    return this.host.isAnyBusy();
+    return (
+      this.host.isAnyBusy() ||
+      this.takenWork > 0 ||
+      this.replyQueues.size > 0 ||
+      this.voiceTasks.size > 0
+    );
+  }
+
+  /** Count `work` as taken from its first synchronous step until it settles. */
+  private whileTaken<T>(work: () => Promise<T>): Promise<T> {
+    this.takenWork += 1;
+    const settled = () => {
+      this.takenWork -= 1;
+    };
+    let pending: Promise<T>;
+    try {
+      pending = work();
+    } catch (error) {
+      settled();
+      throw error;
+    }
+    return pending.finally(settled);
   }
   backgroundJobCount(): Promise<number> {
     return this.host.backgroundTerminalCount();
@@ -2773,7 +2812,9 @@ export class CodexAdapter {
     // left the "Waiting for your go ahead" line up for its full day and never
     // asked for a revised plan at all.
     if (parsePlanChip(click.callbackData) || this.planLane.isChangeClick(click)) {
-      void this.handlePlanClick(click);
+      // Busy from the tap (review F1): the plan's answer is asked of the
+      // backend before its turn is queued.
+      void this.whileTaken(() => this.handlePlanClick(click));
       return;
     }
     const route = this.getRouteForAssistant(click.assistantId);
