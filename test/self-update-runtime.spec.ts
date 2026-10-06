@@ -454,6 +454,52 @@ describe("SelfUpdater flows", () => {
     expect(readUpdateState(home)).toMatchObject({ stagedVersion: null, waitingReason: null, waitingSince: null });
   });
 
+  it("D6: a wait that ends without an apply is over; the next update waits from its own start and is said again", async () => {
+    const home = tempHome();
+    const log = vi.fn();
+    const h = harness(home, {
+      log,
+      swap: vi.fn(() => {
+        throw new Error("EBUSY runtime");
+      }),
+    });
+    const start = h.now;
+    const at = (ms: number, change: Partial<ChildHeartbeat>) => {
+      h.setNow(ms);
+      h.setHeartbeat(idleHeartbeat(h.now, change));
+    };
+    const waited = () => log.mock.calls.map(([m]) => String(m)).filter((m) => m.includes("has waited"));
+    const updater = new SelfUpdater(h.deps);
+    updater.boot();
+    at(start, { busy: true });
+    expect(await updater.tick()).toBe("waiting:busy");
+    at(start + UPDATE_WAIT_NOTICE_MS, { busy: true });
+    expect(await updater.tick()).toBe("waiting:busy");
+    expect(waited()).toHaveLength(1);
+    // Idle at last, but the switch fails: nothing is staged any more, so the
+    // wait is over (not only after a stale stage).
+    at(start + UPDATE_WAIT_NOTICE_MS + 60 * 60 * 1000, {});
+    expect(await updater.tick()).toBe("apply_failed");
+    at(start + UPDATE_WAIT_NOTICE_MS + 2 * 60 * 60 * 1000, {});
+    expect(await updater.tick()).toBe("idle");
+    expect(readUpdateState(home)).toMatchObject({ stagedVersion: null, waitingReason: null, waitingSince: null });
+    // The next version waits from its own start, and its 24 h are said too.
+    h.deps.fetchLatest = vi.fn(async () => "0.19.3");
+    const next = Date.parse(readUpdateState(home)!.nextCheckAt!) + 1;
+    at(next, { busy: true });
+    expect(await updater.tick()).toBe("waiting:busy");
+    expect(readUpdateState(home)).toMatchObject({ stagedVersion: "0.19.3", waitingSince: iso(next) });
+    at(next + UPDATE_WAIT_NOTICE_MS - 1, { busy: true });
+    await updater.tick();
+    expect(waited()).toHaveLength(1);
+    at(next + UPDATE_WAIT_NOTICE_MS, { busy: true });
+    await updater.tick();
+    expect(waited()).toEqual([
+      "update 0.19.2 has waited 24 h for an idle moment (busy); it is never forced",
+      "update 0.19.3 has waited 24 h for an idle moment (busy); it is never forced",
+    ]);
+  });
+
   it("waits out the 10 minute quiet window", async () => {
     const home = tempHome();
     const h = harness(home);
