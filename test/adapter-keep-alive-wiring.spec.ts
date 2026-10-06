@@ -202,6 +202,10 @@ describe("the adapter wires busy, identity and readiness", () => {
       await settle();
       expect(adapter.isAnyBusy()).toBe(true);
       expect((await askToStop(adapter)).result).toBe("busy");
+      // A voice call is the owner's activity too: the supervisor's file has
+      // it at once, so the quiet window starts over.
+      const file = JSON.parse(readFileSync(join(home, "bgos_heartbeat.json"), "utf8"));
+      expect(Date.now() - Date.parse(file.lastInboundAt)).toBeLessThan(60_000);
       chat.resolve(20);
       await settle();
       expect(adapter.host.runDetached).toHaveBeenCalledTimes(1);
