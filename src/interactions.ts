@@ -165,6 +165,22 @@ interface Pending {
  * declares session_model_control, so until it is promoted no Codex agent
  * shows it.
  *
+ * 0.19.0 adds a hold of its own (mission 104, keep agents running). It is the
+ * first Codex release to report latestKnownVersion and updateReadiness on its
+ * heartbeat. The backend judges every pairing's update state against ONE
+ * published version, the Claude Code plugin's marketplace pin, so a Codex
+ * pairing reads update_available whatever it runs, and the app trusts that
+ * verdict once a pairing reports latest_known_version. The app also offers its
+ * one click Update to any pairing whose readiness names a supervisor, and that
+ * sends update_rpc, which this daemon does not answer: it updates itself, from
+ * its supervisor (src/setup/self-update.ts). Against that backend and app
+ * every 0.19.0 agent shows a false Update badge and a one click Update that
+ * ends in "the agent host did not respond". It is promoted only once the
+ * backend judges Codex pairings by their own version and the app keeps Codex
+ * agents out of the one click update. 0.18.0 is already on latest (promoted
+ * 2026-09-30), so it waits for nothing else. From 0.19.0 a hold also keeps a
+ * version from installing itself: the supervisor's self update follows latest.
+ *
  * The lines below are the machine readable half of that hold, and the publish
  * workflow's HELD_FROM_LATEST list must agree with them exactly
  * (test/publish-workflow.spec.ts). Retiring the hold is an edit of those lines
@@ -177,6 +193,7 @@ interface Pending {
  * HELD-FROM-LATEST: 0.14.0
  * HELD-FROM-LATEST: 0.15.0
  * HELD-FROM-LATEST: 0.18.0
+ * HELD-FROM-LATEST: 0.19.0
  */
 export const APPROVAL_HOLD_SECONDS = 1800;
 
