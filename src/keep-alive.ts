@@ -155,3 +155,19 @@ export async function finishConnect(opts: {
     return "foreground";
   }
 }
+
+/**
+ * The end of connect. With the service installed, connect exits 0: the
+ * service runs the agent now, and a foreground copy would be a second daemon
+ * on the same pairing; 0 because keep-alive is what was asked for and it
+ * worked. Otherwise the agent runs in the foreground, as before.
+ */
+export async function completeConnect(
+  opts: Parameters<typeof finishConnect>[0] & {
+    exit: (code: number) => void;
+    runForeground: () => Promise<void>;
+  },
+): Promise<void> {
+  if ((await finishConnect(opts)) === "service") return opts.exit(0);
+  await opts.runForeground();
+}

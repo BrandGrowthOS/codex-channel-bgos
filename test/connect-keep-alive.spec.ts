@@ -23,6 +23,7 @@ import { dirname, join } from "node:path";
 import {
   KEEP_ALIVE_FLAG,
   KEEP_ALIVE_RECOMMENDED,
+  completeConnect,
   finishConnect,
   keepAlivePrecheck,
   setUpKeepAlive,
@@ -248,5 +249,49 @@ describe("finishConnect", () => {
       }),
     ).toBe("foreground");
     expect(err.join("\n")).toContain("ENOTFOUND");
+  });
+});
+
+describe("completeConnect: what connect does once pairing succeeded", () => {
+  function run(keepAlive: boolean, setUp: () => Promise<string>) {
+    const exit = vi.fn();
+    const runForeground = vi.fn(async () => {});
+    return {
+      exit,
+      runForeground,
+      done: completeConnect({
+        keepAlive,
+        setUp,
+        out: () => {},
+        err: () => {},
+        exit,
+        runForeground,
+      }),
+    };
+  }
+
+  it("--keep-alive with the service installed: exits 0 and never starts a second, foreground copy", async () => {
+    const r = run(true, async () => "/h/runtime/node_modules/codex-channel-bgos/dist/cli.js");
+    await r.done;
+    expect(r.exit.mock.calls).toEqual([[0]]);
+    expect(r.runForeground).not.toHaveBeenCalled();
+  });
+
+  it("--keep-alive whose install failed: runs in the foreground, no exit", async () => {
+    const r = run(true, async () => {
+      throw new Error("EACCES");
+    });
+    await r.done;
+    expect(r.exit).not.toHaveBeenCalled();
+    expect(r.runForeground).toHaveBeenCalledTimes(1);
+  });
+
+  it("without --keep-alive: the foreground run, as before", async () => {
+    const setUp = vi.fn(async () => "/cli.js");
+    const r = run(false, setUp);
+    await r.done;
+    expect(setUp).not.toHaveBeenCalled();
+    expect(r.exit).not.toHaveBeenCalled();
+    expect(r.runForeground).toHaveBeenCalledTimes(1);
   });
 });

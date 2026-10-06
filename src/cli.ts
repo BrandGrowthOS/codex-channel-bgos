@@ -16,7 +16,7 @@
  */
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { pairBgos } from "./pair-cli.js";
@@ -43,16 +43,15 @@ import {
   pauseBackgroundService,
   installBackgroundService,
 } from "./setup/background-service.js";
-import { attachChildControl } from "./child-control.js";
+import { attachChildControlIfSupervised } from "./child-control.js";
 import {
-  KEEP_ALIVE_FLAG,
-  finishConnect,
+  completeConnect,
   keepAlivePrecheck,
   ownCodexVersion,
   setUpKeepAlive,
-  takeFlag,
 } from "./keep-alive.js";
 import { nodeExec } from "./setup/self-update.js";
+import { parseCli } from "./cli-args.js";
 
 const DEFAULT_BASE_URL = "https://api.brandgrowthos.ai";
 const LOG = "[codex-channel-bgos]";
@@ -168,14 +167,13 @@ async function runStart(): Promise<void> {
   // Under supervise (an IPC channel exists): answer the one question asked
   // before an update, "stop if you are idle", from this process's live state
   // (child-control.ts; finding 9: never restart an agent mid job).
-  if (typeof process.send === "function")
-    attachChildControl({
-      channel: process,
-      busyNow: () => adapter.isAnyBusy(),
-      backgroundJobs: () => adapter.backgroundJobCount(),
-      shutdown,
-      log: (message) => process.stdout.write(`${LOG} ${message}\n`),
-    });
+  attachChildControlIfSupervised({
+    channel: process,
+    busyNow: () => adapter.isAnyBusy(),
+    backgroundJobs: () => adapter.backgroundJobCount(),
+    shutdown,
+    log: (message) => process.stdout.write(`${LOG} ${message}\n`),
+  });
   process.stdout.write(`${LOG} ready, waiting for BGOS messages\n`);
 }
 
@@ -283,8 +281,8 @@ async function runConnect(
 
   // Design 2.2: the manual path installed nothing, so the agent died with
   // this terminal. With --keep-alive it gets the desktop setup's per agent
-  // service; without it, one line recommends that.
-  const mode = await finishConnect({
+  // service and connect exits 0; without it, one line recommends that.
+  await completeConnect({
     keepAlive,
     setUp: () =>
       setUpKeepAlive({
@@ -300,50 +298,23 @@ async function runConnect(
       }),
     out: (line) => process.stdout.write(`${LOG} ${line}\n`),
     err: (line) => process.stderr.write(`${LOG} ${line}\n`),
+    exit: (code) => process.exit(code),
+    runForeground: runStart,
   });
-  if (mode === "service") {
-    process.exit(0);
-    return;
-  }
-  await runStart();
 }
 
 async function main(): Promise<void> {
-  const argv = process.argv.slice(2);
-  // First, before any settings are read: the supervisor probes a staged
-  // update with exactly this, and exits on its own (self-update.ts).
-  if (argv[0] === "--version" || argv[0] === "-v") {
+  // --version is answered before any settings are read (cli-args.ts): the
+  // supervisor probes a staged update with exactly this.
+  const invocation = parseCli(process.argv.slice(2), process.env, {
+    readSettings,
+    agentHome,
+  });
+  if (invocation.kind === "version") {
     process.stdout.write(`${getPackageVersion()}\n`, () => process.exit(0));
     return;
   }
-  const keepAlive = takeFlag(argv, KEEP_ALIVE_FLAG);
-  const pinIndex = argv.indexOf("--assistant-id");
-  let assistantId: number | undefined;
-  if (pinIndex >= 0) {
-    assistantId = Number(argv[pinIndex + 1]);
-    if (!Number.isSafeInteger(assistantId) || assistantId < 1)
-      throw new Error("--assistant-id needs a positive integer.");
-    argv.splice(pinIndex, 2);
-    process.env.CODEX_BGOS_HOME ??= agentHome(assistantId);
-  }
-  const homeIndex = argv.indexOf("--home");
-  if (homeIndex >= 0) {
-    if (!argv[homeIndex + 1] || !isAbsolute(argv[homeIndex + 1]))
-      throw new Error("--home needs an absolute path");
-    process.env.CODEX_BGOS_HOME = argv[homeIndex + 1];
-    argv.splice(homeIndex, 2);
-  }
-  const settings = process.env.CODEX_BGOS_HOME
-    ? readSettings(process.env.CODEX_BGOS_HOME)
-    : null;
-  if (settings) {
-    process.env.CODEX_BGOS_WORKDIR = settings.workdir;
-    process.env.CODEX_BGOS_MEDIA_ROOT ??= settings.workdir;
-    if (settings.model) process.env.CODEX_BGOS_MODEL = settings.model;
-    if (settings.executable)
-      process.env.CODEX_BGOS_EXECUTABLE = settings.executable;
-  }
-  const verb = argv[0];
+  const { verb, argv, assistantId, keepAlive } = invocation;
 
   if (verb === "setup") {
     try {

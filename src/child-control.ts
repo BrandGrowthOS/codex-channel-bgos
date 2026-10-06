@@ -80,6 +80,19 @@ export function attachChildControl(opts: {
   });
 }
 
+/**
+ * attachChildControl, but only for a child of `supervise`: Node gives a
+ * process `send` only when its parent opened an IPC channel. A foreground
+ * start has no supervisor to answer, so it gets no stop channel at all.
+ */
+export function attachChildControlIfSupervised(
+  opts: Parameters<typeof attachChildControl>[0],
+): boolean {
+  if (typeof opts.channel.send !== "function") return false;
+  attachChildControl(opts);
+  return true;
+}
+
 interface SupervisedChild {
   // Method syntax: the send of a ChildProcess takes a narrower Serializable.
   send?(message: object): boolean;

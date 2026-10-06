@@ -12,6 +12,7 @@ import {
   STOP_IF_IDLE,
   STOP_REPLY,
   attachChildControl,
+  attachChildControlIfSupervised,
   requestStopIfIdle,
 } from "../src/child-control.js";
 
@@ -145,5 +146,38 @@ describe("stop if idle, over the IPC channel", () => {
       expect.objectContaining({ type: STOP_REPLY, result: "busy" }),
     ]);
     expect(STOP_IF_IDLE).not.toBe(STOP_REPLY);
+  });
+});
+
+describe("attachChildControlIfSupervised: only a child of supervise has the stop channel", () => {
+  it("a foreground start (no IPC channel, so no process.send) attaches nothing", () => {
+    const proc = new EventEmitter();
+    const on = vi.spyOn(proc, "on");
+    const busyNow = vi.fn(() => false);
+    expect(
+      attachChildControlIfSupervised({
+        channel: proc,
+        busyNow,
+        backgroundJobs: async () => 0,
+        shutdown: vi.fn(),
+      }),
+    ).toBe(false);
+    expect(on).not.toHaveBeenCalled();
+    expect(proc.listenerCount("message")).toBe(0);
+  });
+
+  it("under supervise (process.send exists) it answers the stop request", async () => {
+    const { child, proc } = pair();
+    const shutdown = vi.fn();
+    expect(
+      attachChildControlIfSupervised({
+        channel: proc,
+        busyNow: () => false,
+        backgroundJobs: async () => 0,
+        shutdown,
+      }),
+    ).toBe(true);
+    expect(await requestStopIfIdle(child)).toBe("stopping");
+    expect(shutdown).toHaveBeenCalledTimes(1);
   });
 });
