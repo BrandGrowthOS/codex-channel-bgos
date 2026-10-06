@@ -194,6 +194,9 @@ describe("decideConfirmation: the new supervisor confirms health or rolls back",
     ["a heartbeat from another process", { heartbeat: { ...healthy, pid: 1 } }, "wait"],
     ["no heartbeat after 3 minutes", { heartbeat: null, nowMs: started + CONFIRM_WINDOW_MS }, "rollback"],
     ["a supervisor that keeps crashing before it can confirm", { pending: { ...pending, boots: CONFIRM_MAX_BOOTS + 1 } }, "rollback"],
+    // Review F3: once a rollback was decided and failed, it is retried; a
+    // child that connects in between never turns it into a confirmation.
+    ["a rollback that failed once is tried again, even with a healthy child", { pending: { ...pending, rollbackFailures: 1 } }, "rollback"],
   ];
   for (const [name, change, expected] of table)
     it(name, () => {

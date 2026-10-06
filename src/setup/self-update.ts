@@ -24,7 +24,8 @@
  * start the new supervisor; the Windows Run key restarts nothing, so there
  * the hidden start-agent.vbs successor is spawned first. The new supervisor
  * confirms health (its child connected within 3 minutes) or swaps
- * runtime.prev back, records the version as rolled back and restarts.
+ * runtime.prev back, records the version as rolled back and restarts; a
+ * rollback that fails stays owed and is tried again (ROLLBACK_MAX_ATTEMPTS).
  *
  * An update that keeps waiting is never forced (decision D6: the owner may
  * decide otherwise, the supervisor never does). update-state.json records
@@ -68,6 +69,12 @@ export const HEARTBEAT_FRESH_MS = 90 * 1000;
 export const CONFIRM_WINDOW_MS = 3 * 60 * 1000;
 /** A new supervisor that keeps dying before it can confirm is rolled back. */
 export const CONFIRM_MAX_BOOTS = 3;
+/**
+ * A rollback that fails (on Windows a rename can meet a file still held) is
+ * tried again on the next passes, with restarts held; after this many tries
+ * the agent is let run on the version it is on (review F3).
+ */
+export const ROLLBACK_MAX_ATTEMPTS = 5;
 /** EX_TEMPFAIL: non zero, so systemd's Restart=on-failure restarts it. */
 export const UPDATE_EXIT_CODE = 75;
 export const UPDATE_TICK_MS = 15 * 1000;
@@ -95,6 +102,8 @@ export interface PendingConfirm {
   previousVersion: string;
   appliedAt: string;
   boots: number;
+  /** Rollbacks of this version that failed so far; above 0 one is owed. */
+  rollbackFailures: number;
 }
 
 export interface UpdateState {
@@ -327,6 +336,9 @@ export function decideConfirmation(input: {
 }): "confirmed" | "wait" | "rollback" {
   const { pending, heartbeat, childPid, startedAtMs, nowMs } = input;
   if (pending.boots > CONFIRM_MAX_BOOTS) return "rollback";
+  // The verdict was taken and the rollback failed: it is owed, whatever the
+  // child does in the meantime (review F3).
+  if (pending.rollbackFailures > 0) return "rollback";
   if (
     heartbeat &&
     childPid !== null &&
@@ -580,6 +592,9 @@ export function readUpdateState(
             appliedAt: pending.appliedAt,
             boots: Number.isSafeInteger(pending.boots)
               ? (pending.boots as number)
+              : 0,
+            rollbackFailures: Number.isSafeInteger(pending.rollbackFailures)
+              ? (pending.rollbackFailures as number)
               : 0,
           }
         : null,
@@ -1068,6 +1083,7 @@ export class SelfUpdater {
       previousVersion: this.deps.currentVersion,
       appliedAt: new Date(now).toISOString(),
       boots: 0,
+      rollbackFailures: 0,
     };
     this.dropStage();
     s.waitingReason = null;
@@ -1118,19 +1134,29 @@ export class SelfUpdater {
       await this.deps.forceStopChild();
     if (!s.rolledBack.includes(pending.version))
       s.rolledBack = [...s.rolledBack, pending.version].slice(-ROLLED_BACK_KEEP);
-    s.pendingConfirm = null;
     try {
       this.deps.rollback();
     } catch (error) {
+      // The rollback stays owed until it succeeds (review F3): clearing it
+      // here relaunched the version just judged broken, for good. Restarts
+      // stay held, so nothing runs from a runtime being renamed, and the next
+      // pass tries again; only after ROLLBACK_MAX_ATTEMPTS is the agent let
+      // run on what it has.
+      const failures = pending.rollbackFailures + 1;
+      const giveUp = failures >= ROLLBACK_MAX_ATTEMPTS;
+      s.pendingConfirm = giveUp ? null : { ...pending, rollbackFailures: failures };
       s.lastError = {
         at: new Date(this.deps.now()).toISOString(),
-        message: `Could not return to ${pending.previousVersion}: ${errorMessage(error)}`,
+        message: giveUp
+          ? `Could not return to ${pending.previousVersion} after ${failures} attempts (${errorMessage(error)}); staying on ${pending.version}.`
+          : `Could not return to ${pending.previousVersion} yet (attempt ${failures} of ${ROLLBACK_MAX_ATTEMPTS}): ${errorMessage(error)}`,
       };
       this.save();
       this.deps.log(s.lastError.message);
-      this.deps.resumeChild();
+      if (giveUp) this.deps.resumeChild();
       return "rollback_failed";
     }
+    s.pendingConfirm = null;
     s.lastError = {
       at: new Date(this.deps.now()).toISOString(),
       message: `${pending.version} did not come up and was rolled back to ${pending.previousVersion}.`,

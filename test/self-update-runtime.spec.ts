@@ -21,6 +21,7 @@ import {
   CONFIRM_WINDOW_MS,
   FIRST_CHECK_DELAY_MS,
   QUIET_WINDOW_MS,
+  ROLLBACK_MAX_ATTEMPTS,
   SelfUpdater,
   UPDATE_WAIT_NOTICE_MS,
   fetchLatestVersion,
@@ -681,6 +682,73 @@ describe("SelfUpdater flows", () => {
     const state = readUpdateState(home)!;
     expect(state.rolledBack).toEqual(["0.19.2"]);
     expect(state.pendingConfirm).toBeNull();
+  });
+
+  it("review F3: a rollback that fails keeps its pending confirmation, holds restarts and is tried again", async () => {
+    const home = tempHome();
+    writeUpdateState(home, {
+      ...emptyUpdateState(),
+      pendingConfirm: { version: "0.19.2", previousVersion: "0.19.0", appliedAt: iso(T0 - 20_000), boots: 0, rollbackFailures: 0 },
+    });
+    let failures = 1;
+    const h = harness(home, {
+      currentVersion: "0.19.2",
+      rollback: vi.fn(() => {
+        if (failures-- > 0) throw Object.assign(new Error("EPERM: operation not permitted, rename"), { code: "EPERM" });
+        h.events.push("rollback");
+      }),
+    });
+    h.setHeartbeat(idleHeartbeat(T0, { version: "0.19.2", wsConnected: false }));
+    const updater = new SelfUpdater(h.deps);
+    updater.boot();
+    h.setNow(T0 + CONFIRM_WINDOW_MS);
+    expect(await updater.tick()).toBe("rollback_failed");
+    let state = readUpdateState(home)!;
+    expect(state.pendingConfirm).toMatchObject({ version: "0.19.2", rollbackFailures: 1 });
+    expect(state.rolledBack).toEqual(["0.19.2"]);
+    expect(state.lastError?.message).toContain("EPERM");
+    // The version judged broken is NOT relaunched while the rollback is owed.
+    expect(h.deps.resumeChild).not.toHaveBeenCalled();
+    expect(h.deps.restartSupervisor).not.toHaveBeenCalled();
+    // Next pass: the same rollback, and this time it goes through.
+    h.setNow(T0 + CONFIRM_WINDOW_MS + 15_000);
+    expect(await updater.tick()).toBe("rolled_back");
+    expect(h.deps.rollback).toHaveBeenCalledTimes(2);
+    expect(h.events.slice(-2)).toEqual(["rollback", "restartSupervisor"]);
+    state = readUpdateState(home)!;
+    expect(state.pendingConfirm).toBeNull();
+    expect(state.rolledBack).toEqual(["0.19.2"]);
+  });
+
+  it("review F3: a rollback that never succeeds gives up after ROLLBACK_MAX_ATTEMPTS and lets the agent run", async () => {
+    const home = tempHome();
+    writeUpdateState(home, {
+      ...emptyUpdateState(),
+      pendingConfirm: { version: "0.19.2", previousVersion: "0.19.0", appliedAt: iso(T0 - 20_000), boots: 0, rollbackFailures: 0 },
+    });
+    const h = harness(home, {
+      currentVersion: "0.19.2",
+      rollback: vi.fn(() => {
+        throw new Error("There is no previous version to return to.");
+      }),
+    });
+    h.setHeartbeat(null);
+    h.setReply("unavailable");
+    const updater = new SelfUpdater(h.deps);
+    updater.boot();
+    for (let attempt = 1; attempt <= ROLLBACK_MAX_ATTEMPTS; attempt++) {
+      h.setNow(T0 + CONFIRM_WINDOW_MS + attempt * 15_000);
+      expect(await updater.tick()).toBe("rollback_failed");
+      expect(h.deps.resumeChild).toHaveBeenCalledTimes(attempt < ROLLBACK_MAX_ATTEMPTS ? 0 : 1);
+    }
+    const state = readUpdateState(home)!;
+    expect(state.pendingConfirm).toBeNull();
+    expect(state.lastError?.message).toContain(`after ${ROLLBACK_MAX_ATTEMPTS} attempts`);
+    expect(h.deps.rollback).toHaveBeenCalledTimes(ROLLBACK_MAX_ATTEMPTS);
+    // Nothing is owed any more: the next pass does not try again.
+    h.setNow(h.now + 15_000);
+    await updater.tick();
+    expect(h.deps.rollback).toHaveBeenCalledTimes(ROLLBACK_MAX_ATTEMPTS);
   });
 
   it("a rollback waits for a busy child too", async () => {
