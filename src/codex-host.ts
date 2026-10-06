@@ -759,6 +759,42 @@ function isUnknownMethod(error: unknown, method: string): boolean {
   );
 }
 
+/**
+ * A Map that tells its owner after every change. The host's turn and queue
+ * maps are mutated from a dozen places (a turn, a control, an adopted goal
+ * continuation, a release); watching the maps themselves means no path can
+ * start or end work without the busy signal hearing of it.
+ */
+class WatchedMap<K, V> extends Map<K, V> {
+  constructor(private readonly changed: () => void) {
+    super();
+  }
+  override set(key: K, value: V): this {
+    super.set(key, value);
+    this.changed?.();
+    return this;
+  }
+  override delete(key: K): boolean {
+    const had = super.delete(key);
+    if (had) this.changed();
+    return had;
+  }
+  override clear(): void {
+    const had = this.size > 0;
+    super.clear();
+    if (had) this.changed();
+  }
+}
+
+/** The list answers `{ data: [...], nextCursor }`; any other shape is unread. */
+function backgroundTerminalEntries(result: RpcObject): number {
+  for (const key of ["data", "terminals", "backgroundTerminals", "items"])
+    if (Array.isArray(result?.[key])) return result[key].length;
+  throw new Error("Codex answered thread/backgroundTerminals/list in a shape this daemon cannot read.");
+}
+
+const BACKGROUND_TERMINALS_LIST = "thread/backgroundTerminals/list";
+
 export class CodexHost {
   readonly authMode: "chatgpt" | "apikey";
   readonly workdir: string;
@@ -775,8 +811,14 @@ export class CodexHost {
    * would otherwise be routed to the chat that is leaving it.
    */
   private readonly historyReads = new Set<string>();
-  private readonly active = new Map<string, ActiveTurn>();
-  private readonly queues = new Map<number, Promise<unknown>>();
+  private readonly active = new WatchedMap<string, ActiveTurn>(() =>
+    this.busyChanged(),
+  );
+  private readonly queues = new WatchedMap<number, Promise<unknown>>(() =>
+    this.busyChanged(),
+  );
+  private readonly busyListeners = new Set<(busy: boolean) => void>();
+  private announcedBusy = false;
   private hints = BGOS_AGENT_HINTS;
   private tools: DynamicTool[];
   private readonly settings: SessionSettingsStore;
@@ -972,6 +1014,50 @@ export class CodexHost {
   }
   isBusy(chatId: number): boolean {
     return this.queues.has(chatId) || this.active.has(this.map[String(chatId)]);
+  }
+  /**
+   * Any chat's turn running or queued, across every chat: the busy signal
+   * the supervisor reads before it updates (finding 9).
+   */
+  isAnyBusy(): boolean {
+    return this.queues.size > 0 || this.active.size > 0;
+  }
+  /** Called on every busy edge (idle to busy, busy to idle), never twice for one. */
+  onBusyChange(listener: (busy: boolean) => void): () => void {
+    this.busyListeners.add(listener);
+    return () => this.busyListeners.delete(listener);
+  }
+  private busyChanged(): void {
+    const busy = this.isAnyBusy();
+    if (busy === this.announcedBusy) return;
+    this.announcedBusy = busy;
+    for (const listener of this.busyListeners)
+      try {
+        listener(busy);
+      } catch {}
+  }
+  /**
+   * Background terminals still running on the threads this process loaded:
+   * a live monitor a turn left behind is a job in flight (finding 9), so the
+   * child refuses to stop for an update while one runs. A runtime without
+   * the method has none; any other failure or an unreadable answer throws,
+   * because a guard that fails open kills a live job.
+   */
+  async backgroundTerminalCount(): Promise<number> {
+    let total = 0;
+    for (const threadId of [...this.loaded]) {
+      let result: RpcObject;
+      try {
+        result = await this.server.request(BACKGROUND_TERMINALS_LIST, {
+          threadId,
+        });
+      } catch (error) {
+        if (isUnknownMethod(error, BACKGROUND_TERMINALS_LIST)) return 0;
+        throw error;
+      }
+      total += backgroundTerminalEntries(result);
+    }
+    return total;
   }
   /**
    * Does this chat already have a thread.
