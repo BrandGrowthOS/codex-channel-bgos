@@ -867,6 +867,12 @@ export interface SelfUpdaterDeps {
   resumeChild: () => void;
   /** Release the lock and hand over to the next supervisor (exit 75). */
   restartSupervisor: () => Promise<void>;
+  /**
+   * The supervisor was asked to stop (POST /stop, which a Repair's
+   * pause-service sends, or a signal). No swap, rollback or hand over starts
+   * after that (review F9).
+   */
+  stopRequested: () => boolean;
   log: (message: string) => void;
   read?: (path: string) => string;
 }
@@ -1095,6 +1101,14 @@ export class SelfUpdater {
     // is ended for it.
     if (!(await this.deps.waitChildExit(CHILD_STOP_GRACE_MS)))
       await this.deps.forceStopChild();
+    // Asked to stop while the child shut down (review F9): a Repair is about
+    // to reinstall this runtime, and a swap now (and on Windows a successor
+    // started on it) would race that install. Nothing is switched; the
+    // stage stays for the next supervisor's safe moment.
+    if (this.deps.stopRequested()) {
+      this.deps.log(`update ${version} not switched: the supervisor is stopping`);
+      return "stopped";
+    }
     try {
       this.deps.swap();
     } catch (error) {
@@ -1174,8 +1188,11 @@ export class SelfUpdater {
   private async rollBack(
     pending: PendingConfirm,
     relaunchOnGiveUp: boolean,
-  ): Promise<"rolled_back" | "rollback_failed"> {
+  ): Promise<"rolled_back" | "rollback_failed" | "stopped"> {
     const s = this.state;
+    // Asked to stop meanwhile (review F9): the rollback stays owed for the
+    // next supervisor, and the folders are left to the Repair that follows.
+    if (this.deps.stopRequested()) return "stopped";
     if (!s.rolledBack.includes(pending.version))
       s.rolledBack = [...s.rolledBack, pending.version].slice(-ROLLED_BACK_KEEP);
     try {

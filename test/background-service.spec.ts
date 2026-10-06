@@ -354,10 +354,17 @@ describe("supervisorUpdateControls: how the updater reaches the child and hands 
         events.push("released");
       },
       handOver: () => void events.push("handOver"),
+      stopRequested: () => false,
       ...change,
     });
     return { controls, runner, children, events, pending, timers };
   }
+
+  it("review F9: once the supervisor was asked to stop, it hands over to no successor (a Repair is about to reinstall the runtime)", async () => {
+    const { controls, events } = setup({ stopRequested: () => true });
+    await controls.restartSupervisor();
+    expect(events).toEqual(["closeDown", "released"]);
+  });
 
   it("holds restarts BEFORE asking the child to stop, so its exit is never relaunched from a runtime being renamed", async () => {
     const { controls, runner, children, events, pending } = setup();

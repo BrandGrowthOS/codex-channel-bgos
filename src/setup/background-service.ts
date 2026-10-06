@@ -446,7 +446,8 @@ export function createChildRunner<C extends RunnableChild>(deps: {
  * - every question goes to the runner's CURRENT child, so the heartbeat is
  *   matched against the live process, never a pid from an earlier start;
  * - the supervisor lock is released BEFORE the hand over: the successor
- *   waits on that lock, and on Windows it is started before this one exits.
+ *   waits on that lock, and on Windows it is started before this one exits;
+ * - once stop() was called nothing hands over (review F9).
  */
 export function supervisorUpdateControls<C extends { pid?: number }>(deps: {
   runner: {
@@ -464,6 +465,8 @@ export function supervisorUpdateControls<C extends { pid?: number }>(deps: {
   release: () => Promise<void>;
   /** handOverToSuccessor: exit 75 (on Windows, the successor started first). */
   handOver: () => void;
+  /** stop() was called: POST /stop (a Repair's pause-service) or a signal. */
+  stopRequested: () => boolean;
 }): Pick<
   SelfUpdaterDeps,
   | "childPid"
@@ -472,6 +475,7 @@ export function supervisorUpdateControls<C extends { pid?: number }>(deps: {
   | "forceStopChild"
   | "resumeChild"
   | "restartSupervisor"
+  | "stopRequested"
 > {
   const { runner } = deps;
   return {
@@ -489,8 +493,13 @@ export function supervisorUpdateControls<C extends { pid?: number }>(deps: {
     restartSupervisor: async () => {
       deps.closeDown();
       await deps.release().catch(() => {});
+      // A supervisor asked to stop starts no successor (review F9): on
+      // Windows it would take the lock and launch a child from the runtime a
+      // Repair is reinstalling. stop() ends this process with 0.
+      if (deps.stopRequested()) return;
       deps.handOver();
     },
+    stopRequested: deps.stopRequested,
   };
 }
 
@@ -601,6 +610,9 @@ export async function supervise(home: string): Promise<void> {
   const startedAtMs = Date.now();
   const token = randomBytes(24).toString("hex");
   let stopping = false;
+  // Set by stop() alone (closeDown sets `stopping` for its own hand over):
+  // the updater starts no swap, rollback or hand over after it (review F9).
+  let stopRequested = false;
   let updateTimer: ReturnType<typeof setInterval> | undefined;
   // The restart loop exists before anything can call stop() (a signal, a
   // compromised lock), so stop() always has a runner to end.
@@ -646,6 +658,7 @@ export async function supervise(home: string): Promise<void> {
     void stop();
   });
   const stop = async () => {
+    stopRequested = true;
     if (stopping) return;
     stopping = true;
     runner.stop();
@@ -729,6 +742,7 @@ export async function supervise(home: string): Promise<void> {
           spawn: (command, args, options) => spawn(command, args, options),
           exit: (code) => process.exit(code),
         }),
+      stopRequested: () => stopRequested,
     }),
     log,
   });

@@ -301,6 +301,7 @@ function harness(home: string, change: Partial<SelfUpdaterDeps> = {}) {
     removePrevious: vi.fn(() => void events.push("removePrevious")),
     removeStaged: vi.fn(() => void events.push("removeStaged")),
     runtimeCodexVersion: () => "0.154.0",
+    stopRequested: () => false,
     readHeartbeat: () => heartbeat,
     childPid: () => 4242,
     requestChildStop: vi.fn(async () => {
@@ -574,6 +575,54 @@ describe("SelfUpdater flows", () => {
     expect(await updater.tick()).toBe("waiting:child_unresponsive");
     expect(h.deps.forceStopChild).not.toHaveBeenCalled();
     expect(h.deps.swap).not.toHaveBeenCalled();
+  });
+
+  it("review F9: a stop request (a Repair's pause-service) while the child shuts down cancels the swap and the hand over", async () => {
+    const home = tempHome();
+    let stopRequested = false;
+    const h = harness(home, {
+      stopRequested: () => stopRequested,
+      waitChildExit: vi.fn(async () => {
+        // POST /stop lands while the child is shutting down.
+        stopRequested = true;
+        h.events.push("waitExit");
+        return true;
+      }),
+    });
+    const updater = new SelfUpdater(h.deps);
+    updater.boot();
+    expect(await updater.tick()).toBe("stopped");
+    expect(h.events).toEqual(["stage:0.19.2", "requestStop:stopping", "waitExit"]);
+    expect(h.deps.swap).not.toHaveBeenCalled();
+    expect(h.deps.restartSupervisor).not.toHaveBeenCalled();
+    expect(h.deps.resumeChild).not.toHaveBeenCalled();
+    // Still staged: the next supervisor applies it at its own safe moment.
+    expect(readUpdateState(home)).toMatchObject({ stagedVersion: "0.19.2", pendingConfirm: null });
+  });
+
+  it("review F9: a stop request before a rollback leaves the rollback owed and the folders alone", async () => {
+    const home = tempHome();
+    writeUpdateState(home, {
+      ...emptyUpdateState(),
+      pendingConfirm: { version: "0.19.2", previousVersion: "0.19.0", appliedAt: iso(T0 - 20_000), boots: 0, rollbackFailures: 0 },
+    });
+    let stopRequested = false;
+    const h = harness(home, {
+      currentVersion: "0.19.2",
+      stopRequested: () => stopRequested,
+      waitChildExit: vi.fn(async () => {
+        stopRequested = true;
+        return true;
+      }),
+    });
+    h.setHeartbeat(null);
+    const updater = new SelfUpdater(h.deps);
+    updater.boot();
+    h.setNow(T0 + CONFIRM_WINDOW_MS);
+    expect(await updater.tick()).toBe("stopped");
+    expect(h.deps.rollback).not.toHaveBeenCalled();
+    expect(h.deps.restartSupervisor).not.toHaveBeenCalled();
+    expect(readUpdateState(home)!.pendingConfirm).toMatchObject({ version: "0.19.2" });
   });
 
   it("a shutdown that hangs after the child agreed is ended before the swap", async () => {
