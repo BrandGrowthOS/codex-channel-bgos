@@ -43,6 +43,8 @@ import {
   stageRuntime,
   swapRuntime,
   type ChildHeartbeat,
+  type ChildStopReply,
+  type SelfUpdaterDeps,
 } from "./self-update.js";
 
 export function serviceLabel(home: string): string {
@@ -433,6 +435,87 @@ export function createChildRunner<C extends RunnableChild>(deps: {
   };
 }
 
+/**
+ * How the updater reaches the child and hands over, as supervise wires it
+ * (self-update.ts). The order is the point:
+ * - restarts are held BEFORE the child is asked to stop: an idle child exits
+ *   at once, and a relaunch 5 s later would start from a runtime folder that
+ *   is being renamed;
+ * - every question goes to the runner's CURRENT child, so the heartbeat is
+ *   matched against the live process, never a pid from an earlier start;
+ * - the supervisor lock is released BEFORE the hand over: the successor
+ *   waits on that lock, and on Windows it is started before this one exits.
+ */
+export function supervisorUpdateControls<C extends { pid?: number }>(deps: {
+  runner: {
+    current: () => C | null;
+    hold: () => void;
+    resume: () => void;
+  };
+  /** requestStopIfIdle (child-control.ts). */
+  askToStop: (child: C | null) => Promise<ChildStopReply>;
+  waitForExit: (child: C | null, ms: number) => Promise<boolean>;
+  terminate: (child: C) => Promise<void>;
+  /** End the restart loop, the update timer and the control server; drop service.json. */
+  closeDown: () => void;
+  /** Release the supervisor lock. */
+  release: () => Promise<void>;
+  /** handOverToSuccessor: exit 75 (on Windows, the successor started first). */
+  handOver: () => void;
+}): Pick<
+  SelfUpdaterDeps,
+  | "childPid"
+  | "requestChildStop"
+  | "waitChildExit"
+  | "forceStopChild"
+  | "resumeChild"
+  | "restartSupervisor"
+> {
+  const { runner } = deps;
+  return {
+    childPid: () => runner.current()?.pid ?? null,
+    requestChildStop: () => {
+      runner.hold();
+      return deps.askToStop(runner.current());
+    },
+    waitChildExit: (ms) => deps.waitForExit(runner.current(), ms),
+    forceStopChild: async () => {
+      const child = runner.current();
+      if (child) await deps.terminate(child);
+    },
+    resumeChild: () => runner.resume(),
+    restartSupervisor: async () => {
+      deps.closeDown();
+      await deps.release().catch(() => {});
+      deps.handOver();
+    },
+  };
+}
+
+/**
+ * The updater's start: it claims update-state.json for this supervisor
+ * BEFORE the child starts (the child reports only its own supervisor's
+ * state), then a pass every UPDATE_TICK_MS. A pass that throws is logged:
+ * an unhandled rejection would end the supervisor, and with it the agent.
+ * Returns the timer the supervisor clears when it stops.
+ */
+export function startSelfUpdate<T>(deps: {
+  updater: { boot: () => void; tick: () => Promise<string> };
+  runner: { launch: () => void };
+  log: (message: string) => void;
+  every: (fn: () => void, ms: number) => T;
+}): T {
+  deps.updater.boot();
+  deps.runner.launch();
+  return deps.every(() => {
+    void deps.updater.tick().catch((error) =>
+      deps.log(
+        `update pass failed: ${error instanceof Error ? error.message : String(error)}`,
+      ),
+    );
+  }, UPDATE_TICK_MS);
+}
+
 /** End a child: graceful first, forced after 5 s, settled within 7 s. */
 async function terminateChild(target: ChildProcess): Promise<void> {
   if (target.exitCode !== null || target.signalCode !== null) return;
@@ -609,40 +692,30 @@ export async function supervise(home: string): Promise<void> {
         return null;
       }
     },
-    childPid: () => runner.current()?.pid ?? null,
-    requestChildStop: () => {
-      runner.hold();
-      return requestStopIfIdle(runner.current());
-    },
-    waitChildExit: (ms) => waitForExit(runner.current(), ms),
-    forceStopChild: async () => {
-      const child = runner.current();
-      if (child) await terminateChild(child);
-    },
-    resumeChild: () => runner.resume(),
-    restartSupervisor: async () => {
-      stopping = true;
-      runner.stop();
-      if (updateTimer) clearInterval(updateTimer);
-      server.close();
-      try {
-        unlinkSync(join(home, "service.json"));
-      } catch {}
-      await release().catch(() => {});
-      handOverToSuccessor({
-        platform: process.platform,
-        home,
-        spawn: (command, args, options) => spawn(command, args, options),
-        exit: (code) => process.exit(code),
-      });
-    },
+    ...supervisorUpdateControls<ChildProcess>({
+      runner,
+      askToStop: (child) => requestStopIfIdle(child),
+      waitForExit,
+      terminate: terminateChild,
+      closeDown: () => {
+        stopping = true;
+        runner.stop();
+        if (updateTimer) clearInterval(updateTimer);
+        server.close();
+        try {
+          unlinkSync(join(home, "service.json"));
+        } catch {}
+      },
+      release: () => release(),
+      handOver: () =>
+        handOverToSuccessor({
+          platform: process.platform,
+          home,
+          spawn: (command, args, options) => spawn(command, args, options),
+          exit: (code) => process.exit(code),
+        }),
+    }),
     log,
   });
-  updater.boot();
-  runner.launch();
-  updateTimer = setInterval(() => {
-    void updater.tick().catch((error) =>
-      log(`update pass failed: ${error instanceof Error ? error.message : String(error)}`),
-    );
-  }, UPDATE_TICK_MS);
+  updateTimer = startSelfUpdate({ updater, runner, log, every: setInterval });
 }

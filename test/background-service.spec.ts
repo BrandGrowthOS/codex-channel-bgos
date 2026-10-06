@@ -31,7 +31,10 @@ import {
   serviceEnvironment,
   serviceInstalled,
   serviceLabel,
+  startSelfUpdate,
+  supervisorUpdateControls,
 } from "../src/setup/background-service.js";
+import { UPDATE_TICK_MS } from "../src/setup/self-update.js";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -293,5 +296,171 @@ describe("createChildRunner: the supervisor's restart loop", () => {
     expect(timers).toHaveLength(0);
     runner.resume();
     expect(children).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// supervise()'s self update wiring, through the seams it is built from
+// ---------------------------------------------------------------------------
+
+describe("supervisorUpdateControls: how the updater reaches the child and hands over", () => {
+  function setup(change: Partial<Parameters<typeof supervisorUpdateControls>[0]> = {}) {
+    const events: string[] = [];
+    const children: any[] = [];
+    const timers: Array<{ fn: () => void; ms: number; cleared: boolean }> = [];
+    const runner = createChildRunner({
+      spawnChild: () => {
+        const child = new EventEmitter() as any;
+        child.pid = 1000 + children.length;
+        children.push(child);
+        return child;
+      },
+      setTimer: (fn, ms) => {
+        const timer = { fn, ms, cleared: false };
+        timers.push(timer);
+        return timer;
+      },
+      clearTimer: (timer) => {
+        (timer as { cleared: boolean }).cleared = true;
+      },
+    });
+    const pending = () => timers.filter((t) => !t.cleared);
+    const controls = supervisorUpdateControls({
+      runner: {
+        current: runner.current,
+        hold: () => {
+          events.push("hold");
+          runner.hold();
+        },
+        resume: () => {
+          events.push("resume");
+          runner.resume();
+        },
+      },
+      askToStop: async (child) => {
+        events.push(`ask:${child?.pid ?? "none"}`);
+        // An idle child agrees and is gone a moment later.
+        setImmediate(() => child?.emit("exit", 0, null));
+        return "stopping";
+      },
+      waitForExit: async (child, ms) => {
+        events.push(`wait:${child?.pid ?? "none"}:${ms}`);
+        return true;
+      },
+      terminate: async (child) => void events.push(`terminate:${child.pid}`),
+      closeDown: () => void events.push("closeDown"),
+      release: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        events.push("released");
+      },
+      handOver: () => void events.push("handOver"),
+      ...change,
+    });
+    return { controls, runner, children, events, pending, timers };
+  }
+
+  it("holds restarts BEFORE asking the child to stop, so its exit is never relaunched from a runtime being renamed", async () => {
+    const { controls, runner, children, events, pending } = setup();
+    runner.launch();
+    expect(await controls.requestChildStop()).toBe("stopping");
+    expect(events).toEqual(["hold", "ask:1000"]);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(runner.current()).toBeNull();
+    expect(pending()).toHaveLength(0);
+    expect(children).toHaveLength(1);
+  });
+
+  it("childPid is the runner's CURRENT child, so the heartbeat is matched against the live process", () => {
+    const { controls, runner, children, timers } = setup();
+    expect(controls.childPid()).toBeNull();
+    runner.launch();
+    expect(controls.childPid()).toBe(1000);
+    children[0].emit("exit", 1, null);
+    expect(controls.childPid()).toBeNull();
+    timers[0].fn();
+    expect(controls.childPid()).toBe(1001);
+  });
+
+  it("waits for, and ends, only the current child", async () => {
+    const { controls, runner, events } = setup();
+    await controls.forceStopChild();
+    expect(events).toEqual([]);
+    runner.launch();
+    expect(await controls.waitChildExit(30_000)).toBe(true);
+    await controls.forceStopChild();
+    expect(events).toEqual(["wait:1000:30000", "terminate:1000"]);
+  });
+
+  it("resumeChild lets the restart loop run again", () => {
+    const { controls, runner, children } = setup();
+    runner.launch();
+    runner.hold();
+    children[0].emit("exit", 0, null);
+    controls.resumeChild();
+    expect(children).toHaveLength(2);
+  });
+
+  it("releases the supervisor lock BEFORE the hand over: the successor waits on that lock", async () => {
+    const { controls, events } = setup();
+    await controls.restartSupervisor();
+    expect(events).toEqual(["closeDown", "released", "handOver"]);
+  });
+
+  it("a lock that cannot be released still hands over (the lease goes stale on its own)", async () => {
+    const { controls, events } = setup({
+      release: async () => {
+        throw new Error("ECOMPROMISED");
+      },
+    });
+    await controls.restartSupervisor();
+    expect(events).toEqual(["closeDown", "handOver"]);
+  });
+});
+
+describe("startSelfUpdate: boot, launch, then a pass every 15 s", () => {
+  function setup(tick: () => Promise<string>) {
+    const events: string[] = [];
+    const intervals: Array<{ fn: () => void; ms: number }> = [];
+    const log = vi.fn();
+    const timer = startSelfUpdate({
+      updater: {
+        boot: () => void events.push("boot"),
+        tick: async () => {
+          events.push("tick");
+          return tick();
+        },
+      },
+      runner: { launch: () => void events.push("launch") },
+      log,
+      every: (fn, ms) => {
+        intervals.push({ fn, ms });
+        return "timer-1";
+      },
+    });
+    return { events, intervals, log, timer };
+  }
+
+  it("claims the update state before the child starts (the child reports only its own supervisor's state)", () => {
+    const { events } = setup(async () => "idle");
+    expect(events).toEqual(["boot", "launch"]);
+  });
+
+  it("runs an update pass every UPDATE_TICK_MS and returns the timer stop() clears", async () => {
+    const { events, intervals, timer } = setup(async () => "idle");
+    expect(intervals.map((i) => i.ms)).toEqual([UPDATE_TICK_MS]);
+    expect(UPDATE_TICK_MS).toBe(15_000);
+    expect(timer).toBe("timer-1");
+    intervals[0].fn();
+    intervals[0].fn();
+    expect(events).toEqual(["boot", "launch", "tick", "tick"]);
+  });
+
+  it("a pass that throws is logged, never an unhandled rejection that ends the supervisor", async () => {
+    const { intervals, log } = setup(async () => {
+      throw new Error("EACCES update-state.json");
+    });
+    intervals[0].fn();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(log).toHaveBeenCalledWith("update pass failed: EACCES update-state.json");
   });
 });
