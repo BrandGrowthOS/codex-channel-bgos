@@ -747,7 +747,11 @@ export async function renameWithRetry(
   }
 }
 
-/** runtime -> runtime.prev, runtime.next -> runtime; undone if the second rename fails. */
+/**
+ * runtime -> runtime.prev, runtime.next -> runtime; undone if the second
+ * rename fails. A home with no runtime yet (a first `connect --keep-alive`)
+ * only moves runtime.next in.
+ */
 export async function swapRuntime(
   home: string,
   fs: RuntimeFs = nodeRuntimeFs,
@@ -758,13 +762,13 @@ export async function swapRuntime(
   const rename = (from: string, to: string) =>
     renameWithRetry(fs.rename, from, to, retry);
   fs.remove(prev);
-  await rename(runtime, prev);
+  if (fs.exists(runtime)) await rename(runtime, prev);
   try {
     await rename(next, runtime);
   } catch (error) {
     // The first error says why. An undo that fails too leaves no runtime
     // folder, which restoreRuntime puts back before anything runs from it.
-    await rename(prev, runtime).catch(() => {});
+    if (fs.exists(prev)) await rename(prev, runtime).catch(() => {});
     throw error;
   }
 }

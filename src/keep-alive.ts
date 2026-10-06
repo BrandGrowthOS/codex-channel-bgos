@@ -22,10 +22,12 @@ import {
   PACKAGE_NAME,
   installedPackageVersion,
   isManagedRuntime,
+  nodeRenameRetry,
   nodeRuntimeFs,
   runtimeCli,
   runtimePaths,
   stageRuntime,
+  swapRuntime,
   type Exec,
   type RuntimeFs,
 } from "./setup/self-update.js";
@@ -96,7 +98,7 @@ export async function setUpKeepAlive(deps: {
   install: (home: string, cli: string) => Promise<void>;
 }): Promise<string> {
   const fs = deps.fs ?? nodeRuntimeFs;
-  const { runtime, next, prev } = runtimePaths(deps.home);
+  const { runtime, prev } = runtimePaths(deps.home);
   const cli = runtimeCli(runtime);
   const ready =
     isManagedRuntime(deps.home, deps.currentCli) ||
@@ -118,9 +120,11 @@ export async function setUpKeepAlive(deps: {
       codexVersion: deps.codexVersion,
     });
     await deps.pause(deps.home);
-    fs.remove(prev);
-    if (fs.exists(runtime)) fs.rename(runtime, prev);
-    fs.rename(next, runtime);
+    // The updater's own swap, with its undo (review F6): a rename that fails
+    // puts the runtime a desktop setup installed back, so the service already
+    // installed for it still has its cli.js at the next login instead of
+    // pointing at a folder that is gone. Windows retries a held rename.
+    await swapRuntime(deps.home, fs, { ...nodeRenameRetry, platform: deps.platform });
     fs.remove(prev);
   }
   await deps.install(deps.home, cli);

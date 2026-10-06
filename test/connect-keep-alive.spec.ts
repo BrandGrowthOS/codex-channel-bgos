@@ -149,6 +149,42 @@ describe("setUpKeepAlive", () => {
     expect(events.indexOf("pause")).toBeLessThan(events.indexOf("install"));
   });
 
+  it("review F6: a switch that fails puts the existing runtime back, and installs no service", async () => {
+    const home = temp();
+    const p = runtimePaths(home);
+    makeRuntime(p.runtime, "0.18.0");
+    const events: string[] = [];
+    const install = vi.fn(async () => {});
+    const failing: RuntimeFs = {
+      ...fs,
+      rename: (from, to) => {
+        if (from === p.next) throw Object.assign(new Error("EPERM: operation not permitted, rename"), { code: "EPERM" });
+        nodeRuntimeFs.rename(from, to);
+      },
+    };
+    await expect(
+      setUpKeepAlive({
+        home,
+        currentCli: "/elsewhere/cli.js",
+        version: "0.19.0",
+        codexVersion: "0.154.0",
+        execPath: EXEC_PATH,
+        // Not Windows, so nothing is retried and the failure stands at once.
+        platform: "darwin",
+        exec: recordingExec(events),
+        fs: failing,
+        pause: async () => void events.push("pause"),
+        install,
+      }),
+    ).rejects.toThrow("EPERM");
+    // The desktop installed runtime (and the service that runs it) is intact.
+    expect(
+      JSON.parse(readFileSync(join(p.runtime, "node_modules", "codex-channel-bgos", "package.json"), "utf8")).version,
+    ).toBe("0.18.0");
+    expect(existsSync(p.prev)).toBe(false);
+    expect(install).not.toHaveBeenCalled();
+  });
+
   it("reuses a runtime already on this version (no npm)", async () => {
     const home = temp();
     makeRuntime(runtimePaths(home).runtime, "0.19.0");
