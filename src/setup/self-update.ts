@@ -18,7 +18,8 @@
  * moment: the child's heartbeat is fresh, it is connected to BGOS (the new
  * version confirms by connecting, so an offline switch would roll a good
  * release back), no chat is busy and nothing happened for 10 minutes
- * (finding 9: never restart an agent mid job, and never kill a busy child). Applying stops the child through its own idle
+ * (finding 9: never restart an agent mid job, and never kill a busy child).
+ * Applying stops the child through its own idle
  * check, renames runtime to runtime.prev and runtime.next to runtime, and
  * exits 75 so launchd (KeepAlive) or systemd (Restart=on-failure counts 75)
  * start the new supervisor; the Windows Run key restarts nothing, so there
