@@ -81,7 +81,8 @@ export function attachChildControl(opts: {
 }
 
 interface SupervisedChild {
-  send?: (message: unknown) => boolean;
+  // Method syntax: the send of a ChildProcess takes a narrower Serializable.
+  send?(message: object): boolean;
   connected?: boolean;
   on(event: "message" | "exit", listener: (...args: any[]) => void): unknown;
   off(event: "message" | "exit", listener: (...args: any[]) => void): unknown;
