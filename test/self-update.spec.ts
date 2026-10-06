@@ -27,6 +27,7 @@ import {
   npmCliPath,
   resolveSupervised,
   stageInstallArgs,
+  supervisorPidFromEnv,
   updateReportFromState,
   type ChildHeartbeat,
 } from "../src/setup/self-update.js";
@@ -319,4 +320,24 @@ describe("npm next to node", () => {
       "@openai/codex@0.154.0",
     ]);
   });
+});
+
+describe("supervisorPidFromEnv: the child trusts only the pid supervise handed it", () => {
+  const table: Array<[string | undefined, number | null]> = [
+    ["4321", 4321],
+    [undefined, null],
+    ["", null],
+    ["0", null],
+    ["-5", null],
+    ["12abc", null],
+    ["99999999999", null],
+  ];
+  for (const [raw, expected] of table)
+    it(`${JSON.stringify(raw)} -> ${expected}`, () => {
+      expect(
+        supervisorPidFromEnv(
+          raw === undefined ? {} : { CODEX_BGOS_SUPERVISOR_PID: raw },
+        ),
+      ).toBe(expected);
+    });
 });

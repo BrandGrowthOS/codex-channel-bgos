@@ -43,6 +43,17 @@ export interface MachineIdFs {
   chmodSync?: (path: string, mode: number) => void;
 }
 
+let cachedMachineId = "";
+
+/**
+ * This user's machine id, read (or minted) once per process. '' is not cached,
+ * so a home that becomes writable later is tried again on the next beat.
+ */
+export function sharedMachineId(): string {
+  if (!cachedMachineId) cachedMachineId = ensureMachineId();
+  return cachedMachineId;
+}
+
 /** <home>/.bgos-agent/machine-id */
 export function machineIdPath(home: string): string {
   return join(home, ".bgos-agent", MACHINE_ID_FILE);

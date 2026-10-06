@@ -8,7 +8,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { DECLARED_CAPABILITIES } from "../src/declared-capabilities.js";
-import { HeartbeatController, type HeartbeatDto } from "../src/heartbeat.js";
+import {
+  HeartbeatController,
+  heartbeatEnv,
+  type HeartbeatDto,
+} from "../src/heartbeat.js";
 
 function heartbeatFile(home: string): Record<string, unknown> {
   return JSON.parse(readFileSync(join(home, "bgos_heartbeat.json"), "utf8"));
@@ -248,5 +252,148 @@ describe("HeartbeatController", () => {
         hb.stop();
       }
     });
+  });
+});
+
+/**
+ * Mission 104 (design 2.2, Visibility): the heartbeat carries the computer's
+ * identity and the supervisor's update readiness, in the backend
+ * HeartbeatDto's exact shape, and the local file carries the busy signal the
+ * supervisor's safe moment reads (finding 9).
+ */
+describe("identity, update readiness and the busy signal", () => {
+  let tempHome: string;
+  const originalCodexBgosHome = process.env.CODEX_BGOS_HOME;
+  beforeEach(() => {
+    tempHome = mkdtempSync(join(tmpdir(), "codex-hb-ka-"));
+    process.env.CODEX_BGOS_HOME = tempHome;
+  });
+  afterEach(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+    if (originalCodexBgosHome === undefined) delete process.env.CODEX_BGOS_HOME;
+    else process.env.CODEX_BGOS_HOME = originalCodexBgosHome;
+  });
+
+  const readiness = {
+    latestKnownVersion: "0.19.2",
+    updateReadiness: {
+      supervised: "launchd" as const,
+      autoUpdateEnabled: true,
+      rollbackLatched: false,
+      pendingRestartVersion: "0.19.2",
+    },
+  };
+
+  it("posts env {platform, machineId, role:'agent'}, latestKnownVersion and updateReadiness", () => {
+    const posts: HeartbeatDto[] = [];
+    const hb = new HeartbeatController({
+      version: "0.19.0",
+      postHeartbeat: async (b) => void posts.push(b),
+      env: () => heartbeatEnv(() => "machine-0001-abcd", "darwin"),
+      updateReport: () => readiness,
+    });
+    hb.start();
+    try {
+      expect(posts[0]).toMatchObject({
+        daemonVersion: "0.19.0",
+        env: { platform: "darwin", machineId: "machine-0001-abcd", role: "agent" },
+        latestKnownVersion: "0.19.2",
+        updateReadiness: readiness.updateReadiness,
+      });
+      // Exactly the backend's keys: HeartbeatEnvDto and sanitizeUpdateReadiness.
+      expect(Object.keys(posts[0].env!).sort()).toEqual(["machineId", "platform", "role"]);
+      expect(Object.keys(posts[0].updateReadiness!).sort()).toEqual([
+        "autoUpdateEnabled",
+        "pendingRestartVersion",
+        "rollbackLatched",
+        "supervised",
+      ]);
+    } finally {
+      hb.stop();
+    }
+  });
+
+  it("omits machineId when none could be persisted, and sends null for an unknown latest", () => {
+    const posts: HeartbeatDto[] = [];
+    const hb = new HeartbeatController({
+      version: "0.19.0",
+      postHeartbeat: async (b) => void posts.push(b),
+      env: () => heartbeatEnv(() => "", "linux"),
+      updateReport: () => ({ ...readiness, latestKnownVersion: null }),
+    });
+    hb.start();
+    try {
+      expect(posts[0].env).toEqual({ platform: "linux", role: "agent" });
+      expect(posts[0]).toHaveProperty("latestKnownVersion", null);
+    } finally {
+      hb.stop();
+    }
+  });
+
+  it("a failing readiness read never stops the heartbeat", () => {
+    const posts: HeartbeatDto[] = [];
+    const hb = new HeartbeatController({
+      version: "0.19.0",
+      postHeartbeat: async (b) => void posts.push(b),
+      env: () => {
+        throw new Error("no home");
+      },
+      updateReport: () => {
+        throw new Error("unreadable");
+      },
+    });
+    hb.start();
+    try {
+      expect(posts).toHaveLength(1);
+      expect(posts[0]).not.toHaveProperty("env");
+      expect(posts[0]).not.toHaveProperty("updateReadiness");
+    } finally {
+      hb.stop();
+    }
+  });
+
+  it("writes busy and lastActivityAt, immediately on a busy change", () => {
+    let now = Date.parse("2026-10-06T20:00:00.000Z");
+    const hb = new HeartbeatController({
+      version: "0.19.0",
+      postHeartbeat: async () => {},
+      now: () => now,
+    });
+    hb.start();
+    try {
+      const first = heartbeatFile(tempHome);
+      expect(first.busy).toBe(false);
+      // Process start counts as activity: a fresh child waits out the window.
+      expect(first.lastActivityAt).toBe("2026-10-06T20:00:00.000Z");
+      now += 5_000;
+      hb.setBusy(true);
+      expect(heartbeatFile(tempHome)).toMatchObject({
+        busy: true,
+        lastActivityAt: "2026-10-06T20:00:05.000Z",
+      });
+      now += 60_000;
+      hb.setBusy(false);
+      expect(heartbeatFile(tempHome)).toMatchObject({
+        busy: false,
+        lastActivityAt: "2026-10-06T20:01:05.000Z",
+      });
+    } finally {
+      hb.stop();
+    }
+  });
+
+  it("an inbound or outbound message is activity too", () => {
+    let now = Date.parse("2026-10-06T20:00:00.000Z");
+    const hb = new HeartbeatController({
+      version: "0.19.0",
+      postHeartbeat: async () => {},
+      now: () => now,
+    });
+    now += 1_000;
+    hb.recordInbound();
+    expect(hb.snapshotFile().lastActivityAt).toBe("2026-10-06T20:00:01.000Z");
+    now += 1_000;
+    hb.recordOutbound();
+    expect(hb.snapshotFile().lastActivityAt).toBe("2026-10-06T20:00:02.000Z");
   });
 });

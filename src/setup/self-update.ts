@@ -353,6 +353,16 @@ export function resolveSupervised(input: {
   return "none";
 }
 
+/** The supervisor's pid as supervise hands it to the child, or null. */
+export function supervisorPidFromEnv(
+  env: Record<string, string | undefined>,
+): number | null {
+  const raw = env[SUPERVISOR_PID_ENV];
+  if (!raw || !/^\d{1,10}$/.test(raw)) return null;
+  const pid = Number(raw);
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+}
+
 const UNSUPERVISED_REPORT: UpdateReport = {
   latestKnownVersion: null,
   updateReadiness: {

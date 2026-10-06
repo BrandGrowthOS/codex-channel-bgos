@@ -48,7 +48,13 @@ import { GoalLane } from "./goal-lane.js";
 import { StepsLane, stepsChatKindAdmits } from "./steps-lane.js";
 import { MeetingLane } from "./meeting-lane.js";
 import { TaskJournal, type TaskResult } from "./task-journal.js";
-import { HeartbeatController } from "./heartbeat.js";
+import { HeartbeatController, daemonHome, heartbeatEnv } from "./heartbeat.js";
+import { sharedMachineId } from "./machine-id.js";
+import {
+  readUpdateState,
+  supervisorPidFromEnv,
+  updateReportFromState,
+} from "./setup/self-update.js";
 import { getPackageVersion } from "./version.js";
 import { syncCatalog, type CatalogAgent } from "./catalog-sync.js";
 import {
@@ -699,7 +705,19 @@ export class CodexAdapter {
       authMode: auth.mode,
       capabilities: DECLARED_CAPABILITIES,
       postHeartbeat: (body) => this.api.postHeartbeat(body),
+      // Design 2.2, Visibility: the computer this agent runs on (the machine
+      // id every framework's daemon and the watcher share) and what its
+      // supervisor knows about updates, read fresh on every beat.
+      env: () => heartbeatEnv(sharedMachineId),
+      updateReport: () =>
+        updateReportFromState(
+          readUpdateState(daemonHome()),
+          supervisorPidFromEnv(process.env),
+        ),
     });
+    // The busy signal the supervisor reads before an update (finding 9):
+    // every edge, any chat, written to the heartbeat file at once.
+    this.host.onBusyChange((busy) => this.heartbeat.setBusy(busy));
 
     this.catalog = opts.agents ?? [{ route: "codex", name: "Codex" }];
     this.commandSeedModeOverride = opts.commandSeedMode ?? null;
@@ -939,6 +957,18 @@ export class CodexAdapter {
       void this.outbound.replaySpool();
     }, 60_000);
     this.spoolTimer.unref?.();
+  }
+
+  /**
+   * The supervisor's stop-if-idle question (child-control.ts, finding 9):
+   * any chat's turn running or queued, and the background terminals a turn
+   * left running.
+   */
+  isAnyBusy(): boolean {
+    return this.host.isAnyBusy();
+  }
+  backgroundJobCount(): Promise<number> {
+    return this.host.backgroundTerminalCount();
   }
 
   async stop(): Promise<void> {
