@@ -127,6 +127,11 @@ describe("decideSafeMoment (finding 9: never restart mid job)", () => {
     ["a heartbeat from another process (the previous child)", heartbeat({ pid: 1 }), 4242, { safe: false, reason: "heartbeat_other_process" }],
     ["a stale heartbeat", heartbeat({ ts: iso(NOW - HEARTBEAT_FRESH_MS - 1) }), 4242, { safe: false, reason: "heartbeat_stale" }],
     ["an unreadable heartbeat time", heartbeat({ ts: "soon" }), 4242, { safe: false, reason: "heartbeat_stale" }],
+    // Review F2: offline, a backend outage or a fatal latch looks idle and
+    // quiet, but the new version could never confirm, so a good release
+    // would be rolled back and latched for good.
+    ["not connected to BGOS", heartbeat({ wsConnected: false }), 4242, { safe: false, reason: "disconnected" }],
+    ["connection unknown (an old child)", heartbeat({ wsConnected: undefined }), 4242, { safe: false, reason: "disconnected" }],
     ["a chat is busy", heartbeat({ busy: true }), 4242, { safe: false, reason: "busy" }],
     ["busy unknown (an old child)", heartbeat({ busy: undefined }), 4242, { safe: false, reason: "busy" }],
     ["activity 9 minutes ago", heartbeat({ lastActivityAt: iso(NOW - 9 * 60_000) }), 4242, { safe: false, reason: "recent_activity" }],

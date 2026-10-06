@@ -500,6 +500,21 @@ describe("SelfUpdater flows", () => {
     ]);
   });
 
+  it("review F2: an agent that is not connected waits; the new version could never confirm and would be latched as rolled back", async () => {
+    const home = tempHome();
+    const h = harness(home);
+    h.setHeartbeat(idleHeartbeat(h.now, { wsConnected: false }));
+    const updater = new SelfUpdater(h.deps);
+    updater.boot();
+    expect(await updater.tick()).toBe("waiting:disconnected");
+    expect(h.deps.requestChildStop).not.toHaveBeenCalled();
+    expect(h.deps.swap).not.toHaveBeenCalled();
+    // Connected again, and still idle and quiet: the update applies.
+    h.setHeartbeat(idleHeartbeat(h.now));
+    expect(await updater.tick()).toBe("applied");
+    expect(readUpdateState(home)!.rolledBack).toEqual([]);
+  });
+
   it("waits out the 10 minute quiet window", async () => {
     const home = tempHome();
     const h = harness(home);

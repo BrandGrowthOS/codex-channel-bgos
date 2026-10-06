@@ -15,9 +15,10 @@
  * HOAI desktop setup installs into), with the Codex runtime pinned to the
  * version already installed, so Codex itself does not change underneath the
  * agent; then its CLI is probed (`--version`). It is APPLIED only at a safe
- * moment: the child's heartbeat is fresh, no chat is busy and nothing
- * happened for 10 minutes (finding 9: never restart an agent mid job, and
- * never kill a busy child). Applying stops the child through its own idle
+ * moment: the child's heartbeat is fresh, it is connected to BGOS (the new
+ * version confirms by connecting, so an offline switch would roll a good
+ * release back), no chat is busy and nothing happened for 10 minutes
+ * (finding 9: never restart an agent mid job, and never kill a busy child). Applying stops the child through its own idle
  * check, renames runtime to runtime.prev and runtime.next to runtime, and
  * exits 75 so launchd (KeepAlive) or systemd (Restart=on-failure counts 75)
  * start the new supervisor; the Windows Run key restarts nothing, so there
@@ -141,6 +142,7 @@ export type UnsafeReason =
   | "heartbeat_missing"
   | "heartbeat_other_process"
   | "heartbeat_stale"
+  | "disconnected"
   | "busy"
   | "recent_activity";
 export type SafeMoment = { safe: true } | { safe: false; reason: UnsafeReason };
@@ -246,6 +248,12 @@ export function decideSafeMoment(input: {
   const ts = Date.parse(heartbeat.ts ?? "");
   if (!Number.isFinite(ts) || nowMs - ts > HEARTBEAT_FRESH_MS)
     return { safe: false, reason: "heartbeat_stale" };
+  // The new version confirms only by connecting (decideConfirmation). Offline,
+  // a backend outage or a fatal latch looks idle and quiet, and applying then
+  // rolls back a good release and latches it here for good (review F2). So
+  // the version that switches away must itself be connected.
+  if (heartbeat.wsConnected !== true)
+    return { safe: false, reason: "disconnected" };
   if (heartbeat.busy !== false) return { safe: false, reason: "busy" };
   const last = Date.parse(heartbeat.lastActivityAt ?? "");
   if (!Number.isFinite(last) || nowMs - last < QUIET_WINDOW_MS)
