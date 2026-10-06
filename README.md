@@ -49,7 +49,7 @@ What happens automatically, for an agent running as the background service from 
 
 1. About once a day (every 24 hours plus a random delay of up to 6 hours), the supervisor reads the `latest` version of `codex-channel-bgos` on npm. It only takes a newer version with the same major number, never an older one, and never a version that was already rolled back on this computer.
 2. It installs that version next to the running one (`runtime.next`), with the same Codex version the agent already uses, and checks that it starts. Nothing about the running agent changes yet.
-3. It waits for a quiet moment: no chat working or queued, no background terminal running, and nothing at all for 10 minutes. It never interrupts a reply or a job in progress; the agent itself confirms it is idle before it stops.
+3. It waits for a quiet moment: no chat working or queued, no background terminal running, and nothing at all for 10 minutes. It never interrupts a reply or a job in progress; the agent itself confirms it is idle before it stops. However long that takes, the update is never forced: `update-state.json` records why it waits and since when (`waitingReason`, `waitingSince`), and after 24 hours `logs/service.log` says so once.
 4. The agent stops, the folders are switched (the old one is kept as `runtime.prev`) and the service starts again on the new version.
 5. If the new version does not connect to HOAI within 3 minutes, the supervisor switches back to the previous version and does not try that version again. The app then shows updates as paused for that agent.
 

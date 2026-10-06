@@ -25,6 +25,13 @@
  * confirms health (its child connected within 3 minutes) or swaps
  * runtime.prev back, records the version as rolled back and restarts.
  *
+ * An update that keeps waiting is never forced (decision D6: the owner may
+ * decide otherwise, the supervisor never does). update-state.json records
+ * why it waits and since when (`waitingReason`, `waitingSince`), and after
+ * 24 h service.log says so once. The heartbeat cannot carry it yet: the
+ * backend rebuilds updateReadiness key by key (sanitizeUpdateReadiness) and
+ * its env has no such key, so a field sent today would be stripped.
+ *
  * Findings 7 and 8 need nothing here: a Codex chat keeps its conversation
  * through a restart (threads.json maps each chat to its persisted Codex
  * thread) and compaction is a native app-server request, not keystrokes into
@@ -65,6 +72,8 @@ export const UPDATE_EXIT_CODE = 75;
 export const UPDATE_TICK_MS = 15 * 1000;
 /** A child that agreed to stop gets this long to finish its own shutdown. */
 export const CHILD_STOP_GRACE_MS = 30 * 1000;
+/** Decision D6: an update waiting this long is said so (never forced). */
+export const UPDATE_WAIT_NOTICE_MS = 24 * 60 * 60 * 1000;
 export const UPDATE_STATE_FILE = "update-state.json";
 /** Set by the installed service definition, naming its own label. */
 export const SERVICE_MARKER_ENV = "CODEX_BGOS_SERVICE";
@@ -99,6 +108,8 @@ export interface UpdateState {
   rolledBack: string[];
   pendingConfirm: PendingConfirm | null;
   waitingReason: string | null;
+  /** When the staged update began waiting for a safe moment (decision D6). */
+  waitingSince: string | null;
   lastError: { at: string; message: string } | null;
 }
 
@@ -484,6 +495,7 @@ export function emptyUpdateState(): UpdateState {
     rolledBack: [],
     pendingConfirm: null,
     waitingReason: null,
+    waitingSince: null,
     lastError: null,
   };
 }
@@ -543,6 +555,7 @@ export function readUpdateState(
           }
         : null,
     waitingReason: str(raw.waitingReason),
+    waitingSince: str(raw.waitingSince),
     lastError:
       lastError &&
       typeof lastError === "object" &&
@@ -805,6 +818,8 @@ export interface SelfUpdaterDeps {
 export class SelfUpdater {
   private state: UpdateState;
   private running = false;
+  /** The 24 h wait was logged by this supervisor. */
+  private waitNoticed = false;
 
   constructor(private readonly deps: SelfUpdaterDeps) {
     this.state = readUpdateState(deps.home, deps.read) ?? emptyUpdateState();
@@ -872,18 +887,42 @@ export class SelfUpdater {
       }),
     });
     if (decision.action === "apply") return this.apply(decision.version, now);
-    if (decision.action === "wait") {
-      if (this.state.waitingReason !== decision.reason) {
-        this.state.waitingReason = decision.reason;
-        this.save();
-      }
-      return `waiting:${decision.reason}`;
-    }
-    if (decision.reason === "stale_stage") {
-      this.state.stagedVersion = null;
+    if (decision.action === "wait") return this.waiting(decision.reason, now);
+    // Nothing is left to apply, so nothing waits any more.
+    const s = this.state;
+    if (decision.reason === "stale_stage" || s.waitingReason || s.waitingSince) {
+      if (decision.reason === "stale_stage") s.stagedVersion = null;
+      s.waitingReason = null;
+      s.waitingSince = null;
+      this.waitNoticed = false;
       this.save();
     }
     return outcome;
+  }
+
+  /**
+   * Record why the staged update waits and since when (decision D6); the
+   * wait keeps its start while its reason moves. Never forced: after 24 h
+   * the log says so, once per supervisor.
+   */
+  private waiting(reason: string, now: number): string {
+    const s = this.state;
+    const since = Number.isFinite(Date.parse(s.waitingSince ?? ""))
+      ? s.waitingSince!
+      : new Date(now).toISOString();
+    if (s.waitingReason !== reason || s.waitingSince !== since) {
+      s.waitingReason = reason;
+      s.waitingSince = since;
+      this.save();
+    }
+    const waited = now - Date.parse(since);
+    if (!this.waitNoticed && waited >= UPDATE_WAIT_NOTICE_MS) {
+      this.waitNoticed = true;
+      this.deps.log(
+        `update ${s.stagedVersion} has waited ${Math.floor(waited / 3_600_000)} h for an idle moment (${reason}); it is never forced`,
+      );
+    }
+    return `waiting:${reason}`;
   }
 
   private async checkAndStage(now: number): Promise<string> {
@@ -937,10 +976,12 @@ export class SelfUpdater {
     if (reply !== "stopping") {
       // The child's own check is the last word: it saw a turn or a
       // background terminal the heartbeat had not, or did not answer.
-      s.waitingReason = reply === "busy" ? "busy" : "child_unresponsive";
-      this.save();
+      const outcome = this.waiting(
+        reply === "busy" ? "busy" : "child_unresponsive",
+        now,
+      );
       this.deps.resumeChild();
-      return `waiting:${s.waitingReason}`;
+      return outcome;
     }
     // It checked itself idle and is shutting down; only a shutdown that hangs
     // is ended for it.
@@ -967,6 +1008,7 @@ export class SelfUpdater {
     };
     s.stagedVersion = null;
     s.waitingReason = null;
+    s.waitingSince = null;
     this.save();
     this.deps.log(`switched to ${version}; restarting the supervisor on it`);
     await this.deps.restartSupervisor();

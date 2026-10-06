@@ -22,6 +22,7 @@ import {
   FIRST_CHECK_DELAY_MS,
   QUIET_WINDOW_MS,
   SelfUpdater,
+  UPDATE_WAIT_NOTICE_MS,
   fetchLatestVersion,
   nodeRuntimeFs,
   npmCliPath,
@@ -390,6 +391,67 @@ describe("SelfUpdater flows", () => {
     expect(await updater.tick()).toBe("waiting:busy");
     expect(h.events).toEqual(["stage:0.19.2", "stage:0.19.3"]);
     expect(readUpdateState(home)!.stagedVersion).toBe("0.19.3");
+  });
+
+  it("D6: a waiting update records since when, and after 24 h says so once; it is never forced", async () => {
+    const home = tempHome();
+    const log = vi.fn();
+    const h = harness(home, { log });
+    const start = h.now;
+    const at = (ms: number, change: Partial<ChildHeartbeat>) => {
+      h.setNow(start + ms);
+      h.setHeartbeat(idleHeartbeat(h.now, change));
+    };
+    const updater = new SelfUpdater(h.deps);
+    updater.boot();
+    at(0, { busy: true });
+    expect(await updater.tick()).toBe("waiting:busy");
+    expect(readUpdateState(home)).toMatchObject({ waitingReason: "busy", waitingSince: iso(start) });
+    // The reason moves; the wait it belongs to started when it started.
+    at(60 * 60 * 1000, { lastActivityAt: iso(start + 60 * 60 * 1000 - 1_000) });
+    expect(await updater.tick()).toBe("waiting:recent_activity");
+    expect(readUpdateState(home)).toMatchObject({ waitingReason: "recent_activity", waitingSince: iso(start) });
+    at(UPDATE_WAIT_NOTICE_MS - 1, { busy: true });
+    await updater.tick();
+    const waited = () => log.mock.calls.map(([m]) => String(m)).filter((m) => m.includes("has waited"));
+    expect(waited()).toEqual([]);
+    at(UPDATE_WAIT_NOTICE_MS, { busy: true });
+    expect(await updater.tick()).toBe("waiting:busy");
+    at(UPDATE_WAIT_NOTICE_MS + 60 * 60 * 1000, { busy: true });
+    await updater.tick();
+    expect(waited()).toEqual(["update 0.19.2 has waited 24 h for an idle moment (busy); it is never forced"]);
+    expect(h.deps.requestChildStop).not.toHaveBeenCalled();
+    // The child is idle at last: the update applies and the wait is over.
+    at(UPDATE_WAIT_NOTICE_MS + 2 * 60 * 60 * 1000, {});
+    expect(await updater.tick()).toBe("applied");
+    expect(readUpdateState(home)).toMatchObject({ waitingReason: null, waitingSince: null });
+  });
+
+  it("D6: a child that refuses at the last moment is a wait too", async () => {
+    const home = tempHome();
+    const h = harness(home);
+    h.setReply("busy");
+    const updater = new SelfUpdater(h.deps);
+    updater.boot();
+    expect(await updater.tick()).toBe("waiting:busy");
+    expect(readUpdateState(home)).toMatchObject({ waitingReason: "busy", waitingSince: iso(h.now) });
+  });
+
+  it("nothing left to apply: no wait is recorded any more", async () => {
+    const home = tempHome();
+    writeUpdateState(home, {
+      ...emptyUpdateState(),
+      stagedVersion: "0.19.0",
+      nextCheckAt: iso(T0 + 365 * 24 * 60 * 60 * 1000),
+      waitingReason: "busy",
+      waitingSince: iso(T0 - 60_000),
+    });
+    const h = harness(home);
+    h.setStaged(true);
+    const updater = new SelfUpdater(h.deps);
+    updater.boot();
+    expect(await updater.tick()).toBe("idle");
+    expect(readUpdateState(home)).toMatchObject({ stagedVersion: null, waitingReason: null, waitingSince: null });
   });
 
   it("waits out the 10 minute quiet window", async () => {
