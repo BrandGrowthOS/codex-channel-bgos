@@ -24,6 +24,7 @@ import {
   emptyUpdateState,
   isCheckDue,
   nextCheckAt,
+  npmCliCandidates,
   npmCliPath,
   resolveSupervised,
   stageInstallArgs,
@@ -299,6 +300,43 @@ describe("npm next to node", () => {
   });
   it("is null when npm is not there (never a PATH guess)", () => {
     expect(npmCliPath("/opt/node/bin/node", "darwin", () => false)).toBeNull();
+  });
+
+  // Homebrew's node runs from its keg (process.execPath is the resolved
+  // /opt/homebrew/Cellar/node/<v>/bin/node), whose lib holds no npm: the
+  // keg's bin/npm links to <brew prefix>/lib/node_modules/npm, and the
+  // formula keeps its own copy in <keg>/libexec. Measured on this Mac
+  // (node 25.6.1_1), 2026-10-07.
+  const cli = ["npm", "bin", "npm-cli.js"];
+  const KEG = "/opt/homebrew/Cellar/node/25.6.1_1";
+  const BREW_NODE = `${KEG}/bin/node`;
+  const KEG_LIB = posixJoin(KEG, "lib", "node_modules", ...cli);
+  const BREW_PREFIX = posixJoin("/opt/homebrew", "lib", "node_modules", ...cli);
+  const LIBEXEC = posixJoin(KEG, "libexec", "lib", "node_modules", ...cli);
+  const table: Array<[string, string, string, string[], string | null]> = [
+    ["a plain prefix (official installer, nvm, the HOAI private node)", "/opt/node/bin/node", "darwin", [posixJoin("/opt/node", "lib", "node_modules", ...cli)], posixJoin("/opt/node", "lib", "node_modules", ...cli)],
+    ["Homebrew: the brew prefix's npm, the one the keg's bin/npm runs", BREW_NODE, "darwin", [BREW_PREFIX, LIBEXEC], BREW_PREFIX],
+    ["Homebrew without the prefix copy (post install never ran): the keg's own libexec copy", BREW_NODE, "darwin", [LIBEXEC], LIBEXEC],
+    ["Homebrew: an npm inside the keg itself still comes first", BREW_NODE, "darwin", [KEG_LIB, BREW_PREFIX, LIBEXEC], KEG_LIB],
+    ["Intel Homebrew under /usr/local", "/usr/local/Cellar/node/22.9.0/bin/node", "darwin", [posixJoin("/usr/local", "lib", "node_modules", ...cli)], posixJoin("/usr/local", "lib", "node_modules", ...cli)],
+    ["Linuxbrew", "/home/linuxbrew/.linuxbrew/Cellar/node/22.9.0/bin/node", "linux", [posixJoin("/home/linuxbrew/.linuxbrew", "lib", "node_modules", ...cli)], posixJoin("/home/linuxbrew/.linuxbrew", "lib", "node_modules", ...cli)],
+    ["a node outside a Cellar never looks for a brew prefix", "/opt/x/node/25.6.1/bin/node", "darwin", [posixJoin("/opt", "lib", "node_modules", ...cli)], null],
+    ["Windows: <dir>\\node_modules\\npm only", "C:\\HOAI\\node\\node.exe", "win32", [winJoin("C:\\HOAI\\node", "node_modules", ...cli)], winJoin("C:\\HOAI\\node", "node_modules", ...cli)],
+    ["Homebrew with no npm anywhere", BREW_NODE, "darwin", [], null],
+  ];
+  for (const [name, execPath, platform, present, expected] of table)
+    it(name, () => {
+      expect(npmCliPath(execPath, platform, (p) => present.includes(p))).toBe(expected);
+    });
+
+  it("looks in a defined order, and only there", () => {
+    expect(npmCliCandidates(BREW_NODE, "darwin")).toEqual([KEG_LIB, BREW_PREFIX, LIBEXEC]);
+    expect(npmCliCandidates("/opt/node/bin/node", "linux")).toEqual([
+      posixJoin("/opt/node", "lib", "node_modules", ...cli),
+    ]);
+    expect(npmCliCandidates("C:\\HOAI\\node\\node.exe", "win32")).toEqual([
+      winJoin("C:\\HOAI\\node", "node_modules", ...cli),
+    ]);
   });
   it("stages the new connector next to the codex version already installed", () => {
     expect(

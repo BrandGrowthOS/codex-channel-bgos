@@ -406,30 +406,45 @@ export function updateReportFromState(
   };
 }
 
+const NPM_CLI = ["node_modules", "npm", "bin", "npm-cli.js"];
+
 /**
- * npm-cli.js beside the node that runs this supervisor, never a PATH guess:
- * a service starts with a minimal PATH, and the HOAI desktop setup may have
- * installed a private node. Layouts: posix `<prefix>/bin/node` with
- * `<prefix>/lib/node_modules/npm`, win32 `<dir>\node.exe` with
- * `<dir>\node_modules\npm`.
+ * Where npm-cli.js sits beside the node that runs this supervisor, in the
+ * order they are tried. Never a PATH guess: a service starts with a minimal
+ * PATH, and the HOAI desktop setup may have installed a private node.
+ *
+ * - win32 `<dir>\node.exe`: `<dir>\node_modules\npm`.
+ * - posix `<prefix>/bin/node`: `<prefix>/lib/node_modules/npm` (the official
+ *   installer, nvm, the HOAI private node, a distro package).
+ * - Homebrew. Its node runs from the keg (process.execPath is the resolved
+ *   `<brew>/Cellar/node/<v>/bin/node`), and the keg's lib holds no npm. The
+ *   keg's own `bin/npm` links to `<brew>/lib/node_modules/npm`, so that is
+ *   the npm this node runs and comes first; the formula's private copy in
+ *   `<keg>/libexec/lib/node_modules/npm` (what post install copies there)
+ *   is the fallback. `<brew>` is the folder holding `Cellar`, so Apple
+ *   silicon, Intel (/usr/local) and Linuxbrew all resolve.
  */
+export function npmCliCandidates(execPath: string, platform: string): string[] {
+  if (platform === "win32")
+    return [win32.join(win32.dirname(execPath), ...NPM_CLI)];
+  const prefix = posix.dirname(posix.dirname(execPath));
+  const candidates = [posix.join(prefix, "lib", ...NPM_CLI)];
+  const formula = posix.dirname(prefix);
+  if (posix.basename(posix.dirname(formula)) === "Cellar")
+    candidates.push(
+      posix.join(posix.dirname(posix.dirname(formula)), "lib", ...NPM_CLI),
+      posix.join(prefix, "libexec", "lib", ...NPM_CLI),
+    );
+  return candidates;
+}
+
+/** The first of npmCliCandidates that exists, or null. */
 export function npmCliPath(
   execPath: string,
   platform: string,
   exists: (path: string) => boolean,
 ): string | null {
-  const candidate =
-    platform === "win32"
-      ? win32.join(win32.dirname(execPath), "node_modules", "npm", "bin", "npm-cli.js")
-      : posix.join(
-          posix.dirname(posix.dirname(execPath)),
-          "lib",
-          "node_modules",
-          "npm",
-          "bin",
-          "npm-cli.js",
-        );
-  return exists(candidate) ? candidate : null;
+  return npmCliCandidates(execPath, platform).find((path) => exists(path)) ?? null;
 }
 
 /** The same flags the HOAI desktop installer uses, with Codex pinned. */
