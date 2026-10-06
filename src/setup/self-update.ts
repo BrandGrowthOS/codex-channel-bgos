@@ -106,6 +106,11 @@ export interface UpdateState {
   checkedAt: string | null;
   nextCheckAt: string | null;
   stagedVersion: string | null;
+  /**
+   * The Codex version of the live runtime the stage was built beside (its
+   * pin). A repair that changed it makes the stage stale (review F7).
+   */
+  stagedCodexVersion: string | null;
   rolledBack: string[];
   pendingConfirm: PendingConfirm | null;
   waitingReason: string | null;
@@ -514,6 +519,7 @@ export function emptyUpdateState(): UpdateState {
     checkedAt: null,
     nextCheckAt: null,
     stagedVersion: null,
+    stagedCodexVersion: null,
     rolledBack: [],
     pendingConfirm: null,
     waitingReason: null,
@@ -558,6 +564,7 @@ export function readUpdateState(
     checkedAt: str(raw.checkedAt),
     nextCheckAt: str(raw.nextCheckAt),
     stagedVersion: str(raw.stagedVersion),
+    stagedCodexVersion: str(raw.stagedCodexVersion),
     rolledBack: Array.isArray(raw.rolledBack)
       ? raw.rolledBack.filter((v): v is string => typeof v === "string")
       : [],
@@ -825,6 +832,8 @@ export interface SelfUpdaterDeps {
   removePrevious: () => void;
   /** Remove runtime.next (a stage that will never be applied). */
   removeStaged: () => void;
+  /** The Codex version installed in the live runtime, or null. */
+  runtimeCodexVersion: () => string | null;
   readHeartbeat: () => ChildHeartbeat | null;
   childPid: () => number | null;
   /** Ask the child to stop if, and only if, it is idle (child-control.ts). */
@@ -875,8 +884,29 @@ export class SelfUpdater {
         s.pendingConfirm = null;
       else s.pendingConfirm.boots += 1;
     }
-    if (s.stagedVersion && !this.deps.hasStaged()) s.stagedVersion = null;
+    if (s.stagedVersion && !this.deps.hasStaged()) this.dropStage();
+    // A repair from the app reinstalls the runtime (Codex @latest) while
+    // runtime.next keeps the Codex pinned at stage time. Applying it would
+    // silently undo the repair, so a stage built beside another Codex is
+    // dropped and the next check stages again beside this one (review F7).
+    else if (
+      s.stagedVersion &&
+      s.stagedCodexVersion !== this.deps.runtimeCodexVersion()
+    ) {
+      this.deps.log(
+        `update ${s.stagedVersion} dropped: it was staged beside Codex ${s.stagedCodexVersion ?? "unknown"}, and the runtime now has ${this.deps.runtimeCodexVersion() ?? "an unknown one"}`,
+      );
+      this.dropStage();
+      try {
+        this.deps.removeStaged();
+      } catch {}
+    }
     this.save();
+  }
+
+  private dropStage(): void {
+    this.state.stagedVersion = null;
+    this.state.stagedCodexVersion = null;
   }
 
   /** One pass; never two at once (a stage runs npm for a while). */
@@ -917,7 +947,7 @@ export class SelfUpdater {
     const s = this.state;
     if (decision.reason === "stale_stage" || s.waitingReason || s.waitingSince) {
       if (decision.reason === "stale_stage") {
-        s.stagedVersion = null;
+        this.dropStage();
         try {
           this.deps.removeStaged();
         } catch {}
@@ -985,11 +1015,14 @@ export class SelfUpdater {
     }
     this.save();
     try {
+      // The pin stageRuntime installs beside, read the same way.
+      const codex = this.deps.runtimeCodexVersion();
       await this.deps.stage(decision.version);
       s.stagedVersion = decision.version;
+      s.stagedCodexVersion = codex;
       this.deps.log(`update ${decision.version} staged; it applies when the agent is idle`);
     } catch (error) {
-      s.stagedVersion = null;
+      this.dropStage();
       s.lastError = {
         at: new Date(this.deps.now()).toISOString(),
         message: errorMessage(error),
@@ -1020,7 +1053,7 @@ export class SelfUpdater {
     try {
       this.deps.swap();
     } catch (error) {
-      s.stagedVersion = null;
+      this.dropStage();
       s.lastError = {
         at: new Date(this.deps.now()).toISOString(),
         message: `Could not switch to ${version}: ${errorMessage(error)}`,
@@ -1036,7 +1069,7 @@ export class SelfUpdater {
       appliedAt: new Date(now).toISOString(),
       boots: 0,
     };
-    s.stagedVersion = null;
+    this.dropStage();
     s.waitingReason = null;
     s.waitingSince = null;
     this.save();

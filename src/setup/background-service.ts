@@ -27,6 +27,7 @@ import { requestStopIfIdle } from "../child-control.js";
 import { getPackageVersion } from "../version.js";
 import {
   AUTO_UPDATE_ENV,
+  CODEX_PACKAGE,
   SERVICE_MARKER_ENV,
   SUPERVISOR_PID_ENV,
   UPDATE_EXIT_CODE,
@@ -34,6 +35,7 @@ import {
   SelfUpdater,
   autoUpdateEnabledFromEnv,
   fetchLatestVersion,
+  installedPackageVersion,
   isManagedRuntime,
   nodeExec,
   nodeRuntimeFs,
@@ -684,6 +686,8 @@ export async function supervise(home: string): Promise<void> {
     rollback: () => rollbackRuntime(home),
     removePrevious: () => nodeRuntimeFs.remove(runtimePaths(home).prev),
     removeStaged: () => nodeRuntimeFs.remove(runtimePaths(home).next),
+    runtimeCodexVersion: () =>
+      installedPackageVersion(runtimePaths(home).runtime, CODEX_PACKAGE),
     readHeartbeat: () => {
       try {
         return JSON.parse(

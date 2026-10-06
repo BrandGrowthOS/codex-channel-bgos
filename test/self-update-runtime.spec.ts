@@ -298,6 +298,7 @@ function harness(home: string, change: Partial<SelfUpdaterDeps> = {}) {
     rollback: vi.fn(() => void events.push("rollback")),
     removePrevious: vi.fn(() => void events.push("removePrevious")),
     removeStaged: vi.fn(() => void events.push("removeStaged")),
+    runtimeCodexVersion: () => "0.154.0",
     readHeartbeat: () => heartbeat,
     childPid: () => 4242,
     requestChildStop: vi.fn(async () => {
@@ -467,6 +468,7 @@ describe("SelfUpdater flows", () => {
     writeUpdateState(home, {
       ...emptyUpdateState(),
       stagedVersion: "0.19.0",
+      stagedCodexVersion: "0.154.0",
       nextCheckAt: iso(T0 + 365 * 24 * 60 * 60 * 1000),
       waitingReason: "busy",
       waitingSince: iso(T0 - 60_000),
@@ -696,6 +698,37 @@ describe("SelfUpdater flows", () => {
     expect(await updater.tick()).toBe("rollback_waiting");
     expect(h.deps.rollback).not.toHaveBeenCalled();
     expect(readUpdateState(home)!.pendingConfirm).not.toBeNull();
+  });
+
+  it("review F7: a stage built before a repair changed the live Codex is dropped at boot, never applied", async () => {
+    const home = tempHome();
+    // 0.19.0 staged 0.19.2 beside Codex 0.154.0 and waited (busy).
+    const first = harness(home);
+    first.setHeartbeat(idleHeartbeat(first.now, { busy: true }));
+    const old = new SelfUpdater(first.deps);
+    old.boot();
+    expect(await old.tick()).toBe("waiting:busy");
+    expect(readUpdateState(home)).toMatchObject({ stagedVersion: "0.19.2", stagedCodexVersion: "0.154.0" });
+    // The owner's Repair reinstalled 0.19.0 with Codex 0.160.0 and started a
+    // new supervisor. runtime.next (Codex 0.154.0) is still on disk.
+    const second = harness(home, { runtimeCodexVersion: () => "0.160.0" });
+    second.setStaged(true);
+    const fresh = new SelfUpdater(second.deps);
+    fresh.boot();
+    expect(readUpdateState(home)).toMatchObject({ stagedVersion: null, stagedCodexVersion: null });
+    expect(second.events).toEqual(["removeStaged"]);
+    expect(await fresh.tick()).toBe("idle");
+    expect(second.deps.swap).not.toHaveBeenCalled();
+  });
+
+  it("a supervisor restart with the same live Codex keeps its stage", () => {
+    const home = tempHome();
+    writeUpdateState(home, { ...emptyUpdateState(), stagedVersion: "0.19.2", stagedCodexVersion: "0.154.0" });
+    const h = harness(home);
+    h.setStaged(true);
+    new SelfUpdater(h.deps).boot();
+    expect(readUpdateState(home)).toMatchObject({ stagedVersion: "0.19.2", stagedCodexVersion: "0.154.0" });
+    expect(h.events).toEqual([]);
   });
 
   it("a repair from the app that installed another version clears the pending confirmation", () => {
