@@ -369,6 +369,29 @@ describe("SelfUpdater flows", () => {
     expect(readUpdateState(home)).toMatchObject({ stagedVersion: "0.19.2", waitingReason: "busy" });
   });
 
+  it("the next daily check never installs a version already staged again (npm runs for up to 10 minutes)", async () => {
+    const home = tempHome();
+    const h = harness(home);
+    h.setHeartbeat(idleHeartbeat(h.now, { busy: true }));
+    const updater = new SelfUpdater(h.deps);
+    updater.boot();
+    expect(await updater.tick()).toBe("waiting:busy");
+    // A day later the agent is still busy and the registry still says 0.19.2.
+    h.setNow(Date.parse(readUpdateState(home)!.nextCheckAt!) + 1);
+    h.setHeartbeat(idleHeartbeat(h.now, { busy: true }));
+    expect(await updater.tick()).toBe("waiting:busy");
+    expect(h.deps.fetchLatest).toHaveBeenCalledTimes(2);
+    expect(h.deps.stage).toHaveBeenCalledTimes(1);
+    expect(readUpdateState(home)!.stagedVersion).toBe("0.19.2");
+    // A newer version than the staged one is staged in its place.
+    h.deps.fetchLatest = vi.fn(async () => "0.19.3");
+    h.setNow(Date.parse(readUpdateState(home)!.nextCheckAt!) + 1);
+    h.setHeartbeat(idleHeartbeat(h.now, { busy: true }));
+    expect(await updater.tick()).toBe("waiting:busy");
+    expect(h.events).toEqual(["stage:0.19.2", "stage:0.19.3"]);
+    expect(readUpdateState(home)!.stagedVersion).toBe("0.19.3");
+  });
+
   it("waits out the 10 minute quiet window", async () => {
     const home = tempHome();
     const h = harness(home);
