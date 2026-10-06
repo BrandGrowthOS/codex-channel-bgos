@@ -149,6 +149,7 @@ describe("decideApply: apply at a safe moment, otherwise wait", () => {
     supervised: "launchd" as const,
     managedRuntime: true,
     stagedVersion: "0.19.2" as string | null,
+    latest: "0.19.2" as string | null,
     current: "0.19.0",
     rolledBack: [] as string[],
     safety: { safe: true } as ReturnType<typeof decideSafeMoment>,
@@ -163,6 +164,11 @@ describe("decideApply: apply at a safe moment, otherwise wait", () => {
     ["not a managed runtime (npx, global, dev checkout)", { managedRuntime: false }, { action: "none", reason: "unmanaged_runtime" }],
     ["the staged version was rolled back since", { rolledBack: ["0.19.2"] }, { action: "none", reason: "stale_stage" }],
     ["the staged version is no longer newer", { current: "0.19.2" }, { action: "none", reason: "stale_stage" }],
+    // Review F4 (D7: latest is the curated pin): a release pulled by moving
+    // latest back is never applied from an older stage.
+    ["latest moved back from the staged version (a pulled release)", { latest: "0.19.0" }, { action: "none", reason: "stale_stage" }],
+    ["latest moved to another major", { latest: "1.0.0" }, { action: "none", reason: "stale_stage" }],
+    ["latest is no longer a plain version", { latest: null }, { action: "none", reason: "stale_stage" }],
   ];
   for (const [name, change, expected] of table)
     it(name, () => {

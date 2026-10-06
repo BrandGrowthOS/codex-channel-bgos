@@ -683,6 +683,7 @@ export async function supervise(home: string): Promise<void> {
     swap: () => swapRuntime(home),
     rollback: () => rollbackRuntime(home),
     removePrevious: () => nodeRuntimeFs.remove(runtimePaths(home).prev),
+    removeStaged: () => nodeRuntimeFs.remove(runtimePaths(home).next),
     readHeartbeat: () => {
       try {
         return JSON.parse(

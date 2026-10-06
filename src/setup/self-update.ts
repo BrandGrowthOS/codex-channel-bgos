@@ -280,6 +280,8 @@ export function decideApply(input: {
   supervised: SupervisedMode;
   managedRuntime: boolean;
   stagedVersion: string | null;
+  /** The npm `latest` the last check read (state.latestKnownVersion). */
+  latest: string | null;
   current: string;
   rolledBack: readonly string[];
   safety: SafeMoment;
@@ -292,6 +294,11 @@ export function decideApply(input: {
   if (!input.managedRuntime)
     return { action: "none", reason: "unmanaged_runtime" };
   if (!input.stagedVersion) return { action: "none", reason: "nothing_staged" };
+  // Latest is the curated published pin (D7): a stage that latest no longer
+  // names, because the release was pulled by moving latest back, is never
+  // applied (review F4). A newer latest restages in checkAndStage instead.
+  if (input.stagedVersion !== input.latest)
+    return { action: "none", reason: "stale_stage" };
   if (
     decideUpdate({
       enabled: true,
@@ -816,6 +823,8 @@ export interface SelfUpdaterDeps {
   swap: () => void;
   rollback: () => void;
   removePrevious: () => void;
+  /** Remove runtime.next (a stage that will never be applied). */
+  removeStaged: () => void;
   readHeartbeat: () => ChildHeartbeat | null;
   childPid: () => number | null;
   /** Ask the child to stop if, and only if, it is idle (child-control.ts). */
@@ -893,6 +902,7 @@ export class SelfUpdater {
       supervised: this.deps.supervised,
       managedRuntime: this.deps.managedRuntime,
       stagedVersion: this.state.stagedVersion,
+      latest: this.state.latestKnownVersion,
       current: this.deps.currentVersion,
       rolledBack: this.state.rolledBack,
       safety: decideSafeMoment({
@@ -906,7 +916,12 @@ export class SelfUpdater {
     // Nothing is left to apply, so nothing waits any more.
     const s = this.state;
     if (decision.reason === "stale_stage" || s.waitingReason || s.waitingSince) {
-      if (decision.reason === "stale_stage") s.stagedVersion = null;
+      if (decision.reason === "stale_stage") {
+        s.stagedVersion = null;
+        try {
+          this.deps.removeStaged();
+        } catch {}
+      }
       s.waitingReason = null;
       s.waitingSince = null;
       this.waitNoticed = false;

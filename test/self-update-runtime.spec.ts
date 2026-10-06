@@ -297,6 +297,7 @@ function harness(home: string, change: Partial<SelfUpdaterDeps> = {}) {
     swap: vi.fn(() => void events.push("swap")),
     rollback: vi.fn(() => void events.push("rollback")),
     removePrevious: vi.fn(() => void events.push("removePrevious")),
+    removeStaged: vi.fn(() => void events.push("removeStaged")),
     readHeartbeat: () => heartbeat,
     childPid: () => 4242,
     requestChildStop: vi.fn(async () => {
@@ -391,6 +392,30 @@ describe("SelfUpdater flows", () => {
     expect(await updater.tick()).toBe("waiting:busy");
     expect(h.events).toEqual(["stage:0.19.2", "stage:0.19.3"]);
     expect(readUpdateState(home)!.stagedVersion).toBe("0.19.3");
+  });
+
+  it("review F4: a staged version that latest no longer names (a pulled release) is dropped, never applied", async () => {
+    const home = tempHome();
+    const h = harness(home, { fetchLatest: vi.fn(async () => "0.20.0") });
+    h.setHeartbeat(idleHeartbeat(h.now, { busy: true }));
+    const updater = new SelfUpdater(h.deps);
+    updater.boot();
+    expect(await updater.tick()).toBe("waiting:busy");
+    expect(readUpdateState(home)!.stagedVersion).toBe("0.20.0");
+    // The maintainers pull 0.20.0 by moving latest back to 0.19.0.
+    h.deps.fetchLatest = vi.fn(async () => "0.19.0");
+    h.setNow(Date.parse(readUpdateState(home)!.nextCheckAt!) + 1);
+    h.setHeartbeat(idleHeartbeat(h.now));
+    expect(await updater.tick()).toBe("checked");
+    expect(h.deps.requestChildStop).not.toHaveBeenCalled();
+    expect(h.deps.swap).not.toHaveBeenCalled();
+    // Its folder goes too (a whole runtime, some 300 MB).
+    expect(h.events).toEqual(["stage:0.20.0", "removeStaged"]);
+    expect(readUpdateState(home)).toMatchObject({
+      latestKnownVersion: "0.19.0",
+      stagedVersion: null,
+      pendingConfirm: null,
+    });
   });
 
   it("D6: a waiting update records since when, and after 24 h says so once; it is never forced", async () => {
