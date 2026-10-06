@@ -693,38 +693,139 @@ export const nodeRuntimeFs: RuntimeFs = {
   remove: (path) => rmSync(path, { recursive: true, force: true }),
 };
 
+/** How long a rename held on Windows is retried (graceful-fs's 60 s). */
+export const RENAME_RETRY_MS = 60 * 1000;
+const RENAME_RETRY_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
+
+export interface RenameRetry {
+  platform: string;
+  budgetMs: number;
+  now: () => number;
+  sleep: (ms: number) => Promise<void>;
+}
+
+export const nodeRenameRetry: RenameRetry = {
+  platform: process.platform,
+  budgetMs: RENAME_RETRY_MS,
+  now: Date.now,
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+};
+
+/**
+ * A folder rename, retried on Windows while it meets EPERM, EACCES or EBUSY
+ * (review F5). The swap runs seconds after npm wrote some 1,700 files, and
+ * Defender or the indexer holds new files for a moment, as does a codex.exe
+ * that is still exiting; graceful-fs retries renames for exactly this, but
+ * only its own async rename, never renameSync. Asynchronous on purpose: a
+ * blocking wait would stall the supervisor's lock lease (stale after 30 s)
+ * and its control server. Anything else, and anything off Windows, fails at
+ * once.
+ */
+export async function renameWithRetry(
+  rename: (from: string, to: string) => void,
+  from: string,
+  to: string,
+  retry: RenameRetry = nodeRenameRetry,
+): Promise<void> {
+  const started = retry.now();
+  let delay = 100;
+  for (;;) {
+    try {
+      rename(from, to);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | null)?.code ?? "";
+      if (
+        retry.platform !== "win32" ||
+        !RENAME_RETRY_CODES.has(code) ||
+        retry.now() - started >= retry.budgetMs
+      )
+        throw error;
+      await retry.sleep(delay);
+      delay = Math.min(delay * 2, 1000);
+    }
+  }
+}
+
 /** runtime -> runtime.prev, runtime.next -> runtime; undone if the second rename fails. */
-export function swapRuntime(home: string, fs: RuntimeFs = nodeRuntimeFs): void {
+export async function swapRuntime(
+  home: string,
+  fs: RuntimeFs = nodeRuntimeFs,
+  retry: RenameRetry = nodeRenameRetry,
+): Promise<void> {
   const { runtime, next, prev } = runtimePaths(home);
   if (!fs.exists(next)) throw new Error("Nothing is staged.");
+  const rename = (from: string, to: string) =>
+    renameWithRetry(fs.rename, from, to, retry);
   fs.remove(prev);
-  fs.rename(runtime, prev);
+  await rename(runtime, prev);
   try {
-    fs.rename(next, runtime);
+    await rename(next, runtime);
   } catch (error) {
-    fs.rename(prev, runtime);
+    // The first error says why. An undo that fails too leaves no runtime
+    // folder, which restoreRuntime puts back before anything runs from it.
+    await rename(prev, runtime).catch(() => {});
     throw error;
   }
 }
 
 /** runtime -> runtime.failed (then removed), runtime.prev -> runtime. */
-export function rollbackRuntime(
+export async function rollbackRuntime(
   home: string,
   fs: RuntimeFs = nodeRuntimeFs,
-): void {
+  retry: RenameRetry = nodeRenameRetry,
+): Promise<void> {
   const { runtime, prev, failed } = runtimePaths(home);
   if (!fs.exists(prev)) throw new Error("There is no previous version to return to.");
-  fs.remove(failed);
-  fs.rename(runtime, failed);
+  const rename = (from: string, to: string) =>
+    renameWithRetry(fs.rename, from, to, retry);
+  // No runtime folder: an earlier try moved it to runtime.failed and could
+  // not undo that, so runtime.prev is all that is left to move.
+  if (fs.exists(runtime)) {
+    fs.remove(failed);
+    await rename(runtime, failed);
+  }
   try {
-    fs.rename(prev, runtime);
+    await rename(prev, runtime);
   } catch (error) {
-    fs.rename(failed, runtime);
+    if (fs.exists(failed)) await rename(failed, runtime).catch(() => {});
     throw error;
   }
   try {
     fs.remove(failed);
   } catch {}
+}
+
+/**
+ * Put `<home>/runtime` back when a swap or a rollback could not even undo
+ * itself (review F5), before anything is launched from it: the service
+ * definition and the child both run `<home>/runtime/.../cli.js`, so without
+ * it the child exits every 5 s and, after a reboot, the service cannot start
+ * at all. The folder holding `version` (the one this supervisor runs) comes
+ * first, then the other of runtime.prev and runtime.failed. True when the
+ * runtime folder is in place.
+ */
+export async function restoreRuntime(
+  home: string,
+  version: string,
+  fs: RuntimeFs = nodeRuntimeFs,
+  read?: (path: string) => string,
+  retry: RenameRetry = nodeRenameRetry,
+): Promise<boolean> {
+  const { runtime, prev, failed } = runtimePaths(home);
+  if (fs.exists(runtime)) return true;
+  const holds = (dir: string) =>
+    installedPackageVersion(dir, PACKAGE_NAME, read) === version ? 0 : 1;
+  const candidates = [prev, failed]
+    .filter((dir) => fs.exists(dir))
+    .sort((a, b) => holds(a) - holds(b));
+  for (const from of candidates) {
+    try {
+      await renameWithRetry(fs.rename, from, runtime, retry);
+      return true;
+    } catch {}
+  }
+  return false;
 }
 
 export type Exec = (
@@ -850,8 +951,10 @@ export interface SelfUpdaterDeps {
   fetchLatest: () => Promise<string | null>;
   stage: (version: string) => Promise<void>;
   hasStaged: () => boolean;
-  swap: () => void;
-  rollback: () => void;
+  swap: () => void | Promise<void>;
+  rollback: () => void | Promise<void>;
+  /** restoreRuntime: true when `<home>/runtime` is in place (review F5). */
+  restoreRuntime: () => Promise<boolean>;
   removePrevious: () => void;
   /** Remove runtime.next (a stage that will never be applied). */
   removeStaged: () => void;
@@ -882,6 +985,8 @@ export class SelfUpdater {
   private running = false;
   /** The 24 h wait was logged by this supervisor. */
   private waitNoticed = false;
+  /** A switch left no runtime folder; no child runs until it is back. */
+  private runtimeLost = false;
 
   constructor(private readonly deps: SelfUpdaterDeps) {
     this.state = readUpdateState(deps.home, deps.read) ?? emptyUpdateState();
@@ -973,6 +1078,13 @@ export class SelfUpdater {
 
   private async pass(): Promise<string> {
     const now = this.deps.now();
+    if (this.runtimeLost) {
+      if (!(await this.runtimeInPlace())) return "runtime_missing";
+      this.runtimeLost = false;
+      this.deps.log("the runtime folder is back; the agent starts again");
+      this.deps.resumeChild();
+      return "runtime_restored";
+    }
     if (this.state.pendingConfirm) return this.confirm(now);
     if (!this.active) return "inactive";
     let outcome = "idle";
@@ -1110,7 +1222,7 @@ export class SelfUpdater {
       return "stopped";
     }
     try {
-      this.deps.swap();
+      await this.deps.swap();
     } catch (error) {
       this.dropStage();
       s.lastError = {
@@ -1119,7 +1231,13 @@ export class SelfUpdater {
       };
       this.save();
       this.deps.log(s.lastError.message);
-      this.deps.resumeChild();
+      // Never relaunch the child from a runtime folder that is not there
+      // (review F5): the next pass puts it back first.
+      if (await this.runtimeInPlace()) this.deps.resumeChild();
+      else {
+        this.runtimeLost = true;
+        this.deps.log("the runtime folder could not be put back yet; the agent waits for it");
+      }
       return "apply_failed";
     }
     s.pendingConfirm = {
@@ -1196,7 +1314,7 @@ export class SelfUpdater {
     if (!s.rolledBack.includes(pending.version))
       s.rolledBack = [...s.rolledBack, pending.version].slice(-ROLLED_BACK_KEEP);
     try {
-      this.deps.rollback();
+      await this.deps.rollback();
     } catch (error) {
       // The rollback stays owed until it succeeds (review F3): clearing it
       // here relaunched the version just judged broken, for good. Restarts
@@ -1204,7 +1322,10 @@ export class SelfUpdater {
       // pass tries again; only after ROLLBACK_MAX_ATTEMPTS is the agent let
       // run on what it has.
       const failures = pending.rollbackFailures + 1;
-      const giveUp = failures >= ROLLBACK_MAX_ATTEMPTS;
+      // Never given up while there is no runtime folder to run (review F5):
+      // the next try moves runtime.prev into place, which is the rollback.
+      const giveUp =
+        failures >= ROLLBACK_MAX_ATTEMPTS && (await this.runtimeInPlace());
       s.pendingConfirm = giveUp ? null : { ...pending, rollbackFailures: failures };
       s.lastError = {
         at: new Date(this.deps.now()).toISOString(),
@@ -1226,6 +1347,15 @@ export class SelfUpdater {
     this.deps.log(s.lastError.message);
     await this.deps.restartSupervisor();
     return "rolled_back";
+  }
+
+  /** restoreRuntime, where a dep that throws reads as "not in place". */
+  private async runtimeInPlace(): Promise<boolean> {
+    try {
+      return await this.deps.restoreRuntime();
+    } catch {
+      return false;
+    }
   }
 
   private save(): void {

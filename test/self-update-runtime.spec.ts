@@ -22,6 +22,7 @@ import {
   CONFIRM_WINDOW_MS,
   FIRST_CHECK_DELAY_MS,
   QUIET_WINDOW_MS,
+  RENAME_RETRY_MS,
   ROLLBACK_MAX_ATTEMPTS,
   SelfUpdater,
   UPDATE_WAIT_NOTICE_MS,
@@ -29,6 +30,8 @@ import {
   nodeRuntimeFs,
   npmCliPath,
   readUpdateState,
+  renameWithRetry,
+  restoreRuntime,
   rollbackRuntime,
   runtimeCli,
   runtimePaths,
@@ -39,6 +42,7 @@ import {
   type ChildHeartbeat,
   type ChildStopReply,
   type Exec,
+  type RenameRetry,
   type RuntimeFs,
   type SelfUpdaterDeps,
 } from "../src/setup/self-update.js";
@@ -67,6 +71,13 @@ function makeRuntime(dir: string, version: string, codex = "0.154.0") {
   writeFileSync(join(dir, "MARKER"), version);
 }
 const marker = (dir: string) => readFileSync(join(dir, "MARKER"), "utf8");
+/** No retry: a failure stands at once, as it does off Windows. */
+const POSIX: RenameRetry = {
+  platform: "darwin",
+  budgetMs: 0,
+  now: () => 0,
+  sleep: async () => {},
+};
 
 const EXEC_PATH = "/opt/node/bin/node";
 const NPM_CLI = npmCliPath(EXEC_PATH, "darwin", () => true)!;
@@ -173,18 +184,18 @@ describe("stageRuntime: install into runtime.next with Codex pinned, then probe"
 });
 
 describe("swapRuntime and rollbackRuntime on a real folder", () => {
-  it("swaps runtime.next in and keeps the old one as runtime.prev", () => {
+  it("swaps runtime.next in and keeps the old one as runtime.prev", async () => {
     const home = tempHome();
     const p = runtimePaths(home);
     makeRuntime(p.runtime, "0.19.0");
     makeRuntime(p.next, "0.19.2");
-    swapRuntime(home);
+    await swapRuntime(home);
     expect(marker(p.runtime)).toBe("0.19.2");
     expect(marker(p.prev)).toBe("0.19.0");
     expect(existsSync(p.next)).toBe(false);
   });
 
-  it("puts the old runtime back when the second rename fails", () => {
+  it("puts the old runtime back when the second rename fails", async () => {
     const home = tempHome();
     const p = runtimePaths(home);
     makeRuntime(p.runtime, "0.19.0");
@@ -196,32 +207,32 @@ describe("swapRuntime and rollbackRuntime on a real folder", () => {
         nodeRuntimeFs.rename(from, to);
       },
     };
-    expect(() => swapRuntime(home, failing)).toThrow("EBUSY");
+    await expect(swapRuntime(home, failing, POSIX)).rejects.toThrow("EBUSY");
     expect(marker(p.runtime)).toBe("0.19.0");
     expect(existsSync(p.prev)).toBe(false);
     expect(marker(p.next)).toBe("0.19.2");
   });
 
-  it("refuses to swap with nothing staged", () => {
+  it("refuses to swap with nothing staged", async () => {
     const home = tempHome();
     makeRuntime(runtimePaths(home).runtime, "0.19.0");
-    expect(() => swapRuntime(home)).toThrow("Nothing is staged");
+    await expect(swapRuntime(home)).rejects.toThrow("Nothing is staged");
     expect(marker(runtimePaths(home).runtime)).toBe("0.19.0");
   });
 
-  it("rolls back: runtime.prev becomes runtime again and the failed one is removed", () => {
+  it("rolls back: runtime.prev becomes runtime again and the failed one is removed", async () => {
     const home = tempHome();
     const p = runtimePaths(home);
     makeRuntime(p.runtime, "0.19.0");
     makeRuntime(p.next, "0.19.2");
-    swapRuntime(home);
-    rollbackRuntime(home);
+    await swapRuntime(home);
+    await rollbackRuntime(home);
     expect(marker(p.runtime)).toBe("0.19.0");
     expect(existsSync(p.prev)).toBe(false);
     expect(existsSync(p.failed)).toBe(false);
   });
 
-  it("a rollback that cannot finish leaves the running version in place", () => {
+  it("a rollback that cannot finish leaves the running version in place", async () => {
     const home = tempHome();
     const p = runtimePaths(home);
     makeRuntime(p.runtime, "0.19.2");
@@ -233,9 +244,138 @@ describe("swapRuntime and rollbackRuntime on a real folder", () => {
         nodeRuntimeFs.rename(from, to);
       },
     };
-    expect(() => rollbackRuntime(home, failing)).toThrow("EPERM");
+    await expect(rollbackRuntime(home, failing, POSIX)).rejects.toThrow("EPERM");
     expect(marker(p.runtime)).toBe("0.19.2");
     expect(marker(p.prev)).toBe("0.19.0");
+  });
+});
+
+describe("review F5: renames on Windows are retried, and a runtime that could not be put back is restored", () => {
+  /** A clock that sleeping moves forward, so a 60 s budget runs in no time. */
+  function windowsRetry() {
+    let now = 0;
+    const sleeps: number[] = [];
+    const retry: RenameRetry = {
+      platform: "win32",
+      budgetMs: RENAME_RETRY_MS,
+      now: () => now,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        now += ms;
+      },
+    };
+    return { retry, sleeps };
+  }
+  const held = (code: string) => Object.assign(new Error(`${code}: operation not permitted, rename`), { code });
+
+  it("a rename that antivirus or the indexer holds a moment goes through once it is let go", async () => {
+    const { retry, sleeps } = windowsRetry();
+    let calls = 0;
+    await renameWithRetry(
+      () => {
+        if (++calls <= 2) throw held("EPERM");
+      },
+      "a",
+      "b",
+      retry,
+    );
+    expect(calls).toBe(3);
+    expect(sleeps).toHaveLength(2);
+  });
+
+  it("EACCES and EBUSY are retried too, for up to RENAME_RETRY_MS, then the error stands", async () => {
+    for (const code of ["EACCES", "EBUSY"]) {
+      const { retry, sleeps } = windowsRetry();
+      let calls = 0;
+      await expect(
+        renameWithRetry(() => void (calls++, (() => { throw held(code); })()), "a", "b", retry),
+      ).rejects.toThrow(code);
+      expect(calls).toBeGreaterThan(2);
+      expect(sleeps.reduce((sum, ms) => sum + ms, 0)).toBeGreaterThanOrEqual(RENAME_RETRY_MS);
+    }
+    expect(RENAME_RETRY_MS).toBe(60_000);
+  });
+
+  it("anything else, and any error off Windows, fails at once", async () => {
+    const { retry } = windowsRetry();
+    let calls = 0;
+    await expect(
+      renameWithRetry(() => void (calls++, (() => { throw held("ENOENT"); })()), "a", "b", retry),
+    ).rejects.toThrow("ENOENT");
+    expect(calls).toBe(1);
+    await expect(
+      renameWithRetry(() => void (calls++, (() => { throw held("EPERM"); })()), "a", "b", { ...retry, platform: "darwin" }),
+    ).rejects.toThrow("EPERM");
+    expect(calls).toBe(2);
+  });
+
+  it("the swap seconds after npm wrote runtime.next goes through on Windows", async () => {
+    const home = tempHome();
+    const p = runtimePaths(home);
+    makeRuntime(p.runtime, "0.19.0");
+    makeRuntime(p.next, "0.19.2");
+    let held2 = 2;
+    const fresh: RuntimeFs = {
+      ...nodeRuntimeFs,
+      rename: (from, to) => {
+        if (from === p.next && held2-- > 0) throw held("EPERM");
+        nodeRuntimeFs.rename(from, to);
+      },
+    };
+    await swapRuntime(home, fresh, windowsRetry().retry);
+    expect(marker(p.runtime)).toBe("0.19.2");
+    expect(marker(p.prev)).toBe("0.19.0");
+  });
+
+  it("a swap whose undo fails too names the first error, and restoreRuntime puts the running version back", async () => {
+    const home = tempHome();
+    const p = runtimePaths(home);
+    makeRuntime(p.runtime, "0.19.0");
+    makeRuntime(p.next, "0.19.2");
+    const stuck: RuntimeFs = {
+      ...nodeRuntimeFs,
+      rename: (from, to) => {
+        if (from === p.next) throw held("EPERM");
+        if (from === p.prev) throw held("EBUSY");
+        nodeRuntimeFs.rename(from, to);
+      },
+    };
+    await expect(swapRuntime(home, stuck, POSIX)).rejects.toThrow("EPERM");
+    expect(existsSync(p.runtime)).toBe(false);
+    expect(await restoreRuntime(home, "0.19.0", nodeRuntimeFs, undefined, POSIX)).toBe(true);
+    expect(marker(p.runtime)).toBe("0.19.0");
+    expect(marker(p.next)).toBe("0.19.2");
+  });
+
+  it("restoreRuntime brings back the folder holding the running version first, and says when it cannot", async () => {
+    const home = tempHome();
+    const p = runtimePaths(home);
+    // A rollback whose undo failed: the target in prev, the running one in failed.
+    makeRuntime(p.prev, "0.19.0");
+    makeRuntime(p.failed, "0.19.2");
+    const stuck: RuntimeFs = {
+      ...nodeRuntimeFs,
+      rename: () => {
+        throw held("EPERM");
+      },
+    };
+    expect(await restoreRuntime(home, "0.19.2", stuck, undefined, POSIX)).toBe(false);
+    expect(await restoreRuntime(home, "0.19.2", nodeRuntimeFs, undefined, POSIX)).toBe(true);
+    expect(marker(p.runtime)).toBe("0.19.2");
+    // In place already: nothing moves.
+    expect(await restoreRuntime(home, "0.19.0", nodeRuntimeFs, undefined, POSIX)).toBe(true);
+    expect(marker(p.runtime)).toBe("0.19.2");
+  });
+
+  it("a rollback tried again after its undo failed finishes it: runtime.prev is all that is left to move", async () => {
+    const home = tempHome();
+    const p = runtimePaths(home);
+    makeRuntime(p.prev, "0.19.0");
+    makeRuntime(p.failed, "0.19.2");
+    await rollbackRuntime(home, nodeRuntimeFs, POSIX);
+    expect(marker(p.runtime)).toBe("0.19.0");
+    expect(existsSync(p.prev)).toBe(false);
+    expect(existsSync(p.failed)).toBe(false);
   });
 });
 
@@ -302,6 +442,7 @@ function harness(home: string, change: Partial<SelfUpdaterDeps> = {}) {
     removeStaged: vi.fn(() => void events.push("removeStaged")),
     runtimeCodexVersion: () => "0.154.0",
     stopRequested: () => false,
+    restoreRuntime: vi.fn(async () => true),
     readHeartbeat: () => heartbeat,
     childPid: () => 4242,
     requestChildStop: vi.fn(async () => {
@@ -651,6 +792,52 @@ describe("SelfUpdater flows", () => {
     expect(readUpdateState(home)!.lastError?.message).toContain("EBUSY");
   });
 
+  it("review F5: a switch that could not even be undone relaunches nothing until the runtime is back", async () => {
+    const home = tempHome();
+    const restored = [false, true];
+    const h = harness(home, {
+      swap: vi.fn(() => {
+        throw new Error("EPERM: operation not permitted, rename 'runtime.next'");
+      }),
+      restoreRuntime: vi.fn(async () => {
+        const ok = restored.shift()!;
+        h.events.push(`restore:${ok}`);
+        return ok;
+      }),
+    });
+    const updater = new SelfUpdater(h.deps);
+    updater.boot();
+    expect(await updater.tick()).toBe("apply_failed");
+    // No child from a runtime folder that is not there (it would exit every 5 s).
+    expect(h.deps.resumeChild).not.toHaveBeenCalled();
+    expect(readUpdateState(home)!.lastError?.message).toContain("runtime.next");
+    // The next pass puts it back first, then the agent runs again.
+    expect(await updater.tick()).toBe("runtime_restored");
+    expect(h.events.slice(-2)).toEqual(["restore:true", "resume"]);
+  });
+
+  it("review F5: a rollback is never given up while there is no runtime to run", async () => {
+    const home = tempHome();
+    writeUpdateState(home, {
+      ...emptyUpdateState(),
+      pendingConfirm: { version: "0.19.2", previousVersion: "0.19.0", appliedAt: iso(T0 - 20_000), boots: 0, rollbackFailures: ROLLBACK_MAX_ATTEMPTS - 1 },
+    });
+    const h = harness(home, {
+      currentVersion: "0.19.2",
+      rollback: vi.fn(() => {
+        throw new Error("EBUSY");
+      }),
+      restoreRuntime: vi.fn(async () => false),
+    });
+    h.setHeartbeat(null);
+    const updater = new SelfUpdater(h.deps);
+    updater.boot();
+    h.setNow(T0 + CONFIRM_WINDOW_MS);
+    expect(await updater.tick()).toBe("rollback_failed");
+    expect(readUpdateState(home)!.pendingConfirm).toMatchObject({ rollbackFailures: ROLLBACK_MAX_ATTEMPTS });
+    expect(h.deps.resumeChild).not.toHaveBeenCalled();
+  });
+
   it("CODEX_BGOS_AUTO_UPDATE=off: no check, no stage, no apply", async () => {
     const home = tempHome();
     const h = harness(home, { enabled: false });
@@ -926,6 +1113,7 @@ describe("the whole cycle on a real folder: stage, swap, new supervisor rolls ba
       h.deps.hasStaged = () => existsSync(p.next);
       h.deps.swap = () => swapRuntime(home);
       h.deps.rollback = () => rollbackRuntime(home);
+      h.deps.restoreRuntime = () => restoreRuntime(home, h.deps.currentVersion);
       h.deps.removePrevious = () => nodeRuntimeFs.remove(p.prev);
       return h;
     };

@@ -40,6 +40,7 @@ import {
   nodeExec,
   nodeRuntimeFs,
   resolveSupervised,
+  restoreRuntime,
   rollbackRuntime,
   runtimePaths,
   stageRuntime,
@@ -680,9 +681,10 @@ export async function supervise(home: string): Promise<void> {
   // control server opens: startSelfUpdate counts this boot first (review
   // F10).
   const cli = entry();
+  const currentVersion = getPackageVersion();
   const updater = new SelfUpdater({
     home,
-    currentVersion: getPackageVersion(),
+    currentVersion,
     supervised: resolveSupervised({
       platform: process.platform,
       env: process.env,
@@ -707,6 +709,7 @@ export async function supervise(home: string): Promise<void> {
     hasStaged: () => existsSync(runtimePaths(home).next),
     swap: () => swapRuntime(home),
     rollback: () => rollbackRuntime(home),
+    restoreRuntime: () => restoreRuntime(home, currentVersion),
     removePrevious: () => nodeRuntimeFs.remove(runtimePaths(home).prev),
     removeStaged: () => nodeRuntimeFs.remove(runtimePaths(home).next),
     runtimeCodexVersion: () =>
