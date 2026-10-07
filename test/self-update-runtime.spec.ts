@@ -417,6 +417,16 @@ describe("review F5: renames on Windows are retried, and a runtime that could no
     await expect(rollbackRuntime(home, nodeRuntimeFs, POSIX)).rejects.toThrow("no previous version");
     expect(marker(p.runtime)).toBe("0.19.0");
   });
+
+  it("a rollback with only runtime.failed left and no runtime folder is not done: runtime.failed is the last copy, and it stays", async () => {
+    const home = tempHome();
+    const p = runtimePaths(home);
+    makeRuntime(p.failed, "0.19.2");
+    await expect(rollbackRuntime(home, nodeRuntimeFs, POSIX)).rejects.toThrow("no previous version");
+    // The restore after the failed try can still put it back.
+    expect(marker(p.failed)).toBe("0.19.2");
+    expect(existsSync(p.runtime)).toBe(false);
+  });
 });
 
 describe("fetchLatestVersion", () => {
