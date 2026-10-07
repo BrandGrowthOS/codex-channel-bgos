@@ -12,7 +12,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CodexAdapter } from "../src/adapter.js";
 import { STOP_IF_IDLE, STOP_REPLY, attachChildControl } from "../src/child-control.js";
-import { emptyUpdateState, writeUpdateState } from "../src/setup/self-update.js";
+import {
+  QUIET_WINDOW_MS,
+  decideSafeMoment,
+  emptyUpdateState,
+  writeUpdateState,
+} from "../src/setup/self-update.js";
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
@@ -281,6 +286,52 @@ describe("the adapter wires busy, identity and readiness", () => {
     } finally {
       adapter.heartbeat.stop();
       adapter.host.close();
+    }
+  });
+
+  it("review C2: a mission frame that starts a goal is the owner's activity, so the safe moment stays unsafe in the gap before turn/started", async () => {
+    for (const eventType of ["mission_created", "mission_resumed", "mission_updated"]) {
+      const adapter = build();
+      try {
+        const handlers = await started(adapter);
+        const file = () => JSON.parse(readFileSync(join(home, "bgos_heartbeat.json"), "utf8"));
+        const safeMoment = () => {
+          const beat = file();
+          return decideSafeMoment({ heartbeat: beat, childPid: beat.pid, nowMs: Date.now() });
+        };
+        // Connected and quiet for longer than the quiet window: no chat
+        // message is involved when the owner starts Keep working in the app.
+        adapter.heartbeat.setWsConnected(true, new Date().toISOString());
+        adapter.heartbeat.lastActivityAt = new Date(Date.now() - QUIET_WINDOW_MS - 60_000).toISOString();
+        adapter.heartbeat.writeFile();
+        expect(safeMoment(), eventType).toEqual({ safe: true });
+        adapter.host.setGoal = vi.fn(async () => null);
+        handlers.get("mission_event")!({
+          eventType,
+          userId: "owner-1",
+          assistantId: 10,
+          chatId: 20,
+          clearedBy: "owner",
+          mission: {
+            id: 7,
+            title: "Ship the quarterly report",
+            doneWhen: "the report is sent to the board",
+            createdByAssistant: false,
+            keepWorking: true,
+            turnCap: 10,
+          },
+          timestamp: "2026-10-07T04:00:00.000Z",
+        });
+        await settle();
+        // The set has returned and turn/started (about 11 ms later) has not
+        // arrived: nothing counts the goal's first turn yet.
+        expect(adapter.isAnyBusy(), eventType).toBe(false);
+        // The supervisor's file check never reaches stop-if-idle in that gap.
+        expect(safeMoment(), eventType).toEqual({ safe: false, reason: "recent_activity" });
+      } finally {
+        adapter.heartbeat.stop();
+        adapter.host.close();
+      }
     }
   });
 

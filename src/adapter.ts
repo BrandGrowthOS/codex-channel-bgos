@@ -149,6 +149,17 @@ import {
 
 const LOG = "[codex-channel-bgos]";
 
+/**
+ * The mission frames that can start a goal's turn at once (review C2):
+ * mission_created arms one, mission_resumed and mission_updated (Give it 10
+ * more turns) start one again.
+ */
+const GOAL_STARTING_FRAMES: ReadonlySet<string> = new Set([
+  "mission_created",
+  "mission_resumed",
+  "mission_updated",
+]);
+
 function promptTextFromInput(input: Input): string {
   if (typeof input === "string") return input;
   return input.find((part) => part.type === "text")?.text ?? "";
@@ -877,7 +888,12 @@ export class CodexAdapter {
       // start one again, each a turn at once that the host counts only from
       // turn/started; the goal set waits on the thread first (review C2). No
       // mission frame is ever replayed, so a stop answered in that gap lost
-      // the owner's loop for good.
+      // the owner's loop for good. whileTaken covers the frame only until the
+      // set returns, about 11 ms before turn/started (goal-lane.ts), so the
+      // frame is the owner's activity too, for the supervisor's file: its
+      // quiet window covers the rest, as for a chat message or a voice call.
+      if (GOAL_STARTING_FRAMES.has(frame.eventType))
+        this.heartbeat.recordInbound();
       void this.whileTaken(() => this.missionControl.handle(frame));
     });
     this.ws.on("meeting_event", (event) => {
