@@ -413,7 +413,8 @@ export class CodexAdapter {
    * Frames taken from the socket whose handling has not settled (review F1):
    * a message whose cursor is saved but whose turn has not reached the host
    * yet, while an attachment downloads, a native command runs or the first
-   * owner turn asks for its mission. isAnyBusy counts them.
+   * owner turn asks for its mission, and a mission frame whose goal set has
+   * not started its turn yet (review C2). isAnyBusy counts them.
    */
   private takenWork = 0;
   private readonly generations = new Map<number, number>();
@@ -872,7 +873,12 @@ export class CodexAdapter {
       void this.whileTaken(() => this.handleControl(frame));
     });
     this.ws.on("mission_event", (frame) => {
-      void this.missionControl.handle(frame);
+      // mission_created arms a goal, and mission_resumed and mission_updated
+      // start one again, each a turn at once that the host counts only from
+      // turn/started; the goal set waits on the thread first (review C2). No
+      // mission frame is ever replayed, so a stop answered in that gap lost
+      // the owner's loop for good.
+      void this.whileTaken(() => this.missionControl.handle(frame));
     });
     this.ws.on("meeting_event", (event) => {
       void this.whileTaken(async () => {

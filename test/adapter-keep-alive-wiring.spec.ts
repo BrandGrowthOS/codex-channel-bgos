@@ -243,6 +243,47 @@ describe("the adapter wires busy, identity and readiness", () => {
     }
   });
 
+  it("review C2: an owner's Keep working mission is busy from its frame until its goal is set, so the child never says stopping", async () => {
+    const adapter = build();
+    try {
+      const handlers = await started(adapter);
+      // Arming the goal starts a turn at once, but the host counts it only
+      // from turn/started; until then the goal set is on its way (the
+      // app-server starting, the thread resuming). No mission frame is ever
+      // replayed, so a stop answered here loses the owner's loop for good.
+      const goalSet = deferred<null>();
+      adapter.host.setGoal = vi.fn(() => goalSet.promise);
+      handlers.get("mission_event")!({
+        eventType: "mission_created",
+        userId: "owner-1",
+        assistantId: 10,
+        chatId: 20,
+        mission: {
+          id: 7,
+          title: "Ship the quarterly report",
+          doneWhen: "the report is sent to the board",
+          createdByAssistant: false,
+          keepWorking: true,
+          turnCap: 10,
+        },
+        timestamp: "2026-10-07T04:00:00.000Z",
+      });
+      await settle();
+      expect(adapter.host.setGoal).toHaveBeenCalledWith(20, "the report is sent to the board", undefined);
+      expect(adapter.host.isAnyBusy()).toBe(false);
+      expect(adapter.isAnyBusy()).toBe(true);
+      const answer = await askToStop(adapter);
+      expect(answer.result).toBe("busy");
+      expect(answer.shutdown).not.toHaveBeenCalled();
+      goalSet.resolve(null);
+      await settle();
+      expect(adapter.isAnyBusy()).toBe(false);
+    } finally {
+      adapter.heartbeat.stop();
+      adapter.host.close();
+    }
+  });
+
   it("asks the host for background terminals", async () => {
     const adapter = build();
     try {
