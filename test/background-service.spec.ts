@@ -22,6 +22,7 @@ import { EventEmitter } from "node:events";
 
 import {
   childSpawnOptions,
+  closeSupervisor,
   createChildRunner,
   handOverToSuccessor,
   installBackgroundService,
@@ -34,7 +35,16 @@ import {
   startSelfUpdate,
   supervisorUpdateControls,
 } from "../src/setup/background-service.js";
-import { UPDATE_TICK_MS } from "../src/setup/self-update.js";
+import {
+  RENAME_RETRY_MS,
+  RuntimeSwitches,
+  SWITCH_SETTLE_MS,
+  UPDATE_TICK_MS,
+  countedRuntimeSwitches,
+  runtimePaths,
+  type RenameRetry,
+  type RuntimeFs,
+} from "../src/setup/self-update.js";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -519,5 +529,167 @@ describe("startSelfUpdate: boot, an owed rollback, serve, launch, then a pass ev
     intervals[0].fn();
     await new Promise((resolve) => setImmediate(resolve));
     expect(log).toHaveBeenCalledWith("update pass failed: EACCES update-state.json");
+  });
+});
+
+describe("review C1: a stop lets a runtime switch in flight finish before it lets go", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // Never created: every runtime folder below lives in memory.
+  const SWITCH_HOME = join(tmpdir(), "codex-c1-no-such-home");
+  const p = runtimePaths(SWITCH_HOME);
+
+  /** The runtime folders in memory, with renames Windows holds while `held` says so. */
+  function memoryRuntime(present: string[], held: (from: string) => boolean) {
+    const dirs = new Set(present);
+    const fs: RuntimeFs = {
+      exists: (path) => dirs.has(path),
+      rename: (from, to) => {
+        if (held(from))
+          throw Object.assign(new Error(`EPERM: operation not permitted, rename '${from}'`), {
+            code: "EPERM",
+          });
+        if (!dirs.delete(from))
+          throw Object.assign(new Error(`ENOENT: no such file or directory, rename '${from}'`), {
+            code: "ENOENT",
+          });
+        dirs.add(to);
+      },
+      remove: (path) => void dirs.delete(path),
+    };
+    return { fs, dirs };
+  }
+  /** The first `n` calls say held (Defender or the indexer on fresh files). */
+  const firstTimes = (n: number) => () => n-- > 0;
+  /** Windows renames, retried on the fake clock. */
+  const windows: RenameRetry = {
+    platform: "win32",
+    budgetMs: RENAME_RETRY_MS,
+    now: () => Date.now(),
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  };
+
+  /** supervise()'s stop, recording what it tears down and whether a runtime was left at the release. */
+  function stopDuring(
+    switches: RuntimeSwitches,
+    runtimeInPlace: () => boolean,
+    child: { pid: number } | null = null,
+  ) {
+    const events: string[] = [];
+    const stopped = closeSupervisor({
+      runner: { stop: () => void events.push("runner stopped"), current: () => child },
+      clearUpdates: () => void events.push("updates cleared"),
+      terminate: async (c) => void events.push(`terminate:${c.pid}`),
+      switches,
+      closeServer: () => void events.push("server closed"),
+      removeServiceFile: () => void events.push("service.json removed"),
+      release: async () =>
+        void events.push(runtimeInPlace() ? "released, runtime in place" : "released, NO runtime"),
+      exit: () => void events.push("exit"),
+      log: (message) => void events.push(`log: ${message}`),
+    });
+    return { events, stopped };
+  }
+  const TORN_DOWN = ["server closed", "service.json removed", "released, runtime in place", "exit"];
+
+  it("a stop while Windows holds runtime.next -> runtime waits for the swap, so <home>/runtime is never left missing", async () => {
+    vi.useFakeTimers();
+    const held = firstTimes(20);
+    const { fs, dirs } = memoryRuntime([p.runtime, p.next], (from) => from === p.next && held());
+    const switches = new RuntimeSwitches();
+    const { swap } = countedRuntimeSwitches(SWITCH_HOME, "0.19.0", switches, fs, windows);
+    const swapped = swap();
+    await vi.advanceTimersByTimeAsync(2_000);
+    // runtime -> runtime.prev went through and runtime.next -> runtime is
+    // held: right now there is no runtime folder at all.
+    expect(dirs.has(p.runtime)).toBe(false);
+    const { events, stopped } = stopDuring(switches, () => dirs.has(p.runtime));
+    await vi.advanceTimersByTimeAsync(5_000);
+    // Neither service.json nor the lock goes while the swap is renaming.
+    expect(events).toEqual(["runner stopped", "updates cleared"]);
+    await vi.advanceTimersByTimeAsync(20_000);
+    await swapped;
+    await stopped;
+    expect(events).toEqual(["runner stopped", "updates cleared", ...TORN_DOWN]);
+    expect(dirs).toEqual(new Set([p.runtime, p.prev]));
+  });
+
+  it("a swap that could not even undo itself goes straight on to the restore, and the stop waits for that too", async () => {
+    vi.useFakeTimers();
+    let phase: "swap" | "restore" = "swap";
+    const restoreHeld = firstTimes(10);
+    const { fs, dirs } = memoryRuntime(
+      [p.runtime, p.next],
+      (from) => from === p.next || (from === p.prev && (phase === "swap" || restoreHeld())),
+    );
+    const switches = new RuntimeSwitches();
+    const counted = countedRuntimeSwitches(SWITCH_HOME, "0.19.0", switches, fs, windows);
+    // SelfUpdater.apply: a swap that throws is followed at once by the restore.
+    const applied = counted.swap().then(
+      () => true,
+      () => {
+        phase = "restore";
+        return counted.restoreRuntime();
+      },
+    );
+    await vi.advanceTimersByTimeAsync(2_000);
+    const { events, stopped } = stopDuring(switches, () => dirs.has(p.runtime));
+    // The swap and its undo each spend their whole retry budget, then the
+    // restore is held for a few seconds more.
+    await vi.advanceTimersByTimeAsync(2 * (RENAME_RETRY_MS + 1000));
+    expect(dirs.has(p.runtime)).toBe(false);
+    expect(events).toEqual(["runner stopped", "updates cleared"]);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await applied).toBe(true);
+    await stopped;
+    expect(events).toEqual(["runner stopped", "updates cleared", ...TORN_DOWN]);
+    expect(dirs).toEqual(new Set([p.runtime, p.next]));
+  });
+
+  it("a rollback and a restore count while they run, as the swap does", async () => {
+    vi.useFakeTimers();
+    for (const [which, present] of [
+      ["rollback", [p.runtime, p.prev]],
+      ["restoreRuntime", [p.prev]],
+    ] as const) {
+      const { fs, dirs } = memoryRuntime([...present], firstTimes(10));
+      const switches = new RuntimeSwitches();
+      const running = countedRuntimeSwitches(SWITCH_HOME, "0.19.0", switches, fs, windows)[which]();
+      let settled: boolean | undefined;
+      void switches.settled(SWITCH_SETTLE_MS).then((value) => (settled = value));
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(settled, which).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(10_000);
+      await running;
+      expect(settled, which).toBe(true);
+      expect(dirs.has(p.runtime), which).toBe(true);
+    }
+  });
+
+  it("is bounded: a switch that never settles keeps the supervisor for SWITCH_SETTLE_MS at most", async () => {
+    vi.useFakeTimers();
+    const switches = new RuntimeSwitches();
+    void switches.run(() => new Promise<void>(() => {}));
+    const { events, stopped } = stopDuring(switches, () => true);
+    await vi.advanceTimersByTimeAsync(SWITCH_SETTLE_MS - 1);
+    expect(events).toEqual(["runner stopped", "updates cleared"]);
+    await vi.advanceTimersByTimeAsync(1);
+    await stopped;
+    expect(events).toEqual([
+      "runner stopped",
+      "updates cleared",
+      "log: a runtime switch is still running after 305 s; stopping anyway",
+      ...TORN_DOWN,
+    ]);
+    // Five renames, each retried for a minute: the longest switch there is.
+    expect(SWITCH_SETTLE_MS).toBe(5 * (RENAME_RETRY_MS + 1000));
+  });
+
+  it("with no switch in flight it stops at once: the loop, the child, then the server, service.json and the lock", async () => {
+    const { events, stopped } = stopDuring(new RuntimeSwitches(), () => true, { pid: 1000 });
+    await stopped;
+    expect(events).toEqual(["runner stopped", "updates cleared", "terminate:1000", ...TORN_DOWN]);
   });
 });

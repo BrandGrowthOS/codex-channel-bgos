@@ -833,6 +833,95 @@ export async function restoreRuntime(
   return false;
 }
 
+/**
+ * How long a stopping supervisor lets a runtime switch in flight finish
+ * (review C1): the longest one can take on Windows, five renames each
+ * retried for RENAME_RETRY_MS (and its last 1 s sleep). A rollback renames
+ * three times (runtime -> runtime.failed, runtime.prev -> runtime, the
+ * undo) and the restore after one that could not undo itself twice more.
+ * Off Windows nothing is retried, and a stop never lands inside a switch.
+ */
+export const SWITCH_SETTLE_MS = 5 * (RENAME_RETRY_MS + 1000);
+
+/**
+ * The runtime switches in flight in this supervisor: a swap, a rollback or
+ * a restore (review C1). stopRequested keeps a new one from starting (review
+ * F9), but one already under way retries a held rename on Windows for up to
+ * a minute, and a stop that let the process exit between runtime ->
+ * runtime.prev and runtime.next -> runtime left no runtime folder: the
+ * service could not start at the next logon. So stop() waits for `settled`
+ * before it lets go of anything.
+ */
+export class RuntimeSwitches {
+  private running = 0;
+  private readonly waiters = new Set<() => void>();
+
+  /** Count `work` from its first synchronous step until it settles. */
+  run<T>(work: () => Promise<T>): Promise<T> {
+    this.running += 1;
+    let pending: Promise<T>;
+    try {
+      pending = work();
+    } catch (error) {
+      this.finished();
+      return Promise.reject(error);
+    }
+    return pending.finally(() => this.finished());
+  }
+
+  /**
+   * True once no switch is in flight, false when one still is after
+   * `maxMs`. A switch that could not undo itself hands over to the restore
+   * a microtask after it settles (SelfUpdater.apply and rollBack), so none
+   * running is believed only once a macrotask has passed with none.
+   */
+  settled(maxMs: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      let over = false;
+      const finish = (value: boolean) => {
+        if (over) return;
+        over = true;
+        clearTimeout(deadline);
+        this.waiters.delete(check);
+        resolve(value);
+      };
+      const check = () => {
+        if (this.running > 0) return;
+        setImmediate(() => {
+          if (this.running === 0) finish(true);
+        });
+      };
+      const deadline = setTimeout(() => finish(false), maxMs);
+      this.waiters.add(check);
+      check();
+    });
+  }
+
+  private finished(): void {
+    this.running -= 1;
+    if (this.running === 0) for (const check of [...this.waiters]) check();
+  }
+}
+
+/**
+ * The updater's swap, rollback and restore, each counted in `switches`
+ * while it runs, so a stop waits for it (review C1).
+ */
+export function countedRuntimeSwitches(
+  home: string,
+  version: string,
+  switches: RuntimeSwitches,
+  fs: RuntimeFs = nodeRuntimeFs,
+  retry: RenameRetry = nodeRenameRetry,
+): Pick<SelfUpdaterDeps, "swap" | "rollback" | "restoreRuntime"> {
+  return {
+    swap: () => switches.run(() => swapRuntime(home, fs, retry)),
+    rollback: () => switches.run(() => rollbackRuntime(home, fs, retry)),
+    restoreRuntime: () =>
+      switches.run(() => restoreRuntime(home, version, fs, undefined, retry)),
+  };
+}
+
 export type Exec = (
   command: string,
   args: string[],

@@ -30,21 +30,21 @@ import {
   CODEX_PACKAGE,
   SERVICE_MARKER_ENV,
   SUPERVISOR_PID_ENV,
+  SWITCH_SETTLE_MS,
   UPDATE_EXIT_CODE,
   UPDATE_TICK_MS,
+  RuntimeSwitches,
   SelfUpdater,
   autoUpdateEnabledFromEnv,
+  countedRuntimeSwitches,
   fetchLatestVersion,
   installedPackageVersion,
   isManagedRuntime,
   nodeExec,
   nodeRuntimeFs,
   resolveSupervised,
-  restoreRuntime,
-  rollbackRuntime,
   runtimePaths,
   stageRuntime,
-  swapRuntime,
   type ChildHeartbeat,
   type ChildStopReply,
   type SelfUpdaterDeps,
@@ -545,6 +545,49 @@ export async function startSelfUpdate<T>(deps: {
   }, UPDATE_TICK_MS);
 }
 
+/**
+ * What stop() tears down once it marked the stop (POST /stop, which a
+ * Repair's pause-service sends, a signal, or a compromised lock). The order
+ * is the point:
+ * - the restart loop and the update passes end, then the child;
+ * - a runtime switch already in flight is let finish, for at most
+ *   SWITCH_SETTLE_MS (review C1). On Windows it retries a held rename for up
+ *   to a minute, and exiting between runtime -> runtime.prev and
+ *   runtime.next -> runtime left no runtime folder, so the service could
+ *   not start at the next logon;
+ * - only then does the control server close and service.json go, which is
+ *   what pause-service waits for before a Repair reinstalls the runtime
+ *   (while the switch runs it says the agent is still stopping), and the
+ *   lock is released.
+ */
+export async function closeSupervisor<C>(deps: {
+  runner: { stop: () => void; current: () => C | null };
+  /** Clear the update timer. */
+  clearUpdates: () => void;
+  terminate: (child: C) => Promise<void>;
+  switches: Pick<RuntimeSwitches, "settled">;
+  closeServer: () => void;
+  removeServiceFile: () => void;
+  /** Release the supervisor lock. */
+  release: () => Promise<void>;
+  /** Schedule the exit (0). */
+  exit: () => void;
+  log: (message: string) => void;
+}): Promise<void> {
+  deps.runner.stop();
+  deps.clearUpdates();
+  const child = deps.runner.current();
+  if (child) await deps.terminate(child);
+  if (!(await deps.switches.settled(SWITCH_SETTLE_MS)))
+    deps.log(
+      `a runtime switch is still running after ${SWITCH_SETTLE_MS / 1000} s; stopping anyway`,
+    );
+  deps.closeServer();
+  deps.removeServiceFile();
+  await deps.release().catch(() => {});
+  deps.exit();
+}
+
 /** End a child: graceful first, forced after 5 s, settled within 7 s. */
 async function terminateChild(target: ChildProcess): Promise<void> {
   if (target.exitCode !== null || target.signalCode !== null) return;
@@ -658,20 +701,30 @@ export async function supervise(home: string): Promise<void> {
     response.end("stopping");
     void stop();
   });
+  // The updater's swap, rollback and restore, counted so a stop lets one in
+  // flight finish (review C1).
+  const switches = new RuntimeSwitches();
   const stop = async () => {
     stopRequested = true;
     if (stopping) return;
     stopping = true;
-    runner.stop();
-    if (updateTimer) clearInterval(updateTimer);
-    server.close();
-    const child = runner.current();
-    if (child) await terminateChild(child);
-    try {
-      unlinkSync(join(home, "service.json"));
-    } catch {}
-    await release().catch(() => {});
-    setTimeout(() => process.exit(0), 1000).unref();
+    await closeSupervisor({
+      runner,
+      clearUpdates: () => {
+        if (updateTimer) clearInterval(updateTimer);
+      },
+      terminate: terminateChild,
+      switches,
+      closeServer: () => server.close(),
+      removeServiceFile: () => {
+        try {
+          unlinkSync(join(home, "service.json"));
+        } catch {}
+      },
+      release: () => release(),
+      exit: () => setTimeout(() => process.exit(0), 1000).unref(),
+      log,
+    });
   };
   process.on("SIGTERM", () => void stop());
   process.on("SIGINT", () => void stop());
@@ -707,9 +760,7 @@ export async function supervise(home: string): Promise<void> {
         exec: nodeExec,
       }),
     hasStaged: () => existsSync(runtimePaths(home).next),
-    swap: () => swapRuntime(home),
-    rollback: () => rollbackRuntime(home),
-    restoreRuntime: () => restoreRuntime(home, currentVersion),
+    ...countedRuntimeSwitches(home, currentVersion, switches),
     removePrevious: () => nodeRuntimeFs.remove(runtimePaths(home).prev),
     removeStaged: () => nodeRuntimeFs.remove(runtimePaths(home).next),
     runtimeCodexVersion: () =>
