@@ -56,6 +56,8 @@ function makeRuntime(dir: string, version: string, codex = "0.154.0") {
   mkdirSync(dirname(runtimeCli(dir)), { recursive: true });
   writeFileSync(runtimeCli(dir), `// ${version}\n`);
   writeJson(join(dir, "node_modules", "@openai", "codex", "package.json"), { version: codex });
+  // npm's hidden lockfile, written once the install is finished.
+  writeJson(join(dir, "node_modules", ".package-lock.json"), { lockfileVersion: 3 });
 }
 
 const EXEC_PATH = "/opt/node/bin/node";

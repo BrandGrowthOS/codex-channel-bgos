@@ -63,12 +63,19 @@ function writeJson(path: string, value: unknown) {
   writeFileSync(path, JSON.stringify(value));
 }
 
+/**
+ * The hidden lockfile npm (7 and later) saves after every package of an
+ * install into a prefix is unpacked: the last thing it writes.
+ */
+const npmLockfile = (dir: string) => join(dir, "node_modules", ".package-lock.json");
+
 /** A runtime folder the way npm --prefix leaves it, with a marker to tell versions apart. */
 function makeRuntime(dir: string, version: string, codex = "0.154.0") {
   writeJson(join(dir, "node_modules", "codex-channel-bgos", "package.json"), { version });
   mkdirSync(dirname(runtimeCli(dir)), { recursive: true });
   writeFileSync(runtimeCli(dir), `// ${version}\n`);
   writeJson(join(dir, "node_modules", "@openai", "codex", "package.json"), { version: codex });
+  writeJson(npmLockfile(dir), { lockfileVersion: 3 });
   writeFileSync(join(dir, "MARKER"), version);
 }
 const marker = (dir: string) => readFileSync(join(dir, "MARKER"), "utf8");
@@ -92,6 +99,8 @@ function fakeExec(opts: {
   installCode?: number;
   probeOut?: (version: string) => string;
   stagedCodex?: string;
+  /** npm exited 0 without its hidden lockfile (it removes one it could not write). */
+  noLockfile?: boolean;
 } = {}) {
   const calls: Array<{ command: string; args: string[] }> = [];
   const exec: Exec = async (command, args) => {
@@ -105,6 +114,7 @@ function fakeExec(opts: {
       }
       const version = args.find((a) => a.startsWith("codex-channel-bgos@"))!.split("@")[1];
       makeRuntime(prefix, version, opts.stagedCodex ?? args.find((a) => a.startsWith("@openai/codex@"))!.split("@")[2]);
+      if (opts.noLockfile) rmSync(npmLockfile(prefix));
       return { code: 0, stdout: "added 120 packages", stderr: "" };
     }
     if (args[1] === "--version") {
@@ -170,6 +180,16 @@ describe("stageRuntime: install into runtime.next with Codex pinned, then probe"
     await expect(
       stageRuntime({ home, version: "0.19.2", execPath: EXEC_PATH, platform: "darwin", exec, fs: fsWithNpm }),
     ).rejects.toThrow("did not start");
+    expect(existsSync(runtimePaths(home).next)).toBe(false);
+  });
+
+  it("review F5: a stage npm left without its hidden lockfile is thrown away, so every runtime swapped in counts as one that can run", async () => {
+    const home = tempHome();
+    makeRuntime(runtimePaths(home).runtime, "0.19.0");
+    const { exec } = fakeExec({ noLockfile: true });
+    await expect(
+      stageRuntime({ home, version: "0.19.2", execPath: EXEC_PATH, platform: "darwin", exec, fs: fsWithNpm }),
+    ).rejects.toThrow("not finished");
     expect(existsSync(runtimePaths(home).next)).toBe(false);
   });
 
@@ -389,6 +409,24 @@ describe("review F5: renames on Windows are retried, and a runtime that could no
     expect(marker(p.prev)).toBe("0.19.0");
     expect(existsSync(join(p.runtime, "MARKER"))).toBe(false);
     // npm wrote the CLI too: the Repair's runtime runs.
+    makeRuntime(p.runtime, "0.19.0");
+    expect(await restore()).toBe(true);
+    expect(marker(p.prev)).toBe("0.19.0");
+  });
+
+  it("review F5: a Repair's runtime is not in place until npm has finished it: cli.js and package.json land long before the Codex binary, and npm writes its hidden lockfile last", async () => {
+    const home = tempHome();
+    const p = runtimePaths(home);
+    makeRuntime(p.prev, "0.19.0");
+    const restore = () => restoreRuntime(home, "0.19.0", nodeRuntimeFs, undefined, POSIX);
+    // The small connector tarball is unpacked; @openai/codex and its
+    // platform binary (some 280 MB) are still downloading.
+    writeJson(join(p.runtime, "node_modules", "codex-channel-bgos", "package.json"), { version: "0.19.0" });
+    mkdirSync(dirname(runtimeCli(p.runtime)), { recursive: true });
+    writeFileSync(runtimeCli(p.runtime), "// 0.19.0\n");
+    expect(await restore()).toBe(false);
+    expect(marker(p.prev)).toBe("0.19.0");
+    // Every package is unpacked and npm saved node_modules/.package-lock.json.
     makeRuntime(p.runtime, "0.19.0");
     expect(await restore()).toBe(true);
     expect(marker(p.prev)).toBe("0.19.0");
@@ -1024,6 +1062,12 @@ describe("SelfUpdater flows", () => {
     // The owner's Repair finds no cli.js, so it skips pause-service, makes
     // the folder and starts npm install into it.
     mkdirSync(p.runtime);
+    expect(await updater.tick()).toBe("runtime_missing");
+    // The connector's own small tarball is unpacked first; the Codex binary
+    // is still downloading.
+    writeJson(join(p.runtime, "node_modules", "codex-channel-bgos", "package.json"), { version: "0.19.0" });
+    mkdirSync(dirname(runtimeCli(p.runtime)), { recursive: true });
+    writeFileSync(runtimeCli(p.runtime), "// 0.19.0\n");
     expect(await updater.tick()).toBe("runtime_missing");
     // No child from a half written runtime (it would crash every 5 s and
     // hold files npm is renaming).

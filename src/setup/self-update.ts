@@ -719,6 +719,38 @@ export const nodeRuntimeFs: RuntimeFs = {
   remove: (path) => rmSync(path, { recursive: true, force: true }),
 };
 
+/**
+ * `<runtime>/node_modules/.package-lock.json`, the hidden lockfile npm (7
+ * and later) saves for an install into a prefix once every package of it is
+ * unpacked (arborist reify): the last thing the install writes.
+ */
+export function runtimeLockfile(runtimeDir: string): string {
+  return join(runtimeDir, "node_modules", ".package-lock.json");
+}
+
+/**
+ * A runtime folder that can run: its cli.js, a version in its package.json,
+ * and npm's hidden lockfile, so an install still in progress is not one
+ * (review F5). npm unpacks every package at once, so the connector's small
+ * tarball (cli.js, package.json) is complete within a second while
+ * @openai/codex and its platform binary (some 280 MB) are still coming;
+ * the lockfile is written only once all of them are in. Every runtime has
+ * one: the desktop setup and stageRuntime both run `npm install --prefix`
+ * (never global) on Node 20 or later, and stageRuntime keeps no stage
+ * without it.
+ */
+export function runtimeCanRun(
+  runtimeDir: string,
+  fs: RuntimeFs = nodeRuntimeFs,
+  read?: (path: string) => string,
+): boolean {
+  return (
+    fs.exists(runtimeCli(runtimeDir)) &&
+    fs.exists(runtimeLockfile(runtimeDir)) &&
+    installedPackageVersion(runtimeDir, PACKAGE_NAME, read) !== null
+  );
+}
+
 /** How long a rename held on Windows is retried (graceful-fs's 60 s). */
 export const RENAME_RETRY_MS = 60 * 1000;
 const RENAME_RETRY_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
@@ -844,11 +876,14 @@ export async function rollbackRuntime(
  * first, then the other of runtime.prev and runtime.failed. True when the
  * runtime folder is in place and can run.
  *
- * A runtime folder that is there but cannot run (no cli.js, or no version
- * in its package.json) is not in place, and nothing is moved onto it: with
- * no cli.js a Repair cannot pause the service, so it makes the folder and
- * npm installs into it. Read as back, the child was relaunched from it every
- * 5 s (MODULE_NOT_FOUND), each start holding files npm was renaming.
+ * A runtime folder that is there but cannot run (runtimeCanRun: no cli.js,
+ * no version in its package.json, or npm not finished with it) is not in
+ * place, and nothing is moved onto it: a Repair from a desktop app older
+ * than its pause through runtime.prev, runtime.failed and runtime.next finds
+ * no cli.js to pause the service with, so it makes the folder and npm
+ * installs into it. Read as back, the child was relaunched from it every
+ * 5 s (MODULE_NOT_FOUND, or a Codex binary still being written), each start
+ * holding files npm was renaming.
  */
 export async function restoreRuntime(
   home: string,
@@ -858,11 +893,7 @@ export async function restoreRuntime(
   retry: RenameRetry = nodeRenameRetry,
 ): Promise<boolean> {
   const { runtime, prev, failed } = runtimePaths(home);
-  if (fs.exists(runtime))
-    return (
-      fs.exists(runtimeCli(runtime)) &&
-      installedPackageVersion(runtime, PACKAGE_NAME, read) !== null
-    );
+  if (fs.exists(runtime)) return runtimeCanRun(runtime, fs, read);
   const holds = (dir: string) =>
     installedPackageVersion(dir, PACKAGE_NAME, read) === version ? 0 : 1;
   const candidates = [prev, failed]
@@ -1052,6 +1083,14 @@ export async function stageRuntime(input: {
   if (install.code !== 0) {
     fs.remove(next);
     throw new Error(`npm could not install ${input.version}: ${tail(install.stderr)}`);
+  }
+  // Every runtime swapped in must be one runtimeCanRun accepts, or a failed
+  // switch later would read it as an install still in progress (review F5).
+  if (!fs.exists(runtimeLockfile(next))) {
+    fs.remove(next);
+    throw new Error(
+      `npm left ${input.version} not finished (no node_modules/.package-lock.json), so nothing was staged.`,
+    );
   }
   const probe = await input.exec(input.execPath, [runtimeCli(next), "--version"], {
     timeoutMs: 60 * 1000,
