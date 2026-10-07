@@ -800,6 +800,15 @@ export async function rollbackRuntime(
   retry: RenameRetry = nodeRenameRetry,
 ): Promise<void> {
   const { runtime, prev, failed } = runtimePaths(home);
+  // A try that could not undo itself left runtime.prev and runtime.failed,
+  // and the restore after it (review F5) could move only runtime.prev back:
+  // that is the rollback, done, and only runtime.failed is left to remove.
+  if (!fs.exists(prev) && fs.exists(failed) && fs.exists(runtime)) {
+    try {
+      fs.remove(failed);
+    } catch {}
+    return;
+  }
   if (!fs.exists(prev)) throw new Error("There is no previous version to return to.");
   const rename = (from: string, to: string) =>
     renameWithRetry(fs.rename, from, to, retry);
@@ -1463,10 +1472,15 @@ export class SelfUpdater {
       // pass tries again; only after ROLLBACK_MAX_ATTEMPTS is the agent let
       // run on what it has.
       const failures = pending.rollbackFailures + 1;
-      // Never given up while there is no runtime folder to run (review F5):
-      // the next try moves runtime.prev into place, which is the rollback.
-      const giveUp =
-        failures >= ROLLBACK_MAX_ATTEMPTS && (await this.runtimeInPlace());
+      // A try whose undo failed too left no runtime folder, and the service
+      // definition runs <home>/runtime/.../cli.js: a logoff, a reboot or a
+      // crash before the next try left nothing to start, until a Repair
+      // (review F5). So the folder is put back now, after every failed try.
+      // restoreRuntime prefers runtime.failed (this supervisor's version),
+      // so the next try is the whole rollback again. And it is never given
+      // up while there is no runtime folder to run.
+      const inPlace = await this.runtimeInPlace();
+      const giveUp = failures >= ROLLBACK_MAX_ATTEMPTS && inPlace;
       s.pendingConfirm = giveUp ? null : { ...pending, rollbackFailures: failures };
       s.lastError = {
         at: new Date(this.deps.now()).toISOString(),

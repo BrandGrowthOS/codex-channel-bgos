@@ -378,6 +378,19 @@ describe("review F5: renames on Windows are retried, and a runtime that could no
     expect(existsSync(p.prev)).toBe(false);
     expect(existsSync(p.failed)).toBe(false);
   });
+
+  it("a rollback tried again after the restore moved runtime.prev in is done: only runtime.failed is left to remove", async () => {
+    const home = tempHome();
+    const p = runtimePaths(home);
+    makeRuntime(p.runtime, "0.19.0");
+    makeRuntime(p.failed, "0.19.2");
+    await rollbackRuntime(home, nodeRuntimeFs, POSIX);
+    expect(marker(p.runtime)).toBe("0.19.0");
+    expect(existsSync(p.failed)).toBe(false);
+    // With neither runtime.prev nor runtime.failed there is nothing to return to.
+    await expect(rollbackRuntime(home, nodeRuntimeFs, POSIX)).rejects.toThrow("no previous version");
+    expect(marker(p.runtime)).toBe("0.19.0");
+  });
 });
 
 describe("fetchLatestVersion", () => {
@@ -914,6 +927,76 @@ describe("SelfUpdater flows", () => {
     expect(await updater.tick()).toBe("rollback_failed");
     expect(readUpdateState(home)!.pendingConfirm).toMatchObject({ rollbackFailures: ROLLBACK_MAX_ATTEMPTS });
     expect(h.deps.resumeChild).not.toHaveBeenCalled();
+  });
+
+  /** A rollback on a real folder, with renames Windows holds while each `held` says so. */
+  function rollbackOnHeldFolder(held: { prev: () => boolean; failed: () => boolean }) {
+    const home = tempHome();
+    const p = runtimePaths(home);
+    makeRuntime(p.runtime, "0.19.2");
+    makeRuntime(p.prev, "0.19.0");
+    writeUpdateState(home, {
+      ...emptyUpdateState(),
+      pendingConfirm: { version: "0.19.2", previousVersion: "0.19.0", appliedAt: iso(T0 - 20_000), boots: 0, rollbackFailures: 0 },
+    });
+    const fs: RuntimeFs = {
+      ...nodeRuntimeFs,
+      rename: (from, to) => {
+        if ((from === p.prev && held.prev()) || (from === p.failed && held.failed()))
+          throw Object.assign(new Error(`EPERM: operation not permitted, rename '${from}'`), { code: "EPERM" });
+        nodeRuntimeFs.rename(from, to);
+      },
+    };
+    const h = harness(home, {
+      currentVersion: "0.19.2",
+      rollback: vi.fn(() => rollbackRuntime(home, fs, POSIX)),
+      restoreRuntime: vi.fn(() => restoreRuntime(home, "0.19.2", fs, undefined, POSIX)),
+    });
+    h.setHeartbeat(null);
+    h.setReply("unavailable");
+    const updater = new SelfUpdater(h.deps);
+    updater.boot();
+    h.setNow(T0 + CONFIRM_WINDOW_MS);
+    return { home, p, h, updater };
+  }
+
+  it("review F5: a rollback try that leaves no runtime folder puts one back before the pass ends, so a logoff before the next try still has a service to start", async () => {
+    let prevHeld = true;
+    let failedHolds = 1;
+    // runtime.prev stays held, and runtime.failed long enough for the
+    // rollback's own undo to fail too.
+    const { home, p, h, updater } = rollbackOnHeldFolder({ prev: () => prevHeld, failed: () => failedHolds-- > 0 });
+    expect(await updater.tick()).toBe("rollback_failed");
+    // The version this supervisor runs is back; the rollback stays owed and
+    // the child stays held.
+    expect(marker(p.runtime)).toBe("0.19.2");
+    expect(marker(p.prev)).toBe("0.19.0");
+    expect(readUpdateState(home)!.pendingConfirm).toMatchObject({ rollbackFailures: 1 });
+    expect(h.deps.resumeChild).not.toHaveBeenCalled();
+    // The next try, with runtime.prev let go, is the whole rollback.
+    prevHeld = false;
+    h.setNow(T0 + CONFIRM_WINDOW_MS + 15_000);
+    expect(await updater.tick()).toBe("rolled_back");
+    expect(marker(p.runtime)).toBe("0.19.0");
+    expect(existsSync(p.prev)).toBe(false);
+    expect(existsSync(p.failed)).toBe(false);
+  });
+
+  it("review F5: a restore that could move only runtime.prev back finished the rollback, and the next try hands over", async () => {
+    let prevHolds = 1;
+    // runtime.prev is held for the rollback's rename and let go for the
+    // restore; runtime.failed stays held, so the undo and the restore's
+    // first choice both fail.
+    const { home, p, h, updater } = rollbackOnHeldFolder({ prev: () => prevHolds-- > 0, failed: () => true });
+    expect(await updater.tick()).toBe("rollback_failed");
+    expect(marker(p.runtime)).toBe("0.19.0");
+    expect(existsSync(p.prev)).toBe(false);
+    h.setNow(T0 + CONFIRM_WINDOW_MS + 15_000);
+    expect(await updater.tick()).toBe("rolled_back");
+    expect(h.events.slice(-1)).toEqual(["restartSupervisor"]);
+    expect(marker(p.runtime)).toBe("0.19.0");
+    expect(existsSync(p.failed)).toBe(false);
+    expect(readUpdateState(home)).toMatchObject({ pendingConfirm: null, rolledBack: ["0.19.2"] });
   });
 
   it("CODEX_BGOS_AUTO_UPDATE=off: no check, no stage, no apply", async () => {
