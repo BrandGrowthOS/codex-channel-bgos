@@ -79,6 +79,16 @@ function makeRuntime(dir: string, version: string, codex = "0.154.0") {
   writeFileSync(join(dir, "MARKER"), version);
 }
 const marker = (dir: string) => readFileSync(join(dir, "MARKER"), "utf8");
+/**
+ * A Repair npm is installing into a new runtime folder: the connector's
+ * own small tarball is in, the Codex binary and the hidden lockfile are not.
+ */
+function repairInstalling(dir: string) {
+  writeJson(join(dir, "node_modules", "codex-channel-bgos", "package.json"), { version: "0.18.0" });
+  mkdirSync(dirname(runtimeCli(dir)), { recursive: true });
+  writeFileSync(runtimeCli(dir), "// 0.18.0\n");
+  writeFileSync(join(dir, "REPAIR"), "npm is writing here");
+}
 /** No retry: a failure stands at once, as it does off Windows. */
 const POSIX: RenameRetry = {
   platform: "darwin",
@@ -454,6 +464,29 @@ describe("review F5: renames on Windows are retried, and a runtime that could no
     // With neither runtime.prev nor runtime.failed there is nothing to return to.
     await expect(rollbackRuntime(home, nodeRuntimeFs, POSIX)).rejects.toThrow("no previous version");
     expect(marker(p.runtime)).toBe("0.19.0");
+  });
+
+  it("review F5: a rollback never moves or removes a runtime folder npm is still installing into, nor the copies beside it", async () => {
+    const home = tempHome();
+    const p = runtimePaths(home);
+    // A try whose undo and restore failed, then a Repair that could not
+    // pause this supervisor made the runtime folder and npm installs into it.
+    makeRuntime(p.prev, "0.19.0");
+    makeRuntime(p.failed, "0.19.2");
+    mkdirSync(p.runtime);
+    writeFileSync(join(p.runtime, "REPAIR"), "npm is writing here");
+    await expect(rollbackRuntime(home, nodeRuntimeFs, POSIX)).rejects.toThrow("being installed");
+    repairInstalling(p.runtime);
+    await expect(rollbackRuntime(home, nodeRuntimeFs, POSIX)).rejects.toThrow("being installed");
+    expect(readFileSync(join(p.runtime, "REPAIR"), "utf8")).toBe("npm is writing here");
+    expect(marker(p.prev)).toBe("0.19.0");
+    expect(marker(p.failed)).toBe("0.19.2");
+    // With runtime.prev already moved in by a restore, runtime.failed (the
+    // last good copy) is not taken for the leftover of a finished rollback.
+    rmSync(p.prev, { recursive: true });
+    await expect(rollbackRuntime(home, nodeRuntimeFs, POSIX)).rejects.toThrow("being installed");
+    expect(readFileSync(join(p.runtime, "REPAIR"), "utf8")).toBe("npm is writing here");
+    expect(marker(p.failed)).toBe("0.19.2");
   });
 
   it("a rollback with only runtime.failed left and no runtime folder is not done: runtime.failed is the last copy, and it stays", async () => {
@@ -1130,6 +1163,39 @@ describe("SelfUpdater flows", () => {
     h.setNow(T0 + CONFIRM_WINDOW_MS);
     return { home, p, h, updater };
   }
+
+  it("review F5: an owed rollback tried while a Repair installs into a new runtime folder leaves that install alone, and is never given up for it", async () => {
+    const home = tempHome();
+    const p = runtimePaths(home);
+    // A try whose undo and restore both failed left no runtime folder; a
+    // Repair from a desktop app that pauses only through runtime/ found no
+    // cli.js there, skipped the pause and npm is installing.
+    makeRuntime(p.prev, "0.19.0");
+    makeRuntime(p.failed, "0.19.2");
+    repairInstalling(p.runtime);
+    writeUpdateState(home, {
+      ...emptyUpdateState(),
+      pendingConfirm: { version: "0.19.2", previousVersion: "0.19.0", appliedAt: iso(T0 - 20_000), boots: 0, rollbackFailures: ROLLBACK_MAX_ATTEMPTS - 1 },
+    });
+    const h = harness(home, {
+      currentVersion: "0.19.2",
+      rollback: vi.fn(() => rollbackRuntime(home, nodeRuntimeFs, POSIX)),
+      restoreRuntime: vi.fn(() => restoreRuntime(home, "0.19.2", nodeRuntimeFs, undefined, POSIX)),
+    });
+    h.setHeartbeat(null);
+    h.setReply("unavailable");
+    const updater = new SelfUpdater(h.deps);
+    updater.boot();
+    h.setNow(T0 + CONFIRM_WINDOW_MS);
+    expect(await updater.tick()).toBe("rollback_failed");
+    expect(readFileSync(join(p.runtime, "REPAIR"), "utf8")).toBe("npm is writing here");
+    expect(marker(p.prev)).toBe("0.19.0");
+    expect(marker(p.failed)).toBe("0.19.2");
+    // Still owed, nothing handed over, and no child from the half install.
+    expect(readUpdateState(home)!.pendingConfirm).toMatchObject({ rollbackFailures: ROLLBACK_MAX_ATTEMPTS });
+    expect(h.deps.restartSupervisor).not.toHaveBeenCalled();
+    expect(h.deps.resumeChild).not.toHaveBeenCalled();
+  });
 
   it("review F5: a rollback try that leaves no runtime folder puts one back before the pass ends, so a logoff before the next try still has a service to start", async () => {
     let prevHeld = true;

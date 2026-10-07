@@ -16,7 +16,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 
@@ -589,11 +589,20 @@ describe("review C1: a stop lets a runtime switch in flight finish before it let
   const SWITCH_HOME = join(tmpdir(), "codex-c1-no-such-home");
   const p = runtimePaths(SWITCH_HOME);
 
-  /** The runtime folders in memory, with renames Windows holds while `held` says so. */
+  /**
+   * The runtime folders in memory, with renames Windows holds while `held`
+   * says so. Each is a whole install (runtimeCanRun): every file asked about
+   * inside one is there, and its package.json names a version.
+   */
   function memoryRuntime(present: string[], held: (from: string) => boolean) {
     const dirs = new Set(present);
+    const inside = (path: string) => [...dirs].some((dir) => path.startsWith(dir + sep));
+    const read = (path: string) => {
+      if (inside(path) && path.endsWith("package.json")) return JSON.stringify({ version: "0.19.0" });
+      throw Object.assign(new Error(`ENOENT: no such file or directory, open '${path}'`), { code: "ENOENT" });
+    };
     const fs: RuntimeFs = {
-      exists: (path) => dirs.has(path),
+      exists: (path) => dirs.has(path) || inside(path),
       rename: (from, to) => {
         if (held(from))
           throw Object.assign(new Error(`EPERM: operation not permitted, rename '${from}'`), {
@@ -607,7 +616,7 @@ describe("review C1: a stop lets a runtime switch in flight finish before it let
       },
       remove: (path) => void dirs.delete(path),
     };
-    return { fs, dirs };
+    return { fs, dirs, read };
   }
   /** The first `n` calls say held (Defender or the indexer on fresh files). */
   const firstTimes = (n: number) => () => n-- > 0;
@@ -645,9 +654,9 @@ describe("review C1: a stop lets a runtime switch in flight finish before it let
   it("a stop while Windows holds runtime.next -> runtime waits for the swap, so <home>/runtime is never left missing", async () => {
     vi.useFakeTimers();
     const held = firstTimes(20);
-    const { fs, dirs } = memoryRuntime([p.runtime, p.next], (from) => from === p.next && held());
+    const { fs, dirs, read } = memoryRuntime([p.runtime, p.next], (from) => from === p.next && held());
     const switches = new RuntimeSwitches();
-    const { swap } = countedRuntimeSwitches(SWITCH_HOME, "0.19.0", switches, fs, windows);
+    const { swap } = countedRuntimeSwitches(SWITCH_HOME, "0.19.0", switches, fs, windows, read);
     const swapped = swap();
     await vi.advanceTimersByTimeAsync(2_000);
     // runtime -> runtime.prev went through and runtime.next -> runtime is
@@ -668,12 +677,12 @@ describe("review C1: a stop lets a runtime switch in flight finish before it let
     vi.useFakeTimers();
     let phase: "swap" | "restore" = "swap";
     const restoreHeld = firstTimes(10);
-    const { fs, dirs } = memoryRuntime(
+    const { fs, dirs, read } = memoryRuntime(
       [p.runtime, p.next],
       (from) => from === p.next || (from === p.prev && (phase === "swap" || restoreHeld())),
     );
     const switches = new RuntimeSwitches();
-    const counted = countedRuntimeSwitches(SWITCH_HOME, "0.19.0", switches, fs, windows);
+    const counted = countedRuntimeSwitches(SWITCH_HOME, "0.19.0", switches, fs, windows, read);
     // SelfUpdater.apply: a swap that throws is followed at once by the restore.
     const applied = counted.swap().then(
       () => true,
@@ -702,9 +711,9 @@ describe("review C1: a stop lets a runtime switch in flight finish before it let
       ["rollback", [p.runtime, p.prev]],
       ["restoreRuntime", [p.prev]],
     ] as const) {
-      const { fs, dirs } = memoryRuntime([...present], firstTimes(10));
+      const { fs, dirs, read } = memoryRuntime([...present], firstTimes(10));
       const switches = new RuntimeSwitches();
-      const running = countedRuntimeSwitches(SWITCH_HOME, "0.19.0", switches, fs, windows)[which]();
+      const running = countedRuntimeSwitches(SWITCH_HOME, "0.19.0", switches, fs, windows, read)[which]();
       let settled: boolean | undefined;
       void switches.settled(SWITCH_SETTLE_MS).then((value) => (settled = value));
       await vi.advanceTimersByTimeAsync(2_000);
@@ -757,7 +766,7 @@ describe("review C1: a stop lets a runtime switch in flight finish before it let
       },
     });
     const held = firstTimes(20);
-    const { fs, dirs } = memoryRuntime([p.runtime, p.prev], (from) => from === p.prev && held());
+    const { fs, dirs, read } = memoryRuntime([p.runtime, p.prev], (from) => from === p.prev && held());
     const switches = new RuntimeSwitches();
     const events: string[] = [];
     let served = false;
@@ -803,7 +812,7 @@ describe("review C1: a stop lets a runtime switch in flight finish before it let
       fetchLatest: async () => "0.19.2",
       stage: async () => {},
       hasStaged: () => false,
-      ...countedRuntimeSwitches(home, "0.19.2", switches, fs, windows),
+      ...countedRuntimeSwitches(home, "0.19.2", switches, fs, windows, read),
       removePrevious: () => {},
       removeStaged: () => {},
       runtimeCodexVersion: () => "0.154.0",

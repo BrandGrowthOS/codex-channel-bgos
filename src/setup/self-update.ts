@@ -831,13 +831,29 @@ export async function swapRuntime(
   }
 }
 
-/** runtime -> runtime.failed (then removed), runtime.prev -> runtime. */
+/**
+ * runtime -> runtime.failed (then removed), runtime.prev -> runtime.
+ *
+ * A runtime folder that is there but cannot run (runtimeCanRun) is an
+ * install in progress, never this supervisor's: a Repair from a desktop app
+ * older than its pause through runtime.prev, runtime.failed and
+ * runtime.next found no cli.js after a try that left no runtime folder,
+ * skipped the pause and npm installs into a new one (review F5). Nothing is
+ * moved or removed then, as restoreRuntime moves nothing onto it: moving
+ * it aside and deleting it left npm writing into the returned version's
+ * tree, and the early return below deleted runtime.failed, the last good
+ * copy. The rollback stays owed until that install is done or the Repair's
+ * install-service stops this supervisor.
+ */
 export async function rollbackRuntime(
   home: string,
   fs: RuntimeFs = nodeRuntimeFs,
   retry: RenameRetry = nodeRenameRetry,
+  read?: (path: string) => string,
 ): Promise<void> {
   const { runtime, prev, failed } = runtimePaths(home);
+  if (fs.exists(runtime) && !runtimeCanRun(runtime, fs, read))
+    throw new Error("A runtime is being installed into the runtime folder; it is left alone.");
   // A try that could not undo itself left runtime.prev and runtime.failed,
   // and the restore after it (review F5) could move only runtime.prev back:
   // that is the rollback, done, and only runtime.failed is left to remove.
@@ -988,12 +1004,13 @@ export function countedRuntimeSwitches(
   switches: RuntimeSwitches,
   fs: RuntimeFs = nodeRuntimeFs,
   retry: RenameRetry = nodeRenameRetry,
+  read?: (path: string) => string,
 ): Pick<SelfUpdaterDeps, "swap" | "rollback" | "restoreRuntime"> {
   return {
     swap: () => switches.run(() => swapRuntime(home, fs, retry)),
-    rollback: () => switches.run(() => rollbackRuntime(home, fs, retry)),
+    rollback: () => switches.run(() => rollbackRuntime(home, fs, retry, read)),
     restoreRuntime: () =>
-      switches.run(() => restoreRuntime(home, version, fs, undefined, retry)),
+      switches.run(() => restoreRuntime(home, version, fs, read, retry)),
   };
 }
 
