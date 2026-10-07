@@ -658,6 +658,32 @@ describe("SelfUpdater flows", () => {
     }
   });
 
+  it("review F4: a stage read while the clock ran hours ahead is read again once the clock is put back, so a release pulled meanwhile is dropped", async () => {
+    const home = tempHome();
+    const h = harness(home, { fetchLatest: vi.fn(async () => "0.20.0") });
+    const corrected = h.now;
+    // The daily check runs while the wall clock is five hours ahead.
+    h.setNow(corrected + 5 * 60 * 60 * 1000);
+    h.setHeartbeat(idleHeartbeat(h.now, { busy: true }));
+    const updater = new SelfUpdater(h.deps);
+    updater.boot();
+    expect(await updater.tick()).toBe("waiting:busy");
+    expect(Date.parse(readUpdateState(home)!.checkedAt!)).toBeGreaterThan(corrected);
+    // The clock is corrected, the maintainers pull 0.20.0, and the agent
+    // goes quiet: the stamp from the future is not a fresh read.
+    h.deps.fetchLatest = vi.fn(async () => "0.19.0");
+    h.setNow(corrected + 15_000);
+    h.setHeartbeat(idleHeartbeat(h.now));
+    expect(await updater.tick()).toBe("checked");
+    expect(h.deps.fetchLatest).toHaveBeenCalledTimes(1);
+    expect(h.deps.swap).not.toHaveBeenCalled();
+    expect(readUpdateState(home)).toMatchObject({
+      latestKnownVersion: "0.19.0",
+      checkedAt: iso(corrected + 15_000),
+      stagedVersion: null,
+    });
+  });
+
   it("review F4: a registry that cannot be read right before the switch makes it wait, and is asked again only after CHECK_RETRY_MS", async () => {
     const home = tempHome();
     const h = harness(home);

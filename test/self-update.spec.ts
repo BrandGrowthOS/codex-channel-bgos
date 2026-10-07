@@ -117,6 +117,11 @@ describe("isLatestFresh: latest read recently enough to switch on (review F4)", 
     expect(isLatestFresh({ checkedAt: iso(NOW) }, NOW + LATEST_FRESH_MS - 1)).toBe(true);
     expect(isLatestFresh({ checkedAt: iso(NOW) }, NOW + LATEST_FRESH_MS)).toBe(false);
   });
+
+  it("a read stamped in the future (the clock was ahead, then stepped back) is not fresh", () => {
+    expect(isLatestFresh({ checkedAt: iso(NOW + 1) }, NOW)).toBe(false);
+    expect(isLatestFresh({ checkedAt: iso(NOW + 5 * LATEST_FRESH_MS) }, NOW)).toBe(false);
+  });
 });
 
 function heartbeat(change: Partial<ChildHeartbeat> = {}): ChildHeartbeat {

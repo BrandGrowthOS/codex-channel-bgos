@@ -256,13 +256,19 @@ export function isCheckDue(
   return nowMs >= startedAtMs + FIRST_CHECK_DELAY_MS;
 }
 
-/** The last read of latest is recent enough to switch on (LATEST_FRESH_MS). */
+/**
+ * The last read of latest is recent enough to switch on (LATEST_FRESH_MS).
+ * A read stamped in the future is not: the wall clock was ahead when it was
+ * taken (an RTC kept in local time, a resumed VM, a late time sync) and has
+ * been put back since, so how old it really is cannot be told, and taking it
+ * as fresh skipped the re-read for as long as the clock was off.
+ */
 export function isLatestFresh(
   state: Pick<UpdateState, "checkedAt">,
   nowMs: number,
 ): boolean {
   const at = Date.parse(state.checkedAt ?? "");
-  return Number.isFinite(at) && nowMs - at < LATEST_FRESH_MS;
+  return Number.isFinite(at) && nowMs >= at && nowMs - at < LATEST_FRESH_MS;
 }
 
 /**
