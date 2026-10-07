@@ -18,15 +18,17 @@
  * moment: the child's heartbeat is fresh, it is connected to BGOS (the new
  * version confirms by connecting, so an offline switch would roll a good
  * release back), no chat is busy and nothing happened for 10 minutes
- * (finding 9: never restart an agent mid job, and never kill a busy child).
- * Applying stops the child through its own idle
- * check, renames runtime to runtime.prev and runtime.next to runtime, and
- * exits 75 so launchd (KeepAlive) or systemd (Restart=on-failure counts 75)
- * start the new supervisor; the Windows Run key restarts nothing, so there
- * the hidden start-agent.vbs successor is spawned first. The new supervisor
- * confirms health (its child connected within 3 minutes) or swaps
- * runtime.prev back, records the version as rolled back and restarts; a
- * rollback that fails stays owed and is tried again (ROLLBACK_MAX_ATTEMPTS).
+ * (finding 9: never restart an agent mid job, and never kill a busy child),
+ * and latest, read again when the last read is an hour old, still names it
+ * (review F4: a pulled release is dropped). Applying stops the child through
+ * its own idle check, renames runtime to runtime.prev and runtime.next to
+ * runtime, and exits 75 so launchd (KeepAlive) or systemd
+ * (Restart=on-failure counts 75) start the new supervisor; the Windows Run
+ * key restarts nothing, so there the hidden start-agent.vbs successor is
+ * spawned first. The new supervisor confirms health (its child connected
+ * within 3 minutes) or swaps runtime.prev back, records the version as
+ * rolled back and restarts; a rollback that fails stays owed and is tried
+ * again (ROLLBACK_MAX_ATTEMPTS).
  *
  * An update that keeps waiting is never forced (decision D6: the owner may
  * decide otherwise, the supervisor never does). update-state.json records
@@ -64,6 +66,14 @@ export const UPDATE_JITTER_MAX_MS = 6 * 60 * 60 * 1000;
 export const FIRST_CHECK_DELAY_MS = 2 * 60 * 1000;
 /** A failed registry read is retried sooner than a day, never in a loop. */
 export const CHECK_RETRY_MS = 60 * 60 * 1000;
+/**
+ * How old the last read of latest may be when a stage is applied (review
+ * F4). The stage is built at the daily check and most reach a safe moment
+ * hours before the next one, so a release pulled in between (latest moved
+ * back) was applied anyway. An older read is read again first; an hour
+ * keeps the registry traffic low while a busy child keeps refusing.
+ */
+export const LATEST_FRESH_MS = 60 * 60 * 1000;
 export const QUIET_WINDOW_MS = 10 * 60 * 1000;
 /** The child writes its heartbeat file every 30 s; three beats of slack. */
 export const HEARTBEAT_FRESH_MS = 90 * 1000;
@@ -244,6 +254,15 @@ export function isCheckDue(
   const at = Date.parse(state.nextCheckAt ?? "");
   if (Number.isFinite(at)) return nowMs >= at;
   return nowMs >= startedAtMs + FIRST_CHECK_DELAY_MS;
+}
+
+/** The last read of latest is recent enough to switch on (LATEST_FRESH_MS). */
+export function isLatestFresh(
+  state: Pick<UpdateState, "checkedAt">,
+  nowMs: number,
+): boolean {
+  const at = Date.parse(state.checkedAt ?? "");
+  return Number.isFinite(at) && nowMs - at < LATEST_FRESH_MS;
 }
 
 /**
@@ -1081,6 +1100,11 @@ export class SelfUpdater {
   private waitNoticed = false;
   /** A switch left no runtime folder; no child runs until it is back. */
   private runtimeLost = false;
+  /**
+   * A read of latest right before a switch failed: the registry is not
+   * asked again for it before this moment (CHECK_RETRY_MS).
+   */
+  private latestRetryAtMs = 0;
 
   constructor(private readonly deps: SelfUpdaterDeps) {
     this.state = readUpdateState(deps.home, deps.read) ?? emptyUpdateState();
@@ -1172,7 +1196,7 @@ export class SelfUpdater {
   }
 
   private async pass(): Promise<string> {
-    const now = this.deps.now();
+    let now = this.deps.now();
     if (this.runtimeLost) {
       if (!(await this.runtimeInPlace())) return "runtime_missing";
       this.runtimeLost = false;
@@ -1185,20 +1209,24 @@ export class SelfUpdater {
     let outcome = "idle";
     if (isCheckDue(this.state, now, this.deps.startedAtMs))
       outcome = await this.checkAndStage(now);
-    const decision = decideApply({
-      enabled: this.deps.enabled,
-      supervised: this.deps.supervised,
-      managedRuntime: this.deps.managedRuntime,
-      stagedVersion: this.state.stagedVersion,
-      latest: this.state.latestKnownVersion,
-      current: this.deps.currentVersion,
-      rolledBack: this.state.rolledBack,
-      safety: decideSafeMoment({
-        heartbeat: this.deps.readHeartbeat(),
-        childPid: this.deps.childPid(),
-        nowMs: now,
-      }),
-    });
+    let decision = this.decideApplyAt(now);
+    // Review F4: latest is read again right before a switch when the last
+    // read is older than LATEST_FRESH_MS, so a release pulled since the stage
+    // was built is dropped instead of applied (and a newer one is staged in
+    // its place). While the registry cannot be read the switch waits, and it
+    // is asked again only after CHECK_RETRY_MS, never every 15 s.
+    if (decision.action === "apply" && !isLatestFresh(this.state, now)) {
+      if (outcome === "check_failed" || now < this.latestRetryAtMs)
+        return this.waiting("latest_unknown", now);
+      outcome = await this.checkAndStage(now);
+      if (outcome === "check_failed") {
+        this.latestRetryAtMs = now + CHECK_RETRY_MS;
+        return this.waiting("latest_unknown", now);
+      }
+      // A newer stage can take npm minutes: the safe moment is read again.
+      now = this.deps.now();
+      decision = this.decideApplyAt(now);
+    }
     if (decision.action === "apply") return this.apply(decision.version, now);
     if (decision.action === "wait") return this.waiting(decision.reason, now);
     // Nothing is left to apply, so nothing waits any more.
@@ -1216,6 +1244,24 @@ export class SelfUpdater {
       this.save();
     }
     return outcome;
+  }
+
+  /** decideApply on the state as it is, with the child's safe moment now. */
+  private decideApplyAt(now: number): ApplyDecision {
+    return decideApply({
+      enabled: this.deps.enabled,
+      supervised: this.deps.supervised,
+      managedRuntime: this.deps.managedRuntime,
+      stagedVersion: this.state.stagedVersion,
+      latest: this.state.latestKnownVersion,
+      current: this.deps.currentVersion,
+      rolledBack: this.state.rolledBack,
+      safety: decideSafeMoment({
+        heartbeat: this.deps.readHeartbeat(),
+        childPid: this.deps.childPid(),
+        nowMs: now,
+      }),
+    });
   }
 
   /**

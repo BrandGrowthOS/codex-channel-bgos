@@ -21,6 +21,7 @@ import {
   CONFIRM_MAX_BOOTS,
   CONFIRM_WINDOW_MS,
   FIRST_CHECK_DELAY_MS,
+  LATEST_FRESH_MS,
   QUIET_WINDOW_MS,
   RENAME_RETRY_MS,
   ROLLBACK_MAX_ATTEMPTS,
@@ -561,6 +562,83 @@ describe("SelfUpdater flows", () => {
       stagedVersion: null,
       pendingConfirm: null,
     });
+  });
+
+  it("review F4: a release pulled hours after it was staged is dropped at the safe moment, not applied", async () => {
+    const home = tempHome();
+    const h = harness(home, { fetchLatest: vi.fn(async () => "0.20.0") });
+    h.setHeartbeat(idleHeartbeat(h.now, { busy: true }));
+    const updater = new SelfUpdater(h.deps);
+    updater.boot();
+    expect(await updater.tick()).toBe("waiting:busy");
+    // Two hours later, a whole day before the next check, the maintainers
+    // pull 0.20.0 by moving latest back, and the agent goes quiet.
+    h.deps.fetchLatest = vi.fn(async () => "0.19.0");
+    h.setNow(h.now + 2 * 60 * 60 * 1000);
+    expect(h.now).toBeLessThan(Date.parse(readUpdateState(home)!.nextCheckAt!));
+    h.setHeartbeat(idleHeartbeat(h.now));
+    expect(await updater.tick()).toBe("checked");
+    expect(h.deps.fetchLatest).toHaveBeenCalledTimes(1);
+    expect(h.deps.requestChildStop).not.toHaveBeenCalled();
+    expect(h.deps.swap).not.toHaveBeenCalled();
+    expect(h.events).toEqual(["stage:0.20.0", "removeStaged"]);
+    expect(readUpdateState(home)).toMatchObject({
+      latestKnownVersion: "0.19.0",
+      stagedVersion: null,
+      waitingReason: null,
+      pendingConfirm: null,
+    });
+  });
+
+  it("review F4: latest read within the hour is trusted; an older read is read again and still applies while latest names the stage", async () => {
+    expect(LATEST_FRESH_MS).toBe(60 * 60 * 1000);
+    for (const [after, reads] of [
+      [LATEST_FRESH_MS - 1, 1],
+      [LATEST_FRESH_MS, 2],
+    ] as const) {
+      const home = tempHome();
+      const h = harness(home);
+      h.setHeartbeat(idleHeartbeat(h.now, { busy: true }));
+      const updater = new SelfUpdater(h.deps);
+      updater.boot();
+      expect(await updater.tick()).toBe("waiting:busy");
+      h.setNow(h.now + after);
+      h.setHeartbeat(idleHeartbeat(h.now));
+      expect(await updater.tick(), String(after)).toBe("applied");
+      expect(h.deps.fetchLatest, String(after)).toHaveBeenCalledTimes(reads);
+    }
+  });
+
+  it("review F4: a registry that cannot be read right before the switch makes it wait, and is asked again only after CHECK_RETRY_MS", async () => {
+    const home = tempHome();
+    const h = harness(home);
+    h.setHeartbeat(idleHeartbeat(h.now, { busy: true }));
+    const updater = new SelfUpdater(h.deps);
+    updater.boot();
+    expect(await updater.tick()).toBe("waiting:busy");
+    h.deps.fetchLatest = vi.fn(async () => {
+      throw new Error("ENOTFOUND registry.npmjs.org");
+    });
+    const at = (ms: number) => {
+      h.setNow(ms);
+      h.setHeartbeat(idleHeartbeat(ms));
+    };
+    const failedAt = h.now + 2 * 60 * 60 * 1000;
+    at(failedAt);
+    expect(await updater.tick()).toBe("waiting:latest_unknown");
+    at(failedAt + 15_000);
+    expect(await updater.tick()).toBe("waiting:latest_unknown");
+    at(failedAt + CHECK_RETRY_MS - 1);
+    expect(await updater.tick()).toBe("waiting:latest_unknown");
+    expect(h.deps.fetchLatest).toHaveBeenCalledTimes(1);
+    expect(h.deps.requestChildStop).not.toHaveBeenCalled();
+    expect(h.deps.swap).not.toHaveBeenCalled();
+    expect(readUpdateState(home)).toMatchObject({ stagedVersion: "0.19.2", waitingReason: "latest_unknown" });
+    // An hour on the registry answers again and still names the stage.
+    h.deps.fetchLatest = vi.fn(async () => "0.19.2");
+    at(failedAt + CHECK_RETRY_MS);
+    expect(await updater.tick()).toBe("applied");
+    expect(h.deps.fetchLatest).toHaveBeenCalledTimes(1);
   });
 
   it("D6: a waiting update records since when, and after 24 h says so once; it is never forced", async () => {

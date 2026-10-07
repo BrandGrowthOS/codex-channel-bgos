@@ -12,6 +12,7 @@ import {
   CONFIRM_WINDOW_MS,
   FIRST_CHECK_DELAY_MS,
   HEARTBEAT_FRESH_MS,
+  LATEST_FRESH_MS,
   QUIET_WINDOW_MS,
   UPDATE_CHECK_INTERVAL_MS,
   UPDATE_JITTER_MAX_MS,
@@ -23,6 +24,7 @@ import {
   decideUpdate,
   emptyUpdateState,
   isCheckDue,
+  isLatestFresh,
   nextCheckAt,
   npmCliCandidates,
   npmCliPath,
@@ -104,6 +106,16 @@ describe("check schedule: every 24 h plus up to 6 h jitter", () => {
     // A reboot does not reset the schedule into a fresh check.
     state.nextCheckAt = iso(NOW + UPDATE_CHECK_INTERVAL_MS);
     expect(isCheckDue(state, NOW + FIRST_CHECK_DELAY_MS, NOW)).toBe(false);
+  });
+});
+
+describe("isLatestFresh: latest read recently enough to switch on (review F4)", () => {
+  it("is fresh for LATEST_FRESH_MS after a read, and never without one", () => {
+    expect(isLatestFresh({ checkedAt: null }, NOW)).toBe(false);
+    expect(isLatestFresh({ checkedAt: "not a date" }, NOW)).toBe(false);
+    expect(isLatestFresh({ checkedAt: iso(NOW) }, NOW)).toBe(true);
+    expect(isLatestFresh({ checkedAt: iso(NOW) }, NOW + LATEST_FRESH_MS - 1)).toBe(true);
+    expect(isLatestFresh({ checkedAt: iso(NOW) }, NOW + LATEST_FRESH_MS)).toBe(false);
   });
 });
 
