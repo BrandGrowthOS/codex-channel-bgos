@@ -186,13 +186,10 @@ interface Pending {
  * (test/publish-workflow.spec.ts). Retiring the hold is an edit of those lines
  * and of that list, never a reword of the paragraph above them.
  *
- * HELD-FROM-LATEST: 0.10.1
- * HELD-FROM-LATEST: 0.11.0
- * HELD-FROM-LATEST: 0.12.0
- * HELD-FROM-LATEST: 0.13.0
- * HELD-FROM-LATEST: 0.14.0
- * HELD-FROM-LATEST: 0.15.0
- * HELD-FROM-LATEST: 0.18.0
+ * RETIRED 2026-10-07: 0.19.0 was promoted to latest once both of its reasons
+ * were met (BGOS #2014). Every older marker named a version already
+ * published, which npm can never republish, so the lists are empty rather than
+ * carrying dead entries. A future hold adds its line here and in the list.
  */
 export const APPROVAL_HOLD_SECONDS = 1800;
 
