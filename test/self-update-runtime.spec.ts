@@ -25,8 +25,10 @@ import {
   QUIET_WINDOW_MS,
   RENAME_RETRY_MS,
   ROLLBACK_MAX_ATTEMPTS,
+  RuntimeSwitches,
   SelfUpdater,
   UPDATE_WAIT_NOTICE_MS,
+  countedRuntimeSwitches,
   fetchLatestVersion,
   nodeRuntimeFs,
   npmCliPath,
@@ -498,6 +500,44 @@ describe("review F5: renames on Windows are retried, and a runtime that could no
     // The restore after the failed try can still put it back.
     expect(marker(p.failed)).toBe("0.19.2");
     expect(existsSync(p.runtime)).toBe(false);
+  });
+
+  it("review F5: a stale runtime.failed beside runtime and runtime.prev is not a finished rollback: the whole rollback runs", async () => {
+    const home = tempHome();
+    const p = runtimePaths(home);
+    // An earlier rollback could not remove its runtime.failed (Windows held
+    // a file there), and a later update then moved runtime to runtime.prev.
+    makeRuntime(p.runtime, "0.19.2");
+    makeRuntime(p.prev, "0.19.0");
+    makeRuntime(p.failed, "0.18.0");
+    expect(rollbackFinished(home)).toBe(false);
+    await rollbackRuntime(home, nodeRuntimeFs, POSIX);
+    expect(marker(p.runtime)).toBe("0.19.0");
+    expect(existsSync(p.prev)).toBe(false);
+    expect(existsSync(p.failed)).toBe(false);
+  });
+
+  it("review F5: the updater's rollbackFinished, as countedRuntimeSwitches wires it, reads the folders the rollback renames", () => {
+    const home = tempHome();
+    const p = runtimePaths(home);
+    const { rollbackFinished: finished } = countedRuntimeSwitches(
+      home,
+      "0.19.2",
+      new RuntimeSwitches(),
+      nodeRuntimeFs,
+      POSIX,
+    );
+    // A restore that could move only runtime.prev back.
+    makeRuntime(p.runtime, "0.19.0");
+    makeRuntime(p.failed, "0.19.2");
+    expect(finished()).toBe(true);
+    // runtime.prev still there: the rollback has not happened.
+    makeRuntime(p.prev, "0.19.0");
+    expect(finished()).toBe(false);
+    // A runtime folder npm has not finished is not one that runs.
+    rmSync(p.prev, { recursive: true });
+    rmSync(npmLockfile(p.runtime));
+    expect(finished()).toBe(false);
   });
 });
 
