@@ -36,12 +36,16 @@ import {
   supervisorUpdateControls,
 } from "../src/setup/background-service.js";
 import {
+  CONFIRM_MAX_BOOTS,
   RENAME_RETRY_MS,
   RuntimeSwitches,
   SWITCH_SETTLE_MS,
+  SelfUpdater,
   UPDATE_TICK_MS,
   countedRuntimeSwitches,
+  emptyUpdateState,
   runtimePaths,
+  writeUpdateState,
   type RenameRetry,
   type RuntimeFs,
 } from "../src/setup/self-update.js";
@@ -434,7 +438,7 @@ describe("supervisorUpdateControls: how the updater reaches the child and hands 
   });
 });
 
-describe("startSelfUpdate: boot, an owed rollback, serve, launch, then a pass every 15 s", () => {
+describe("startSelfUpdate: boot, serve, an owed rollback, launch, then a pass every 15 s", () => {
   function setup(
     tick: () => Promise<string>,
     opts: {
@@ -478,7 +482,7 @@ describe("startSelfUpdate: boot, an owed rollback, serve, launch, then a pass ev
   it("claims the update state before the child starts (the child reports only its own supervisor's state)", async () => {
     const { events, timer } = setup(async () => "idle");
     expect(await timer).toBe("timer-1");
-    expect(events).toEqual(["boot", "rollBackBeforeStart", "serve", "launch"]);
+    expect(events).toEqual(["boot", "serve", "rollBackBeforeStart", "launch"]);
   });
 
   it("review F10: the boot is counted before anything of this version can throw (the control server, service.json)", async () => {
@@ -490,16 +494,60 @@ describe("startSelfUpdate: boot, an owed rollback, serve, launch, then a pass ev
     await expect(timer).rejects.toThrow("control socket");
     // Counted, so a release that dies here on every start still reaches
     // CONFIRM_MAX_BOOTS and is rolled back by a later start.
-    expect(events).toEqual(["boot", "rollBackBeforeStart", "serve"]);
+    expect(events).toEqual(["boot", "serve"]);
   });
 
-  it("review F10: an owed rollback runs before the control server and the child, and then nothing else starts", async () => {
+  it("review F10: an owed rollback runs before the child, and then nothing else starts", async () => {
     const { events, intervals, timer } = setup(async () => "idle", {
       rolledBackBeforeStart: true,
     });
     expect(await timer).toBeNull();
-    expect(events).toEqual(["boot", "rollBackBeforeStart"]);
+    expect(events).toEqual(["boot", "serve", "rollBackBeforeStart"]);
     expect(intervals).toEqual([]);
+  });
+
+  it("review F10 window: the control server and service.json are up before an owed rollback, so a Repair's pause-service can stop it", async () => {
+    // On Windows a Repair's pause-service has no service manager to signal:
+    // it reaches the supervisor only through service.json and POST /stop.
+    // A rollback running before them found no instance, so the Repair
+    // installed into the folder the rollback was renaming, and the rollback
+    // then handed over to a successor on top of it.
+    let served = false;
+    let servedAtRollback: boolean | undefined;
+    const timer = startSelfUpdate({
+      updater: {
+        boot: () => {},
+        rollBackBeforeStart: async () => {
+          servedAtRollback = served;
+          return true;
+        },
+        rollbackDue: true,
+        tick: async () => "idle",
+      },
+      runner: { launch: () => {} },
+      serve: async () => {
+        served = true;
+      },
+      log: () => {},
+      every: () => "timer-1",
+    });
+    expect(await timer).toBeNull();
+    expect(servedAtRollback).toBe(true);
+  });
+
+  it("review F10: a control server that cannot open never keeps an owed rollback from running", async () => {
+    const { events, log, timer } = setup(async () => "idle", {
+      rollbackDue: true,
+      rolledBackBeforeStart: true,
+      serve: async () => {
+        throw new Error("Background control socket failed.");
+      },
+    });
+    expect(await timer).toBeNull();
+    expect(events).toEqual(["boot", "serve", "rollBackBeforeStart"]);
+    expect(log).toHaveBeenCalledWith(
+      "control server not started (Background control socket failed.); the owed rollback runs anyway",
+    );
   });
 
   it("review F3: a rollback still owed after a failed try keeps the child down; the passes retry it", async () => {
@@ -507,7 +555,7 @@ describe("startSelfUpdate: boot, an owed rollback, serve, launch, then a pass ev
       rollbackDue: true,
     });
     expect(await timer).toBe("timer-1");
-    expect(events).toEqual(["boot", "rollBackBeforeStart", "serve"]);
+    expect(events).toEqual(["boot", "serve", "rollBackBeforeStart"]);
     expect(intervals.map((i) => i.ms)).toEqual([UPDATE_TICK_MS]);
   });
 
@@ -518,7 +566,7 @@ describe("startSelfUpdate: boot, an owed rollback, serve, launch, then a pass ev
     expect(UPDATE_TICK_MS).toBe(15_000);
     intervals[0].fn();
     intervals[0].fn();
-    expect(events).toEqual(["boot", "rollBackBeforeStart", "serve", "launch", "tick", "tick"]);
+    expect(events).toEqual(["boot", "serve", "rollBackBeforeStart", "launch", "tick", "tick"]);
   });
 
   it("a pass that throws is logged, never an unhandled rejection that ends the supervisor", async () => {
@@ -691,5 +739,113 @@ describe("review C1: a stop lets a runtime switch in flight finish before it let
     const { events, stopped } = stopDuring(new RuntimeSwitches(), () => true, { pid: 1000 });
     await stopped;
     expect(events).toEqual(["runner stopped", "updates cleared", "terminate:1000", ...TORN_DOWN]);
+  });
+
+  it("review F10 window: a Repair during the rollback before start reaches the supervisor, which finishes the rollback and hands over to no one", async () => {
+    vi.useFakeTimers();
+    const home = temp();
+    const p = runtimePaths(home);
+    // A new version that never confirmed: this start owes the rollback.
+    writeUpdateState(home, {
+      ...emptyUpdateState(),
+      pendingConfirm: {
+        version: "0.19.2",
+        previousVersion: "0.19.0",
+        appliedAt: new Date().toISOString(),
+        boots: CONFIRM_MAX_BOOTS,
+        rollbackFailures: 0,
+      },
+    });
+    const held = firstTimes(20);
+    const { fs, dirs } = memoryRuntime([p.runtime, p.prev], (from) => from === p.prev && held());
+    const switches = new RuntimeSwitches();
+    const events: string[] = [];
+    let served = false;
+    let stopRequested = false;
+    const runner = {
+      current: () => null,
+      hold: () => {},
+      resume: () => void events.push("resume"),
+      launch: () => void events.push("launch"),
+      stop: () => void events.push("runner stopped"),
+    };
+    // A Windows Repair's pause-service (stopService): POST /stop when
+    // service.json answers, else no reachable instance and nothing to wait for.
+    let stopped: Promise<void> | undefined;
+    const pauseService = () => {
+      if (!served) return;
+      stopRequested = true;
+      stopped = closeSupervisor({
+        runner,
+        clearUpdates: () => {},
+        terminate: async () => {},
+        switches,
+        closeServer: () => void events.push("server closed"),
+        removeServiceFile: () =>
+          void events.push(
+            dirs.has(p.runtime) ? "service.json removed, runtime in place" : "service.json removed, NO runtime",
+          ),
+        release: async () => {},
+        exit: () => void events.push("exit"),
+        log: () => {},
+      });
+    };
+    const updater = new SelfUpdater({
+      home,
+      currentVersion: "0.19.2",
+      supervised: "supervise-npm",
+      enabled: true,
+      managedRuntime: true,
+      supervisorPid: 900,
+      startedAtMs: Date.now(),
+      now: () => Date.now(),
+      random: () => 0,
+      fetchLatest: async () => "0.19.2",
+      stage: async () => {},
+      hasStaged: () => false,
+      ...countedRuntimeSwitches(home, "0.19.2", switches, fs, windows),
+      removePrevious: () => {},
+      removeStaged: () => {},
+      runtimeCodexVersion: () => "0.154.0",
+      readHeartbeat: () => null,
+      ...supervisorUpdateControls<{ pid?: number }>({
+        runner,
+        askToStop: async () => "unavailable",
+        waitForExit: async () => true,
+        terminate: async () => {},
+        closeDown: () => void events.push("closeDown"),
+        release: async () => {},
+        handOver: () => void events.push("handOver"),
+        stopRequested: () => stopRequested,
+      }),
+      log: () => {},
+    });
+    const started = startSelfUpdate({
+      updater,
+      runner,
+      serve: async () => {
+        served = true;
+      },
+      log: () => {},
+      every: () => "timer-1",
+    });
+    await vi.advanceTimersByTimeAsync(2_000);
+    // runtime -> runtime.failed went through and runtime.prev -> runtime is
+    // held when the owner clicks Repair (the agent shows offline).
+    expect(dirs.has(p.runtime)).toBe(false);
+    pauseService();
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(await started).toBeNull();
+    await stopped;
+    // The stop waited for the rollback, then let go; no successor was
+    // started on the runtime the Repair is about to reinstall.
+    expect(events).toEqual([
+      "runner stopped",
+      "closeDown",
+      "server closed",
+      "service.json removed, runtime in place",
+      "exit",
+    ]);
+    expect(dirs).toEqual(new Set([p.runtime]));
   });
 });

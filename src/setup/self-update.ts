@@ -1106,14 +1106,15 @@ export class SelfUpdater {
   }
 
   /**
-   * Review F10. Run right after boot(), which supervise calls as soon as it
-   * holds the lock, before the control server, service.json or the child: a
-   * new version whose supervisor dies anywhere after that still had its boot
+   * Review F10. boot() runs as soon as supervise holds the lock, so a new
+   * version whose supervisor dies anywhere after that still had its boot
    * counted, and the start that finds CONFIRM_MAX_BOOTS exceeded rolls it
-   * back here, before running anything else of it. No child runs yet, so
-   * nothing is asked or stopped. True when it rolled back and handed over;
-   * false when nothing was owed or the rollback failed and stays owed (the
-   * child then stays down and the passes retry it).
+   * back here, before its child runs. The control server and service.json
+   * are up first, so a Repair's stop reaches a rollback in flight
+   * (startSelfUpdate). No child runs yet, so nothing is asked or stopped.
+   * True when it rolled back and handed over; false when nothing was owed,
+   * the supervisor was asked to stop, or the rollback failed and stays owed
+   * (the child then stays down and the passes retry it).
    */
   async rollBackBeforeStart(): Promise<boolean> {
     const pending = this.state.pendingConfirm;

@@ -510,9 +510,17 @@ export function supervisorUpdateControls<C extends { pid?: number }>(deps: {
  *   starts (the child reports only its own supervisor's state) and counts a
  *   boot of an applied version. It runs first, right after the lock, so a
  *   new version that dies anywhere later still has its boots counted;
- * - an owed rollback runs before anything else of this version (the control
- *   server, service.json, the child); when it hands over, nothing starts;
- * - `serve` opens the control server and writes service.json;
+ * - `serve` opens the control server and writes service.json BEFORE an owed
+ *   rollback renames anything. On Windows a Repair's pause-service has no
+ *   service manager to signal and reaches the supervisor only through
+ *   service.json and POST /stop; a rollback running before them found no
+ *   instance, so the Repair installed into the folder being renamed and the
+ *   rollback then handed over on top of it. With the server up, the stop
+ *   waits for the rollback (review C1) and nothing hands over (review F9).
+ *   A control server that cannot open never keeps an owed rollback from
+ *   running: that is logged and the rollback goes on;
+ * - an owed rollback runs before the child; when it hands over, nothing
+ *   else starts;
  * - the child is launched unless a rollback is still owed (it failed and
  *   the passes retry it, with the child down);
  * - then a pass every UPDATE_TICK_MS. A pass that throws is logged: an
@@ -533,8 +541,15 @@ export async function startSelfUpdate<T>(deps: {
   every: (fn: () => void, ms: number) => T;
 }): Promise<T | null> {
   deps.updater.boot();
+  try {
+    await deps.serve();
+  } catch (error) {
+    if (!deps.updater.rollbackDue) throw error;
+    deps.log(
+      `control server not started (${error instanceof Error ? error.message : String(error)}); the owed rollback runs anyway`,
+    );
+  }
   if (await deps.updater.rollBackBeforeStart()) return null;
-  await deps.serve();
   if (!deps.updater.rollbackDue) deps.runner.launch();
   return deps.every(() => {
     void deps.updater.tick().catch((error) =>
