@@ -836,7 +836,13 @@ export async function rollbackRuntime(
  * it the child exits every 5 s and, after a reboot, the service cannot start
  * at all. The folder holding `version` (the one this supervisor runs) comes
  * first, then the other of runtime.prev and runtime.failed. True when the
- * runtime folder is in place.
+ * runtime folder is in place and can run.
+ *
+ * A runtime folder that is there but cannot run (no cli.js, or no version
+ * in its package.json) is not in place, and nothing is moved onto it: with
+ * no cli.js a Repair cannot pause the service, so it makes the folder and
+ * npm installs into it. Read as back, the child was relaunched from it every
+ * 5 s (MODULE_NOT_FOUND), each start holding files npm was renaming.
  */
 export async function restoreRuntime(
   home: string,
@@ -846,7 +852,11 @@ export async function restoreRuntime(
   retry: RenameRetry = nodeRenameRetry,
 ): Promise<boolean> {
   const { runtime, prev, failed } = runtimePaths(home);
-  if (fs.exists(runtime)) return true;
+  if (fs.exists(runtime))
+    return (
+      fs.exists(runtimeCli(runtime)) &&
+      installedPackageVersion(runtime, PACKAGE_NAME, read) !== null
+    );
   const holds = (dir: string) =>
     installedPackageVersion(dir, PACKAGE_NAME, read) === version ? 0 : 1;
   const candidates = [prev, failed]
@@ -1075,7 +1085,10 @@ export interface SelfUpdaterDeps {
   hasStaged: () => boolean;
   swap: () => void | Promise<void>;
   rollback: () => void | Promise<void>;
-  /** restoreRuntime: true when `<home>/runtime` is in place (review F5). */
+  /**
+   * restoreRuntime: true when `<home>/runtime` is in place and can run
+   * (review F5).
+   */
   restoreRuntime: () => Promise<boolean>;
   removePrevious: () => void;
   /** Remove runtime.next (a stage that will never be applied). */

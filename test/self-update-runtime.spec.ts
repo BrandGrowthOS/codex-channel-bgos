@@ -368,6 +368,32 @@ describe("review F5: renames on Windows are retried, and a runtime that could no
     expect(marker(p.runtime)).toBe("0.19.2");
   });
 
+  it("restoreRuntime counts a runtime folder as in place only when it can run, and moves nothing onto one that cannot", async () => {
+    const home = tempHome();
+    const p = runtimePaths(home);
+    makeRuntime(p.prev, "0.19.0");
+    // A Repair found no cli.js to pause the service with, made the folder
+    // and is installing into it.
+    const restore = () => restoreRuntime(home, "0.19.0", nodeRuntimeFs, undefined, POSIX);
+    const pkg = join(p.runtime, "node_modules", "codex-channel-bgos", "package.json");
+    mkdirSync(p.runtime);
+    expect(await restore()).toBe(false);
+    // Its package.json, and no cli.js yet.
+    writeJson(pkg, { version: "0.19.0" });
+    expect(await restore()).toBe(false);
+    // Its cli.js, and a package.json npm is still writing.
+    mkdirSync(dirname(runtimeCli(p.runtime)), { recursive: true });
+    writeFileSync(runtimeCli(p.runtime), "// 0.19.0\n");
+    writeFileSync(pkg, "{");
+    expect(await restore()).toBe(false);
+    expect(marker(p.prev)).toBe("0.19.0");
+    expect(existsSync(join(p.runtime, "MARKER"))).toBe(false);
+    // npm wrote the CLI too: the Repair's runtime runs.
+    makeRuntime(p.runtime, "0.19.0");
+    expect(await restore()).toBe(true);
+    expect(marker(p.prev)).toBe("0.19.0");
+  });
+
   it("a rollback tried again after its undo failed finishes it: runtime.prev is all that is left to move", async () => {
     const home = tempHome();
     const p = runtimePaths(home);
@@ -905,6 +931,41 @@ describe("SelfUpdater flows", () => {
     // The next pass puts it back first, then the agent runs again.
     expect(await updater.tick()).toBe("runtime_restored");
     expect(h.events.slice(-2)).toEqual(["restore:true", "resume"]);
+  });
+
+  it("review F5: a lost runtime is not taken as back while a Repair is still installing into a new runtime folder", async () => {
+    const home = tempHome();
+    const p = runtimePaths(home);
+    // A swap whose undo failed: runtime.prev holds the running version and
+    // stays held, so the restore cannot move it back either.
+    makeRuntime(p.prev, "0.19.0");
+    const stuck: RuntimeFs = {
+      ...nodeRuntimeFs,
+      rename: () => {
+        throw Object.assign(new Error("EPERM: operation not permitted, rename"), { code: "EPERM" });
+      },
+    };
+    const h = harness(home, {
+      swap: vi.fn(() => {
+        throw new Error("EPERM: operation not permitted, rename 'runtime.next'");
+      }),
+      restoreRuntime: vi.fn(() => restoreRuntime(home, "0.19.0", stuck, undefined, POSIX)),
+    });
+    const updater = new SelfUpdater(h.deps);
+    updater.boot();
+    expect(await updater.tick()).toBe("apply_failed");
+    expect(await updater.tick()).toBe("runtime_missing");
+    // The owner's Repair finds no cli.js, so it skips pause-service, makes
+    // the folder and starts npm install into it.
+    mkdirSync(p.runtime);
+    expect(await updater.tick()).toBe("runtime_missing");
+    // No child from a half written runtime (it would crash every 5 s and
+    // hold files npm is renaming).
+    expect(h.deps.resumeChild).not.toHaveBeenCalled();
+    // npm is done: the runtime runs, and so does the agent.
+    makeRuntime(p.runtime, "0.19.0");
+    expect(await updater.tick()).toBe("runtime_restored");
+    expect(h.deps.resumeChild).toHaveBeenCalledTimes(1);
   });
 
   it("review F5: a rollback is never given up while there is no runtime to run", async () => {
