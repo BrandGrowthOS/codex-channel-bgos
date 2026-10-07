@@ -832,6 +832,21 @@ export async function swapRuntime(
 }
 
 /**
+ * The folders of a rollback that is done but for removing runtime.failed:
+ * no runtime.prev, a runtime.failed, and a runtime folder that can run. A
+ * try that could not undo itself, then a restore that could move only
+ * runtime.prev back (review F5), leaves exactly this.
+ */
+export function rollbackFinished(
+  home: string,
+  fs: RuntimeFs = nodeRuntimeFs,
+  read?: (path: string) => string,
+): boolean {
+  const { runtime, prev, failed } = runtimePaths(home);
+  return !fs.exists(prev) && fs.exists(failed) && runtimeCanRun(runtime, fs, read);
+}
+
+/**
  * runtime -> runtime.failed (then removed), runtime.prev -> runtime.
  *
  * A runtime folder that is there but cannot run (runtimeCanRun) is an
@@ -857,7 +872,7 @@ export async function rollbackRuntime(
   // A try that could not undo itself left runtime.prev and runtime.failed,
   // and the restore after it (review F5) could move only runtime.prev back:
   // that is the rollback, done, and only runtime.failed is left to remove.
-  if (!fs.exists(prev) && fs.exists(failed) && fs.exists(runtime)) {
+  if (rollbackFinished(home, fs, read)) {
     try {
       fs.remove(failed);
     } catch {}
@@ -996,7 +1011,8 @@ export class RuntimeSwitches {
 
 /**
  * The updater's swap, rollback and restore, each counted in `switches`
- * while it runs, so a stop waits for it (review C1).
+ * while it runs, so a stop waits for it (review C1), and rollbackFinished
+ * on the same folders, a read that renames nothing.
  */
 export function countedRuntimeSwitches(
   home: string,
@@ -1005,12 +1021,16 @@ export function countedRuntimeSwitches(
   fs: RuntimeFs = nodeRuntimeFs,
   retry: RenameRetry = nodeRenameRetry,
   read?: (path: string) => string,
-): Pick<SelfUpdaterDeps, "swap" | "rollback" | "restoreRuntime"> {
+): Pick<
+  SelfUpdaterDeps,
+  "swap" | "rollback" | "restoreRuntime" | "rollbackFinished"
+> {
   return {
     swap: () => switches.run(() => swapRuntime(home, fs, retry)),
     rollback: () => switches.run(() => rollbackRuntime(home, fs, retry, read)),
     restoreRuntime: () =>
       switches.run(() => restoreRuntime(home, version, fs, read, retry)),
+    rollbackFinished: () => rollbackFinished(home, fs, read),
   };
 }
 
@@ -1152,6 +1172,11 @@ export interface SelfUpdaterDeps {
    * (review F5).
    */
   restoreRuntime: () => Promise<boolean>;
+  /**
+   * rollbackFinished: the folders show runtime.prev back in place, with
+   * only runtime.failed left to remove (review F5).
+   */
+  rollbackFinished: () => boolean;
   removePrevious: () => void;
   /** Remove runtime.next (a stage that will never be applied). */
   removeStaged: () => void;
@@ -1557,7 +1582,13 @@ export class SelfUpdater {
       // so the next try is the whole rollback again. And it is never given
       // up while there is no runtime folder to run.
       const inPlace = await this.runtimeInPlace();
-      const giveUp = failures >= ROLLBACK_MAX_ATTEMPTS && inPlace;
+      // A restore that could move only runtime.prev back finished the
+      // rollback, and the next try just removes runtime.failed and hands
+      // over, as it does on every earlier attempt. Given up here instead,
+      // the returned version ran under this supervisor with no hand over and
+      // runtime.failed was left (review F5): never given up in that state.
+      const giveUp =
+        failures >= ROLLBACK_MAX_ATTEMPTS && inPlace && !this.rollbackFinished();
       s.pendingConfirm = giveUp ? null : { ...pending, rollbackFailures: failures };
       s.lastError = {
         at: new Date(this.deps.now()).toISOString(),
@@ -1579,6 +1610,15 @@ export class SelfUpdater {
     this.deps.log(s.lastError.message);
     await this.deps.restartSupervisor();
     return "rolled_back";
+  }
+
+  /** rollbackFinished, where a dep that throws reads as "not finished". */
+  private rollbackFinished(): boolean {
+    try {
+      return this.deps.rollbackFinished();
+    } catch {
+      return false;
+    }
   }
 
   /** restoreRuntime, where a dep that throws reads as "not in place". */

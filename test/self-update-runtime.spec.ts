@@ -33,6 +33,7 @@ import {
   readUpdateState,
   renameWithRetry,
   restoreRuntime,
+  rollbackFinished,
   rollbackRuntime,
   runtimeCli,
   runtimePaths,
@@ -564,6 +565,7 @@ function harness(home: string, change: Partial<SelfUpdaterDeps> = {}) {
     runtimeCodexVersion: () => "0.154.0",
     stopRequested: () => false,
     restoreRuntime: vi.fn(async () => true),
+    rollbackFinished: () => false,
     readHeartbeat: () => heartbeat,
     childPid: () => 4242,
     requestChildStop: vi.fn(async () => {
@@ -1133,15 +1135,18 @@ describe("SelfUpdater flows", () => {
     expect(h.deps.resumeChild).not.toHaveBeenCalled();
   });
 
-  /** A rollback on a real folder, with renames Windows holds while each `held` says so. */
-  function rollbackOnHeldFolder(held: { prev: () => boolean; failed: () => boolean }) {
+  /**
+   * A rollback on a real folder, with renames Windows holds while each
+   * `held` says so, after `rollbackFailures` tries that failed already.
+   */
+  function rollbackOnHeldFolder(held: { prev: () => boolean; failed: () => boolean }, rollbackFailures = 0) {
     const home = tempHome();
     const p = runtimePaths(home);
     makeRuntime(p.runtime, "0.19.2");
     makeRuntime(p.prev, "0.19.0");
     writeUpdateState(home, {
       ...emptyUpdateState(),
-      pendingConfirm: { version: "0.19.2", previousVersion: "0.19.0", appliedAt: iso(T0 - 20_000), boots: 0, rollbackFailures: 0 },
+      pendingConfirm: { version: "0.19.2", previousVersion: "0.19.0", appliedAt: iso(T0 - 20_000), boots: 0, rollbackFailures },
     });
     const fs: RuntimeFs = {
       ...nodeRuntimeFs,
@@ -1155,6 +1160,7 @@ describe("SelfUpdater flows", () => {
       currentVersion: "0.19.2",
       rollback: vi.fn(() => rollbackRuntime(home, fs, POSIX)),
       restoreRuntime: vi.fn(() => restoreRuntime(home, "0.19.2", fs, undefined, POSIX)),
+      rollbackFinished: () => rollbackFinished(home, fs),
     });
     h.setHeartbeat(null);
     h.setReply("unavailable");
@@ -1181,6 +1187,7 @@ describe("SelfUpdater flows", () => {
       currentVersion: "0.19.2",
       rollback: vi.fn(() => rollbackRuntime(home, nodeRuntimeFs, POSIX)),
       restoreRuntime: vi.fn(() => restoreRuntime(home, "0.19.2", nodeRuntimeFs, undefined, POSIX)),
+      rollbackFinished: () => rollbackFinished(home),
     });
     h.setHeartbeat(null);
     h.setReply("unavailable");
@@ -1231,6 +1238,30 @@ describe("SelfUpdater flows", () => {
     h.setNow(T0 + CONFIRM_WINDOW_MS + 15_000);
     expect(await updater.tick()).toBe("rolled_back");
     expect(h.events.slice(-1)).toEqual(["restartSupervisor"]);
+    expect(marker(p.runtime)).toBe("0.19.0");
+    expect(existsSync(p.failed)).toBe(false);
+    expect(readUpdateState(home)).toMatchObject({ pendingConfirm: null, rolledBack: ["0.19.2"] });
+  });
+
+  it("review F5: on the last attempt too, a restore that could move only runtime.prev back is the rollback done, never given up: the next pass hands over", async () => {
+    let prevHolds = 1;
+    // As above, on the try after ROLLBACK_MAX_ATTEMPTS - 1 failed ones.
+    const { home, p, h, updater } = rollbackOnHeldFolder(
+      { prev: () => prevHolds-- > 0, failed: () => true },
+      ROLLBACK_MAX_ATTEMPTS - 1,
+    );
+    expect(await updater.tick()).toBe("rollback_failed");
+    expect(marker(p.runtime)).toBe("0.19.0");
+    expect(existsSync(p.prev)).toBe(false);
+    // The returned version is not run under the supervisor it was returned
+    // from: the rollback stays owed and the child stays down.
+    expect(h.deps.resumeChild).not.toHaveBeenCalled();
+    expect(updater.rollbackDue).toBe(true);
+    expect(readUpdateState(home)!.pendingConfirm).toMatchObject({ rollbackFailures: ROLLBACK_MAX_ATTEMPTS });
+    h.setNow(T0 + CONFIRM_WINDOW_MS + 15_000);
+    expect(await updater.tick()).toBe("rolled_back");
+    expect(h.events.slice(-1)).toEqual(["restartSupervisor"]);
+    expect(h.deps.resumeChild).not.toHaveBeenCalled();
     expect(marker(p.runtime)).toBe("0.19.0");
     expect(existsSync(p.failed)).toBe(false);
     expect(readUpdateState(home)).toMatchObject({ pendingConfirm: null, rolledBack: ["0.19.2"] });
