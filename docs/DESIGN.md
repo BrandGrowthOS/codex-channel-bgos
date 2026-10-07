@@ -171,3 +171,44 @@ tool_progress visible during a run, `/new` resets context. Auth via OPENAI_API_K
 from ~/.env and codex-login detection. Unit tests green. npm publish after
 verification. Frontend PR flips the codex tile on (do not merge) with a What's New
 entry. No em/en dashes anywhere.
+
+## Keep alive and self update (mission 104, 2026-10-06)
+
+Contract: BGOS `docs/superpowers/specs/2026-10-06-keep-agents-alive-design.md`,
+section 2.2 and decisions D6 and D7. What this connector adds, by module:
+
+- `src/machine-id.ts`: the shared `~/.bgos-agent/machine-id`, on the Claude
+  Code plugin's rules, so every agent on a computer reports one machine.
+- `src/heartbeat.ts`: the POST carries `env {platform, machineId, role:
+  'agent'}`, `latestKnownVersion` and `updateReadiness`; the local file carries
+  `busy` and `lastActivityAt`, written at once on every busy edge.
+- `src/codex-host.ts`: `isAnyBusy` (any chat's turn running or queued) with
+  its edges, and `backgroundTerminalCount` (Codex background terminals count
+  as a job in flight; an unreadable answer counts as busy).
+- `src/child-control.ts`: the supervisor asks the child over IPC to stop if
+  idle; the child decides from live state. Never a kill of a busy child
+  (finding 9).
+- `src/setup/self-update.ts`: the supervisor's updater. Pure decisions
+  (version, safe moment, apply or wait, confirmation and rollback) and the
+  effects (npm `latest` read, stage into `runtime.next` with Codex pinned,
+  probe, swap, rollback), all injected. npm is found beside node, Homebrew's
+  keg layout included. A waiting update is never forced (D6):
+  `update-state.json` records `waitingReason` and `waitingSince`, and
+  `service.log` says so after 24 h. The heartbeat cannot carry the wait yet:
+  the backend's `updateReadiness` keeps only its four keys.
+- `src/setup/background-service.ts`: `supervise` runs the updater and hands
+  over with exit 75 (launchd KeepAlive, systemd Restart=on-failure; the
+  Windows successor is spawned first), wired through
+  `supervisorUpdateControls` (restarts held before the stop request, the
+  lock released before the hand over) and `startSelfUpdate`. Service definitions carry
+  `CODEX_BGOS_SERVICE=<label>` and, when set at install,
+  `CODEX_BGOS_AUTO_UPDATE`.
+- `src/keep-alive.ts`: `connect --keep-alive` installs this version into
+  `<home>/runtime` and the per agent service, then exits 0
+  (`completeConnect`).
+- `src/cli-args.ts`: `--version` is answered before any settings are read,
+  so the probe of a staged CLI never depends on `agent.json`.
+
+Findings 7 and 8 need nothing here: a chat keeps its Codex thread across a
+restart (`threads.json`), and `/compact` is a native app-server request, with
+no tmux involved.

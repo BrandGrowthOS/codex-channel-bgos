@@ -11,15 +11,42 @@
  *
  * During a fatal latch (revoked / rotated token) the network sink is disabled
  * but the local file keeps writing so the watchdog can see the lastError.
+ *
+ * Mission 104 (design 2.2): the POST also carries this computer's identity
+ * (env: platform, the shared machine id, role 'agent') and the supervisor's
+ * update readiness, so the app files the agent under its computer and can
+ * say whether it is supervised and staged. The local file also carries
+ * `busy` and `lastActivityAt`, which the supervisor's safe moment reads
+ * before it updates (finding 9: never restart an agent mid job).
  */
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
+import type { UpdateReadiness, UpdateReport } from "./setup/self-update.js";
+
 export interface HeartbeatLastError {
   code: string;
   message: string;
   at: string;
+}
+
+/**
+ * The backend's HeartbeatEnvDto keys this daemon sends. machineId is omitted,
+ * never sent empty, when none could be persisted.
+ */
+export interface HeartbeatEnv {
+  platform: string;
+  machineId?: string;
+  role: "agent";
+}
+
+export function heartbeatEnv(
+  machineId: () => string,
+  platform: string = process.platform,
+): HeartbeatEnv {
+  const id = machineId();
+  return { platform, ...(id ? { machineId: id } : {}), role: "agent" };
 }
 
 /** Wire shape POSTed to the backend heartbeat endpoint. */
@@ -36,6 +63,10 @@ export interface HeartbeatDto {
    * current set and the key is omitted rather than sent empty.
    */
   capabilities?: string[];
+  env?: HeartbeatEnv;
+  /** The npm `latest` the supervisor last read; null while unknown. */
+  latestKnownVersion?: string | null;
+  updateReadiness?: UpdateReadiness;
 }
 
 /** Local heartbeat file shape (contract C1). */
@@ -50,6 +81,10 @@ export interface HeartbeatFileState {
   lastError: HeartbeatLastError | null;
   pairingId: number | null;
   authMode: string | null;
+  /** Any chat's turn running or queued, across every chat (finding 9). */
+  busy: boolean;
+  /** The last turn start or end, message in or out, or the process start. */
+  lastActivityAt: string;
 }
 
 export interface HeartbeatDeps {
@@ -60,15 +95,23 @@ export interface HeartbeatDeps {
   authMode?: string;
   /** The daemon's declared capability tokens (src/declared-capabilities.ts). */
   capabilities?: readonly string[];
+  /** This computer's identity for the POST (heartbeatEnv); omitted when absent. */
+  env?: () => HeartbeatEnv;
+  /** latestKnownVersion and updateReadiness from the supervisor's state file. */
+  updateReport?: () => UpdateReport;
   /** Injectable clock for tests. */
   now?: () => number;
 }
 
 const FILE_INTERVAL_MS = 30_000;
 
+/** CODEX_BGOS_HOME, or ~/.codex-bgos for a daemon started without one. */
+export function daemonHome(): string {
+  return process.env.CODEX_BGOS_HOME ?? join(homedir(), ".codex-bgos");
+}
+
 function heartbeatPath(): string {
-  const root = process.env.CODEX_BGOS_HOME ?? join(homedir(), ".codex-bgos");
-  return join(root, "bgos_heartbeat.json");
+  return join(daemonHome(), "bgos_heartbeat.json");
 }
 
 function resolveNetworkIntervalMs(): number {
@@ -86,6 +129,8 @@ export class HeartbeatController {
   private lastOutboundAt: string | null = null;
   private lastError: HeartbeatLastError | null = null;
   private pairingId: number | null = null;
+  private busy = false;
+  private lastActivityAt: string;
 
   private readonly startedAtMs: number;
   private readonly now: () => number;
@@ -97,6 +142,9 @@ export class HeartbeatController {
   constructor(private readonly deps: HeartbeatDeps) {
     this.now = deps.now ?? (() => Date.now());
     this.startedAtMs = this.now();
+    // Process start counts as activity, so a fresh child waits out the quiet
+    // window before an update may restart it.
+    this.lastActivityAt = new Date(this.startedAtMs).toISOString();
   }
 
   start(): void {
@@ -160,12 +208,31 @@ export class HeartbeatController {
     this.pairingId = id;
   }
 
+  /**
+   * Written at once, like a busy edge (review F1): the supervisor's safe
+   * moment reads the file, and a message whose turn has not started yet
+   * must not read as 10 quiet minutes until the next 30 s beat.
+   */
   recordInbound(): void {
     this.lastInboundAt = new Date(this.now()).toISOString();
+    this.lastActivityAt = this.lastInboundAt;
+    this.writeFile();
   }
 
   recordOutbound(): void {
     this.lastOutboundAt = new Date(this.now()).toISOString();
+    this.lastActivityAt = this.lastOutboundAt;
+  }
+
+  /**
+   * Any chat busy or not. A change is written at once, not at the next 30 s
+   * beat: the supervisor must never read "idle" for a turn that has started.
+   */
+  setBusy(busy: boolean): void {
+    if (this.busy === busy) return;
+    this.busy = busy;
+    this.lastActivityAt = new Date(this.now()).toISOString();
+    this.writeFile();
   }
 
   /**
@@ -201,6 +268,8 @@ export class HeartbeatController {
       lastError: this.lastError,
       pairingId: this.pairingId,
       authMode: this.deps.authMode ?? null,
+      busy: this.busy,
+      lastActivityAt: this.lastActivityAt,
     };
   }
 
@@ -229,6 +298,16 @@ export class HeartbeatController {
       0,
       Math.floor((this.now() - this.startedAtMs) / 1000),
     );
+    // Identity and readiness are read per beat (the supervisor's state moves
+    // under us) and never allowed to cost the beat itself.
+    let env: HeartbeatEnv | undefined;
+    let report: UpdateReport | undefined;
+    try {
+      env = this.deps.env?.();
+    } catch {}
+    try {
+      report = this.deps.updateReport?.();
+    } catch {}
     try {
       await this.deps.postHeartbeat({
         daemonVersion: this.deps.version,
@@ -240,6 +319,13 @@ export class HeartbeatController {
         // with nothing, silently clearing what another release declared.
         ...(this.deps.capabilities?.length
           ? { capabilities: [...this.deps.capabilities] }
+          : {}),
+        ...(env ? { env } : {}),
+        ...(report
+          ? {
+              latestKnownVersion: report.latestKnownVersion,
+              updateReadiness: report.updateReadiness,
+            }
           : {}),
       });
     } catch {
