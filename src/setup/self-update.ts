@@ -1238,8 +1238,10 @@ export class SelfUpdater {
     // its place). While the registry cannot be read the switch waits, and it
     // is asked again only after CHECK_RETRY_MS, never every 15 s.
     if (decision.action === "apply" && !isLatestFresh(this.state, now)) {
-      if (outcome === "check_failed" || now < this.latestRetryAtMs)
-        return this.waiting("latest_unknown", now);
+      // The daily check in this pass failed: that read counts too.
+      if (outcome === "check_failed")
+        this.latestRetryAtMs = now + CHECK_RETRY_MS;
+      if (now < this.latestRetryAtMs) return this.waiting("latest_unknown", now);
       outcome = await this.checkAndStage(now);
       if (outcome === "check_failed") {
         this.latestRetryAtMs = now + CHECK_RETRY_MS;

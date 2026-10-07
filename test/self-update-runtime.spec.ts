@@ -690,6 +690,36 @@ describe("SelfUpdater flows", () => {
     expect(h.deps.fetchLatest).toHaveBeenCalledTimes(1);
   });
 
+  it("review F4: a daily check that fails at the safe moment is not asked again 15 s later either", async () => {
+    const home = tempHome();
+    const h = harness(home);
+    h.setHeartbeat(idleHeartbeat(h.now, { busy: true }));
+    const updater = new SelfUpdater(h.deps);
+    updater.boot();
+    expect(await updater.tick()).toBe("waiting:busy");
+    h.deps.fetchLatest = vi.fn(async () => {
+      throw new Error("ENOTFOUND registry.npmjs.org");
+    });
+    const at = (ms: number) => {
+      h.setNow(ms);
+      h.setHeartbeat(idleHeartbeat(ms));
+    };
+    // The next daily check is due when the agent goes quiet, and it fails.
+    const failedAt = Date.parse(readUpdateState(home)!.nextCheckAt!) + 1_000;
+    at(failedAt);
+    expect(await updater.tick()).toBe("waiting:latest_unknown");
+    at(failedAt + 15_000);
+    expect(await updater.tick()).toBe("waiting:latest_unknown");
+    at(failedAt + CHECK_RETRY_MS - 1);
+    expect(await updater.tick()).toBe("waiting:latest_unknown");
+    expect(h.deps.fetchLatest).toHaveBeenCalledTimes(1);
+    expect(h.deps.swap).not.toHaveBeenCalled();
+    h.deps.fetchLatest = vi.fn(async () => "0.19.2");
+    at(failedAt + CHECK_RETRY_MS);
+    expect(await updater.tick()).toBe("applied");
+    expect(h.deps.fetchLatest).toHaveBeenCalledTimes(1);
+  });
+
   it("D6: a waiting update records since when, and after 24 h says so once; it is never forced", async () => {
     const home = tempHome();
     const log = vi.fn();
