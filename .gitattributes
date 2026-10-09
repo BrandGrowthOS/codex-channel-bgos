@@ -1,2 +1,7 @@
 * text=auto eol=lf
 vendor/hoai-browser-mcp.mjs text eol=lf
+# The session status contract is a byte-identical copy of the BGOS source of
+# truth (backend/src/integrations/session-status-contract.ts), pinned by sha256
+# in test/session-status-contract.pin.spec.ts. The rule above already keeps it
+# LF; this line says why, next to the file.
+src/session-status-contract.ts text eol=lf
