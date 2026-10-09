@@ -200,10 +200,12 @@ function readCount(raw: unknown): number | null {
 export const POSTED_BY_FIELD = 'postedBy';
 
 /**
- * Its one value. A text the connection posts AS the agent (its not answering
- * warning, its /status answer, its compact and goal notices) carries it, so
- * nothing that asks "did the agent write anything?" reads it as the session
- * answering. The session's own replies never carry it.
+ * Its one value. A text the connection posts AS the agent UNPROMPTED (its not
+ * answering warning, its goal and plan notices) carries it, so nothing that
+ * asks "did the agent write anything?" reads it as the session answering. The
+ * session's own replies never carry it, and neither does the connection's
+ * answer to an owner's own command (/status and the like): that answers a
+ * row the owner wrote, and the stall sweep must see that row answered.
  */
 export const POSTED_BY_CONNECTION = 'connection';
 
