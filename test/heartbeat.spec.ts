@@ -9,6 +9,10 @@ import { join } from "node:path";
 
 import { DECLARED_CAPABILITIES } from "../src/declared-capabilities.js";
 import {
+  parseSessionStatus,
+  SESSION_STATUS_FIELDS,
+} from "../src/session-status-contract.js";
+import {
   HeartbeatController,
   heartbeatEnv,
   type HeartbeatDto,
@@ -415,5 +419,87 @@ describe("identity, update readiness and the busy signal", () => {
     now += 1_000;
     hb.recordOutbound();
     expect(hb.snapshotFile().lastActivityAt).toBe("2026-10-06T20:00:02.000Z");
+  });
+});
+
+/**
+ * HOAI board row 9c3d6b2c, session liveness: the heartbeat this daemon already
+ * POSTs every minute now carries the busy signal and the last activity it
+ * already writes to its local file, under the shared contract's key and field
+ * names (`sessionStatus: { v, at, busy, lastActivityAt }`), so the server can
+ * tell a Codex agent that is working from one that has stopped. Nothing else:
+ * this daemon does not report a task, a question or a running command, and the
+ * server claims nothing from a field it was not sent.
+ */
+describe("session status on the network heartbeat", () => {
+  let tempHome: string;
+  const originalCodexBgosHome = process.env.CODEX_BGOS_HOME;
+  beforeEach(() => {
+    tempHome = mkdtempSync(join(tmpdir(), "codex-hb-status-"));
+    process.env.CODEX_BGOS_HOME = tempHome;
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    rmSync(tempHome, { recursive: true, force: true });
+    if (originalCodexBgosHome === undefined) delete process.env.CODEX_BGOS_HOME;
+    else process.env.CODEX_BGOS_HOME = originalCodexBgosHome;
+  });
+
+  it("rides every beat, with the same busy and last activity as the local file", () => {
+    let now = Date.parse("2026-10-09T12:00:00.000Z");
+    const posts: HeartbeatDto[] = [];
+    const hb = new HeartbeatController({
+      version: "0.19.0",
+      postHeartbeat: async (b) => void posts.push(b),
+      now: () => now,
+    });
+    hb.start();
+    try {
+      expect(posts[0].sessionStatus).toEqual({
+        v: 1,
+        at: "2026-10-09T12:00:00.000Z",
+        busy: false,
+        lastActivityAt: "2026-10-09T12:00:00.000Z",
+      });
+      now += 5_000;
+      hb.setBusy(true);
+      now += 55_000;
+      vi.advanceTimersByTime(60_000);
+      expect(posts).toHaveLength(2);
+      expect(posts[1].sessionStatus).toEqual({
+        v: 1,
+        at: "2026-10-09T12:01:00.000Z",
+        busy: true,
+        lastActivityAt: "2026-10-09T12:00:05.000Z",
+      });
+      const file = heartbeatFile(tempHome);
+      expect(posts[1].sessionStatus?.busy).toBe(file.busy);
+      expect(posts[1].sessionStatus?.lastActivityAt).toBe(file.lastActivityAt);
+    } finally {
+      hb.stop();
+    }
+  });
+
+  it("is a report the server's own parser reads, carrying the four Codex fields only", () => {
+    const posts: HeartbeatDto[] = [];
+    const hb = new HeartbeatController({
+      version: "0.19.0",
+      postHeartbeat: async (b) => void posts.push(b),
+      now: () => Date.parse("2026-10-09T12:00:00.000Z"),
+    });
+    hb.start();
+    try {
+      const wire = JSON.parse(JSON.stringify(posts[0].sessionStatus));
+      expect(Object.keys(wire)).toEqual(["v", "at", "busy", "lastActivityAt"]);
+      expect(parseSessionStatus(wire)).toEqual({ ok: true, report: wire });
+      // Nothing it does not know: no task, no counts, so the server claims
+      // nothing from them.
+      for (const field of SESSION_STATUS_FIELDS.slice(4)) {
+        expect(wire).not.toHaveProperty(field);
+      }
+    } finally {
+      hb.stop();
+    }
   });
 });

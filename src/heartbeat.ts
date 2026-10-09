@@ -18,12 +18,24 @@
  * say whether it is supervised and staged. The local file also carries
  * `busy` and `lastActivityAt`, which the supervisor's safe moment reads
  * before it updates (finding 9: never restart an agent mid job).
+ *
+ * Session liveness (HOAI board row 9c3d6b2c): the POST carries the same
+ * `busy` and `lastActivityAt` under `sessionStatus`, in the shape of the
+ * contract shared with HOAI and the Claude Code plugin
+ * (src/session-status-contract.ts, a byte identical copy pinned by sha256),
+ * so the server can tell a working agent from one that has stopped. The
+ * minute beat is the cadence: a change reaches the server within a minute,
+ * and a busy report is renewed well inside the contract's 2 minutes.
  */
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 import type { UpdateReadiness, UpdateReport } from "./setup/self-update.js";
+import {
+  SESSION_STATUS_VERSION,
+  type SessionStatusReport,
+} from "./session-status-contract.js";
 
 export interface HeartbeatLastError {
   code: string;
@@ -67,6 +79,12 @@ export interface HeartbeatDto {
   /** The npm `latest` the supervisor last read; null while unknown. */
   latestKnownVersion?: string | null;
   updateReadiness?: UpdateReadiness;
+  /**
+   * What the agent is doing, for the server's liveness word: the busy signal
+   * and last activity of the local file, nothing else (no task, counts or
+   * running work, which this daemon does not report).
+   */
+  sessionStatus?: SessionStatusReport;
 }
 
 /** Local heartbeat file shape (contract C1). */
@@ -308,6 +326,13 @@ export class HeartbeatController {
     try {
       report = this.deps.updateReport?.();
     } catch {}
+    // The same busy and last activity the local file carries, built per beat.
+    const sessionStatus: SessionStatusReport = {
+      v: SESSION_STATUS_VERSION,
+      at: new Date(this.now()).toISOString(),
+      busy: this.busy,
+      lastActivityAt: this.lastActivityAt,
+    };
     try {
       await this.deps.postHeartbeat({
         daemonVersion: this.deps.version,
@@ -315,6 +340,7 @@ export class HeartbeatController {
         wsConnected: this.wsConnected,
         lastError: this.lastError,
         authMode: this.deps.authMode,
+        sessionStatus,
         // Never send an empty array: an empty array REPLACES the stored set
         // with nothing, silently clearing what another release declared.
         ...(this.deps.capabilities?.length
