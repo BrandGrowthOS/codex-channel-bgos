@@ -41,7 +41,7 @@ export class BrowserContext {
   private generation = 0;
   private lastActor: string | null = null;
 
-  constructor(root: string, private readonly chatId: number, private readonly relay: BrowserRelayCredentials | null) {
+  constructor(root: string, private readonly chatId: number, readonly relay: BrowserRelayCredentials | null) {
     const dir = join(root, `${process.pid}-${this.sessionId}`);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     this.path = join(dir, "context.json");

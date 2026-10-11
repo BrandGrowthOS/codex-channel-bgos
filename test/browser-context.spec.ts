@@ -20,11 +20,16 @@ class Server extends EventEmitter {
   configs = new Map<string, any>();
   discoveries: any[] = [];
   starts: Array<{ thread: string; context: any }> = [];
+  /** Threads whose MCP processes are running. Like Codex, a resume of one ignores the new config. */
+  loaded = new Set<string>();
   start = vi.fn(async () => {});
-  close = vi.fn(() => this.emit("closed", new Error("closed")));
+  close = vi.fn(() => { this.loaded.clear(); this.emit("closed", new Error("closed")); });
   request = vi.fn(async (method: string, p: any) => {
+    if (method === "thread/unsubscribe") { this.loaded.delete(p.threadId); return {}; }
     if (["thread/start", "thread/resume", "thread/fork"].includes(method)) {
       const id = method === "thread/resume" ? p.threadId : `thread-${++this.next}`;
+      if (this.loaded.has(id)) return { thread: { id } };
+      this.loaded.add(id);
       this.configs.set(id, p.config);
       this.discoveries.push(json(p.config[envKey].HOAI_RELAY_CONTEXT_FILE).context);
       return { thread: { id } };
@@ -188,6 +193,25 @@ describe("managed browser context lifecycle", () => {
     expect(state("thread-1").live).toBe(false);
     const next = host.runTurn(9, "recipient", { browserActor: "user_recipient" }); await waitStarts(2);
     expect(state("thread-1").actingUserId).toBe("user_recipient"); await finish("thread-1", next);
+  });
+
+  it("resuming the current conversation keeps the scope its running MCP process reads", async () => {
+    const run = host.runTurn(9, "owner", { browserActor: "user_owner" }); await waitStarts(1); await finish("thread-1", run);
+    await host.resumeSavedThread(9, "thread-1");
+    expect(state("thread-1").live).toBe(false);
+    const next = host.runTurn(9, "recipient", { browserActor: "user_recipient" }); await waitStarts(2);
+    expect(server.starts[1].context.context).toMatchObject({ live: true, actingUserId: "user_recipient" });
+    await finish("thread-1", next);
+  });
+
+  it("/new then resuming the previous conversation reuses the scope of its still loaded MCP process", async () => {
+    const run = host.runTurn(9, "owner", { browserActor: "user_owner" }); await waitStarts(1); await finish("thread-1", run);
+    host.resetChat(9); expect(state("thread-1").live).toBe(false);
+    await host.resumeSavedThread(9, "thread-1");
+    const next = host.runTurn(9, "recipient", { browserActor: "user_recipient" }); await waitStarts(2);
+    expect(server.starts[1].thread).toBe("thread-1");
+    expect(server.starts[1].context.context).toMatchObject({ live: true, actingUserId: "user_recipient" });
+    await finish("thread-1", next);
   });
 
   it("abort, reset and daemon close invalidate active authority", async () => {
