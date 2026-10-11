@@ -56,6 +56,7 @@ interface Pin {
   source: string;
   sha256: string;
   vendoredAt: string;
+  sourceCommit: string;
   why: string;
   howToUpdate: string;
   crossTreeCheck: string;
@@ -99,6 +100,7 @@ describe("the vendored HOAI browser shim", () => {
       /agent-browser[/\\]shim[/\\]hoai-browser-mcp\.mjs/,
     );
     expect(p.vendoredAt).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(p.sourceCommit).toMatch(/^[0-9a-f]{40}$/);
     expect(p.howToUpdate).toBe("docs/vendoring-the-hoai-browser-shim.md");
     // The pin itself says how to check the other tree.
     expect(p.crossTreeCheck).toMatch(/HOAI_BROWSER_SHIM_SOURCE/);

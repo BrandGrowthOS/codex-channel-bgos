@@ -64,9 +64,37 @@ then bring the copy across with this list.
 
 ## What none of this catches
 
-Nothing in THIS repo fires when the BGOS shim changes and this copy does not
-move, which is the drift that actually happened (2026-09-12, in the sibling
-plugin: the shim was fixed twice in a week and the stale copy shipped with a
-dead relay lane). A check for that has to live on the BGOS side. Until it does,
-step 1 of any BGOS shim fix is "re-vendor both plugins", and the only automatic
-protection here is behavioural.
+BGOS's `browser-shim-vendor-parity.yml` workflow compares its canonical shim
+with both vendors' `main` branches. The workflow arms each vendor's cross-tree
+check and requires a deliberately wrong source to fail. Coordinate companion
+PRs when changing the shim; an unmerged companion can leave that check red.
+
+## Managed recipient context scope
+
+The bundled shim accepts a signed managed turn context when its launcher sets
+`HOAI_RELAY_CONTEXT_FILE`, `HOAI_RELAY_OWNER_USER_ID` and
+`HOAI_RELAY_CLIENT_PID`. It then forces relay routing, validates the live signed
+context and matching prompt marker, and retains the admitted actor for the
+original request, polling and cancellation. The real-child tests in
+`test/browser-managed-context.spec.ts` exercise the exact bundled file.
+
+`CodexHost` publishes that context before each attributed turn starts, using
+the authenticated delivery's explicit human sender or the server's reserved
+scheduler actor. The envelope's owner ID and message text cannot supply it.
+The managed launcher always uses the bundled shim, including saved-thread
+resume, forks and detached work, so an older app-installed copy cannot ignore
+the guard. Detached work has separate context files. Stop, reset, turn end,
+and daemon close invalidate the marker. Standalone shim use without the
+managed environment keeps its existing behavior.
+
+A goal continuation can inherit only the last verified actor for that thread
+in this daemon process. After restart, an unattributed goal has no browser
+authority until a new attributed turn runs. Meetings, unknown deliveries,
+and invisible read-only consultations cannot use a personal browser. The
+channel does not invent an owner fallback for these cases. This contract
+covers the browser relay, native Boards calls and schedule, list and cancel
+calls. These private tools carry the admitted actor in `X-BGOS-Acting-User`, including
+verified goal continuations; unknown actors are refused before HTTP. Other
+native APIs are not a parity claim here. Signed context
+files protect against stale turn and process races; an attacker who controls
+the same OS account and its pairing secret is outside this local boundary.

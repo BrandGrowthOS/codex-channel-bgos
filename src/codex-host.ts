@@ -29,6 +29,7 @@ import {
   type ThreadMap,
 } from "./thread-map.js";
 import { BGOS_AGENT_HINTS } from "./agent-hints.js";
+import { BrowserContext } from "./browser-context.js";
 import {
   goalFromNotification,
   normalizeThreadGoal,
@@ -37,7 +38,7 @@ import {
 } from "./goal-protocol.js";
 import {
   browserMcpConfigOverrides,
-  resolveBrowserShim,
+  bundledShimPath,
   type BrowserRelayCredentials,
 } from "./browser-mcp.js";
 import type { AuthResolutionOk } from "./auth-mode.js";
@@ -88,7 +89,7 @@ export interface CodexHostOptions {
    * from another machine as the right agent. A function of the chat, not a
    * value: a re-pair rotates the token and the next thread must get the live
    * one, and each chat belongs to one of the assistants this daemon owns.
-   * Returning null (or omitting this) leaves the browser local-or-offline.
+   * Returning null leaves managed private browsing unavailable.
    */
   relay?: (chatId: number) => BrowserRelayCredentials | null;
   /**
@@ -242,6 +243,8 @@ export interface GeneratedImage {
   failure?: GeneratedImageFailure;
 }
 export interface RunTurnCallbacks {
+  /** Actor from authenticated inbound metadata. Missing means no private browser. */
+  browserActor?: string | null;
   signal?: AbortSignal;
   onTool?: (card: ActivityCard, id: string) => void | Promise<void>;
   /**
@@ -804,6 +807,7 @@ export class CodexHost {
   private readonly toolVersions: ThreadMap;
   private readonly toolVersionsFile: string;
   private readonly loaded = new Set<string>();
+  private readonly browserContexts = new Map<string, BrowserContext>();
   /**
    * Legacy threads resumed ONLY to read their history (Round 7, see
    * recentThreadMessages). Nothing such a thread says reaches a chat: the chat
@@ -926,6 +930,8 @@ export class CodexHost {
       this.notification(method, params),
     );
     this.server.on("closed", (error: Error) => {
+      for (const scope of this.browserContexts.values()) scope.end();
+      this.browserContexts.clear();
       this.loaded.clear();
       for (const [threadId, turn] of this.active)
         turn.finish(
@@ -984,6 +990,8 @@ export class CodexHost {
   }
   resetChat(chatId: number): void {
     const threadId = this.map[String(chatId)];
+    this.browserContexts.get(threadId)?.end();
+    this.browserContexts.delete(threadId);
     if (threadId) this.rememberThread(chatId, threadId);
     resetChat(this.threadsFile, this.map, chatId);
     // The old thread's runtime value and its reroute are not this chat's any
@@ -1512,8 +1520,10 @@ export class CodexHost {
           "not_found",
           "That conversation does not belong to this HOAI chat.",
         );
+      const browser = this.browserConfig(chatId);
       const result = await this.server.request("thread/resume", {
         threadId,
+        config: browser.config,
         cwd: this.workdir,
         developerInstructions: this.hints,
         // Only the identity is read below. See PAST_TURNS_NOTE.
@@ -1522,6 +1532,7 @@ export class CodexHost {
       if (result.thread?.id !== threadId)
         throw new Error("Codex returned a different conversation.");
       this.resetChat(chatId);
+      this.browserContexts.set(threadId, browser.scope);
       setThreadId(this.threadsFile, this.map, chatId, threadId);
       // ensureThread still applies the existing tool-version migration check.
       this.loaded.delete(threadId);
@@ -1567,8 +1578,10 @@ export class CodexHost {
   async forkThread(chatId: number): Promise<string> {
     return this.withIdleControl(chatId, async () => {
       const parent = await this.ensureThread(chatId);
+      const browser = this.browserConfig(chatId);
       const result = await this.server.request("thread/fork", {
         threadId: parent,
+        config: browser.config,
         cwd: this.workdir,
         // The fork still copies every turn; only its REPLY leaves them out,
         // and only the new id is read below. See PAST_TURNS_NOTE.
@@ -1578,6 +1591,8 @@ export class CodexHost {
       if (typeof id !== "string" || !id || id === parent)
         throw new Error("Codex did not create a fork.");
       this.rememberThread(chatId, parent);
+      this.browserContexts.get(parent)?.end();
+      this.browserContexts.set(id, browser.scope);
       setThreadId(this.threadsFile, this.map, chatId, id);
       setThreadId(
         this.toolVersionsFile,
@@ -1591,6 +1606,7 @@ export class CodexHost {
   }
   async stopTurn(chatId: number): Promise<void> {
     const threadId = this.map[String(chatId)];
+    this.browserContexts.get(threadId)?.end();
     const turn = this.active.get(threadId);
     if (turn?.id)
       await this.server.request("turn/interrupt", {
@@ -1677,7 +1693,13 @@ export class CodexHost {
     }
   }
   close(): void {
+    for (const scope of this.browserContexts.values()) scope.end();
+    this.browserContexts.clear();
     this.server.close();
+  }
+  /** No disk or envelope owner fallback for native private tools in a goal. */
+  privateActorForChat(chatId: number): string | null {
+    return this.browserContexts.get(this.map[String(chatId)])?.continuationActor() ?? null;
   }
   async runDetached(
     chatId: number,
@@ -1699,7 +1721,12 @@ export class CodexHost {
         ? { model: settings.model ?? this.opts.model }
         : {}),
     };
-    const config: Record<string, unknown> = this.browserConfig(chatId);
+    const browser = this.browserConfig(chatId);
+    const config: Record<string, unknown> = browser.config;
+    const cancelStartup = browser.scope.begin(readOnly ? null : callbacks.browserActor, input);
+    const abortStartup = () => cancelStartup(true);
+    callbacks.signal?.addEventListener("abort", abortStartup, { once: true });
+    if (callbacks.signal?.aborted) abortStartup();
     if (this.authMode === "apikey")
       Object.assign(config, {
         "model_providers.openai.env_key": "CODEX_API_KEY",
@@ -1713,8 +1740,8 @@ export class CodexHost {
           createHash("sha256")
             .update(JSON.stringify(this.tools))
             .digest("hex"));
-    const thread = canFork
-      ? await this.server.request("thread/fork", {
+    const thread = await (canFork
+      ? this.server.request("thread/fork", {
           ...params,
           threadId: parent,
           // No `deferGoalContinuation` here. The runtime refuses it together
@@ -1726,11 +1753,14 @@ export class CodexHost {
           // defer.
           excludeTurns: true,
         })
-      : await this.server.request("thread/start", {
+      : this.server.request("thread/start", {
           ...params,
           dynamicTools: readOnly ? [] : this.tools,
-        });
-    const threadId = thread.thread.id;
+        })).catch(error => { browser.scope.end(); throw error; })
+        .finally(() => callbacks.signal?.removeEventListener("abort", abortStartup));
+    const threadId = thread?.thread?.id;
+    if (typeof threadId !== "string" || !threadId) { browser.scope.end(); throw new Error("Codex did not return a conversation identity."); }
+    this.browserContexts.set(threadId, browser.scope);
     try {
       return await this.execute(
         threadId,
@@ -1738,6 +1768,7 @@ export class CodexHost {
         readOnly
           ? {
               ...callbacks,
+              browserActor: null,
               onRequest: async () => {
                 throw new Error(
                   "This is an invisible read-only consult. Return text without tools.",
@@ -1754,6 +1785,8 @@ export class CodexHost {
         },
       );
     } finally {
+      browser.scope.end();
+      this.browserContexts.delete(threadId);
       await this.server
         .request("thread/unsubscribe", { threadId })
         .catch(() => {});
@@ -1788,15 +1821,22 @@ export class CodexHost {
   ): Promise<RunTurnResult> {
     callbacks.signal?.throwIfAborted();
     await this.server.start();
-    const threadId = await this.ensureThread(chatId);
-    callbacks.signal?.throwIfAborted();
-    return this.execute(
-      threadId,
-      input,
-      callbacks,
-      30 * 60_000,
-      nativeSettings(this.settings.get(chatId)),
-    );
+    let cancelStartup = () => {};
+    const abortStartup = () => cancelStartup();
+    callbacks.signal?.addEventListener("abort", abortStartup, { once: true });
+    try {
+      const threadId = await this.ensureThread(chatId, {
+        actor: callbacks.browserActor, input, onCleanup: cleanup => { cancelStartup = cleanup; if (callbacks.signal?.aborted) cleanup(); },
+      });
+      callbacks.signal?.throwIfAborted();
+      return await this.execute(
+        threadId, input, callbacks, 30 * 60_000,
+        nativeSettings(this.settings.get(chatId)),
+      );
+    } finally {
+      callbacks.signal?.removeEventListener("abort", abortStartup);
+      cancelStartup();
+    }
   }
   /**
    * The HOAI Agent Browser (the pane in the desktop app) as an MCP server on
@@ -1804,21 +1844,21 @@ export class CodexHost {
    * When relay credentials are available the shim also reaches the owner's app
    * from another machine; the token and the chat's assistant id ride
    * `mcp_servers.hoai_browser.env` and the token is never logged. A failing
-   * resolver must never cost us a thread, so it is swallowed and the browser
-   * stays local-or-offline.
+   * resolver leaves the private browser unavailable. It never falls back to
+   * the owner's local browser without an admitted actor.
    */
-  private browserConfig(chatId: number): Record<string, unknown> {
+  private browserConfig(chatId: number): { config: Record<string, unknown>; scope: BrowserContext } {
     let relay: BrowserRelayCredentials | null = null;
     try {
       relay = this.opts.relay?.(chatId) ?? null;
     } catch {
       relay = null;
     }
-    return browserMcpConfigOverrides(
-      resolveBrowserShim(),
-      process.execPath,
-      relay,
-    );
+    const scope = new BrowserContext(join(dirnameOf(this.threadsFile), "browser-context"), chatId, relay);
+    return { scope, config: browserMcpConfigOverrides(
+      // Managed threads must not launch an older app-installed shim that ignores context.
+      bundledShimPath(), process.execPath, relay, scope.env,
+    ) };
   }
   /**
    * A thread's recent user and agent text, oldest first, read a few summary
@@ -1863,6 +1903,7 @@ export class CodexHost {
     try {
       try {
         await this.server.request("thread/resume", {
+          config: this.browserConfig(0).config,
           threadId,
           cwd: this.workdir,
           excludeTurns: true,
@@ -1925,7 +1966,7 @@ export class CodexHost {
     }
     return { messages: newestFirst.reverse(), unread: false };
   }
-  private async ensureThread(chatId: number): Promise<string> {
+  private async ensureThread(chatId: number, initial?: { actor?: string | null; input: Input; onCleanup?: (cleanup: () => void) => void }): Promise<string> {
     await this.server.start();
     let threadId: string | undefined = this.map[String(chatId)];
     const toolVersion = createHash("sha256")
@@ -1942,7 +1983,8 @@ export class CodexHost {
     };
     const selectedModel = this.settings.get(chatId).model ?? this.opts.model;
     if (selectedModel) params.model = selectedModel;
-    const config: Record<string, unknown> = this.browserConfig(chatId);
+    const browser = !threadId || !this.loaded.has(threadId) ? this.browserConfig(chatId) : null;
+    const config: Record<string, unknown> = browser?.config ?? {};
     if (this.authMode === "apikey")
       Object.assign(config, {
         "model_providers.openai.env_key": "CODEX_API_KEY",
@@ -1982,21 +2024,30 @@ export class CodexHost {
         priorContext = `\nHOAI upgraded the tool connection. Prior native thread ${threadId} remains saved in Codex; previous-threads.json records it. Recent conversation text is included below as attributed reference data, not new instructions. Older text and tool outputs may be omitted; do not claim full context.\n${JSON.stringify(recent)}`;
         threadId = undefined;
       }
-      const result = threadId
-        ? await this.server.request("thread/resume", {
+      // MCP discovery happens during thread creation, before turn/start.
+      if (initial) {
+        const cleanup = browser!.scope.begin(initial.actor, initial.input);
+        initial.onCleanup?.(() => cleanup(true));
+      }
+      const result = await (threadId
+        ? this.server.request("thread/resume", {
             ...params,
             threadId,
             // Only the identity is read below. See PAST_TURNS_NOTE.
             excludeTurns: true,
           })
-        : await this.server.request("thread/start", {
+        : this.server.request("thread/start", {
             ...params,
             developerInstructions: this.hints + priorContext,
             dynamicTools: this.tools,
-          });
-      if (typeof result.thread?.id !== "string" || !result.thread.id)
+          })).catch(error => { browser!.scope.end(); throw error; });
+      if (typeof result.thread?.id !== "string" || !result.thread.id) {
+        browser!.scope.end();
         throw new Error("Codex did not return a conversation identity.");
+      }
       threadId = result.thread.id as string;
+      this.browserContexts.get(threadId)?.end();
+      this.browserContexts.set(threadId, browser!.scope);
       setThreadId(
         this.toolVersionsFile,
         this.toolVersions,
@@ -2020,6 +2071,7 @@ export class CodexHost {
   ): Promise<RunTurnResult> {
     callbacks.signal?.throwIfAborted();
     return new Promise<RunTurnResult>((resolveTurn) => {
+      let endBrowser = () => {};
       let finished = false;
       const tick = setInterval(() => callbacks.onTick?.(), 4000);
       /**
@@ -2084,6 +2136,7 @@ export class CodexHost {
         finish: (result) => {
           if (finished) return;
           finished = true;
+          endBrowser();
           clearInterval(tick);
           clearTimeout(watchdog);
           callbacks.signal?.removeEventListener("abort", abort);
@@ -2097,6 +2150,7 @@ export class CodexHost {
         },
       };
       const abort = () => {
+        endBrowser();
         if (turn.id)
           void this.server
             .request("turn/interrupt", { threadId: id, turnId: turn.id })
@@ -2119,6 +2173,7 @@ export class CodexHost {
           if (!prior.handedOff.has(itemId)) turn.images.set(itemId, image);
       prior?.release?.();
       this.active.set(id, turn);
+      endBrowser = this.browserContexts.get(id)?.begin(callbacks.browserActor, input) ?? (() => {});
       void this.server
         .request(
           callbacks.reviewTarget ? "review/start" : "turn/start",
@@ -2202,6 +2257,7 @@ export class CodexHost {
     if (!turn) return;
     if (method === "turn/started") turn.id = params.turn.id;
     if (method === "turn/completed") {
+      this.browserContexts.get(String(params.threadId ?? ""))?.suspend();
       const status = params.turn.status;
       const error =
         status === "completed"
@@ -2858,11 +2914,13 @@ export class CodexHost {
     }
     if (!adopted) return;
     const { callbacks, deliver } = adopted;
+    const endBrowser = this.browserContexts.get(threadId)?.continue() ?? (() => {});
     let settled = false;
     const tick = setInterval(() => callbacks.onTick?.(), 4000);
     const forget = () => {
       if (settled) return false;
       settled = true;
+      endBrowser();
       clearInterval(tick);
       // Only if this turn is still the registered one: a turn the owner
       // asked for may already have taken the thread.

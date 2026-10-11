@@ -1,5 +1,6 @@
 import { io, type Socket } from "socket.io-client";
 import { EventEmitter } from "node:events";
+import { browserActorFromDelivery } from "./browser-context.js";
 
 import type { BgosApi } from "./bgos-api.js";
 import { loadLastId, saveLastId } from "./last-id-store.js";
@@ -397,6 +398,7 @@ export class BgosWs {
       chatId,
       messageId,
       userId: String(r.userId ?? r.user_id ?? ""),
+      browserActor: browserActorFromDelivery(r),
       text: String(r.text ?? ""),
       senderType:
         peerConversationId || (r.senderType ?? r.sender_type) === "agent"

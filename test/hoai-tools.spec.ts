@@ -407,7 +407,7 @@ describe("typed HOAI boundary", () => {
     const result: any = await tools.handleRequest(
       "item/tool/call",
       { tool: "boards_create", arguments: { name: "QA" } },
-      context(),
+      { ...context(), privateActor: "user_owner" },
     );
     expect(result.success).toBe(false);
     expect(result.contentItems[0].text).toContain(

@@ -58,19 +58,21 @@ export interface BrowserRelayCredentials {
   backendUrl: string;
   pairingToken: string;
   assistantId: number;
+  ownerUserId?: string;
 }
 
 /**
- * The `HOAI_RELAY_*` env the shim reads, or `{}` when any of the three parts is
+ * The base `HOAI_RELAY_*` env, or `{}` when any of the three parts is
  * missing (the shim then stays local-or-offline, which is the honest answer:
  * an incomplete relay lane is a silent 400, not a browser). The token appears
  * under exactly one key and is never logged.
  *
- * These are the only variables the shim reads: everything else it needs comes
+ * Standalone discovery also comes
  * from `os.homedir()`, which resolves from the OS user record when HOME and
  * USERPROFILE are absent. So whether Codex merges this map into the child's
- * environment or hands it over as the whole environment, the local door (the
- * discovery file under ~/.hoai) keeps working.
+ * environment or hands it over as the whole environment, the standalone local door (the
+ * discovery file under ~/.hoai) keeps working. Managed hosts additionally
+ * supply mandatory signed context variables through browserMcpConfigOverrides.
  */
 export function browserRelayEnv(relay?: BrowserRelayCredentials | null): Record<string, string> {
   const backendUrl = String(relay?.backendUrl ?? "").trim().replace(/\/+$/, "");
@@ -90,9 +92,10 @@ export function browserMcpConfigOverrides(
   shimPath: string | null,
   nodeBinary = process.execPath,
   relay?: BrowserRelayCredentials | null,
+  managedEnv?: Record<string, string>,
 ): Record<string, unknown> {
   if (!shimPath) return {};
-  const env = browserRelayEnv(relay);
+  const env = { ...browserRelayEnv(relay), ...managedEnv };
   return {
     [`mcp_servers.${HOAI_BROWSER_SERVER}.command`]: nodeBinary,
     [`mcp_servers.${HOAI_BROWSER_SERVER}.args`]: [shimPath],

@@ -241,6 +241,18 @@ describe("the paths that can start a thread all name the agent first", () => {
     expect(seen).toEqual([{ chatId: COLD_CHAT, assistantId: 11 }]);
   });
 
+  it("carries only the admitted browser actor into the queued turn, never the envelope owner", async () => {
+    const { adapter } = adapterFixture();
+    await adapter.runAndReply(11, COLD_CHAT, "recipient", replyHandle(), { userId: "user_owner", browserActor: "user_recipient" });
+    expect(adapter.host.runTurn.mock.calls[0][2].browserActor).toBe("user_recipient");
+    await adapter.host.runTurn.mock.calls[0][2].onRequest("item/tool/call", {});
+    expect(adapter.tools.handleRequest.mock.calls[0][2].privateActor).toBe("user_recipient");
+    await adapter.runAndReply(11, COLD_CHAT, "unknown", replyHandle(), { userId: "user_owner" });
+    expect(adapter.host.runTurn.mock.calls[1][2].browserActor).toBeNull();
+    await adapter.host.runTurn.mock.calls[1][2].onRequest("item/tool/call", {});
+    expect(adapter.tools.handleRequest.mock.calls[1][2].privateActor).toBeNull();
+  });
+
   it("an invisible voice consult: the pair is known before the fork", async () => {
     const { adapter, seen } = adapterFixture();
     await adapter.handleControl({

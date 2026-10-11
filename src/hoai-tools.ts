@@ -116,6 +116,8 @@ export interface MissionSelfWrites {
 }
 
 export interface ToolContext extends InteractionContext {
+  /** Verified person frozen at turn admission, distinct from legacy reply routing. */
+  privateActor?: string | null;
   messageId?: number;
   peerConversationId?: number;
   meetingId?: number;
@@ -316,6 +318,12 @@ export class HoaiTools {
       body?: unknown,
     ) => this.api.agentRequest(method, path, context.assistantId, body);
     const post = (path: string, body: unknown) => request("POST", path, body);
+    const privateActor = context.privateActor;
+    const privateRequest = (method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown) => {
+      if (typeof privateActor !== "string" || !/^user_[A-Za-z0-9_-]+$/.test(privateActor))
+        throw new Error("This private action requires a verified current sender. Send a new message in your HOAI chat.");
+      return this.api.agentRequest(method, path, context.assistantId, body, privateActor);
+    };
     if (name.startsWith("boards_")) {
       if (typeof args.file_path === "string")
         args.file_path = resolveAllowedMediaPath(args.file_path);
@@ -325,7 +333,7 @@ export class HoaiTools {
         body?: unknown,
       ) => {
         try {
-          return await request(method, path, body);
+          return await privateRequest(method, path, body);
         } catch (error) {
           // The shared Boards handler expects a body-bearing Error rather
           // than Axios's generic status message. Preserve the refusal body,
@@ -622,14 +630,14 @@ export class HoaiTools {
           }),
         );
       case "schedule":
-        return post(
+        return privateRequest("POST",
           "scheduled-tasks/agent",
           built(buildScheduleCreateBody({ ...args, chatId })).body,
         );
       case "list_schedules":
-        return request("GET", built(buildScheduleListPath(args.status)).path);
+        return privateRequest("GET", built(buildScheduleListPath(args.status)).path);
       case "cancel_schedule":
-        return request(
+        return privateRequest(
           "DELETE",
           built(buildScheduleCancelPath(args.schedule_id)).path,
         );

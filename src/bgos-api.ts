@@ -254,6 +254,7 @@ export class BgosApi {
     path: string,
     assistantId: number,
     body?: unknown,
+    actingUserId?: string,
   ): Promise<any> {
     // Board names are percent-encoded path segments, including Unicode,
     // spaces, uppercase letters and punctuation. Validate route structure
@@ -280,7 +281,7 @@ export class BgosApi {
       method,
       url: path,
       data: body,
-      headers: { "X-Caller-Assistant-Id": String(assistantId) },
+      headers: { "X-Caller-Assistant-Id": String(assistantId), ...(actingUserId ? { "X-BGOS-Acting-User": actingUserId } : {}) },
       timeout: 55_000,
       maxContentLength: 8 * 1024 * 1024,
     });

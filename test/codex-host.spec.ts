@@ -1238,6 +1238,7 @@ describe("the Codex goal lane's half of the host", () => {
       threadId,
       cwd: home,
       excludeTurns: true,
+      config: expect.objectContaining({ "mcp_servers.hoai_browser.env": expect.objectContaining({ HOAI_RELAY_CONTEXT_FILE: expect.any(String) }) }),
     });
   });
 });
@@ -2130,7 +2131,9 @@ describe("no past turn rides a resume, a fork or a read", () => {
         expect(instructions, `the carried context lost "${text}"`).toContain(text);
       expect(
         callsOf("thread/resume").filter((p) => p.threadId === "legacy"),
-      ).toEqual([{ threadId: "legacy", cwd: home, excludeTurns: true }]);
+      ).toEqual([{ threadId: "legacy", cwd: home, excludeTurns: true,
+        config: expect.objectContaining({ "mcp_servers.hoai_browser.env": expect.objectContaining({ HOAI_RELAY_CONTEXT_FILE: expect.any(String) }) }),
+      }]);
       // Cold page, the resume, the pages, the unsubscribe, THEN the new thread.
       expect(methodsFor("legacy")).toEqual([
         "thread/turns/list",
