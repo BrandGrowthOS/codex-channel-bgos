@@ -796,6 +796,7 @@ export class CodexAdapter {
       backendUrl: this.cfg.baseUrl,
       pairingToken: this.currentToken,
       assistantId,
+      ...(this.ownerId ? { ownerUserId: this.ownerId } : {}),
     };
   }
   /**
@@ -1351,6 +1352,8 @@ export class CodexAdapter {
       assistantId,
       chatId,
       userId: source?.senderUserId || source?.userId || this.ownerId,
+      privateActor: source?.browserActor ?? null,
+      ownerUserId: this.ownerId,
       readUserId: source?.userId || this.ownerId,
       messageId: source?.messageId,
       peerConversationId: source?.peerConversationId,
@@ -1398,6 +1401,7 @@ export class CodexAdapter {
     try {
       result = await this.host.runTurn(chatId, turnInput, {
         ...nativeOptions,
+        browserActor: source?.browserActor ?? null,
         signal: controller.signal,
         onRequest: async (method, params) => {
           await earlier;
@@ -2028,6 +2032,8 @@ export class CodexAdapter {
       // owner is the only person it can act for.
       userId: this.ownerId,
       readUserId: this.ownerId,
+      privateActor: this.host?.privateActorForChat?.(chatId) ?? null,
+      ownerUserId: this.ownerId,
       signal: controller.signal,
       onReply: () => {
         sentViaTool = true;
@@ -3074,6 +3080,8 @@ export class CodexAdapter {
               assistantId,
               chatId: targetChatId,
               userId: this.ownerId,
+              privateActor: this.ownerId,
+              ownerUserId: this.ownerId,
               signal: controller.signal,
               voiceTaskId: taskId,
               completeVoiceTask: async (args) => {
@@ -3093,6 +3101,7 @@ export class CodexAdapter {
               `Authorized voice task. task_id=${taskId}. Work on the request below. Call complete_voice_task when done or return your final result and the host will report it to the call.\n${String(args.context ?? "")}\n${args.question}`,
               {
                 signal: controller.signal,
+                browserActor: this.ownerId,
                 onRequest: (method, params) =>
                   this.tools.handleRequest(method, params, context),
               },

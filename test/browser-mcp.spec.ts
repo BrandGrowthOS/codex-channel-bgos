@@ -198,7 +198,7 @@ describe("the relay env reaches every thread Codex starts", () => {
         expect.objectContaining({ threadId: "thread-1" }),
       ),
     );
-    expect(server.paramsFor("thread/start").config[ENV_KEY]).toEqual({
+    expect(server.paramsFor("thread/start").config[ENV_KEY]).toMatchObject({
       HOAI_RELAY_BACKEND_URL: "https://api.brandgrowthos.test",
       HOAI_RELAY_PAIRING_TOKEN: TOKEN,
       HOAI_RELAY_ASSISTANT_ID: "4242",
@@ -214,7 +214,7 @@ describe("the relay env reaches every thread Codex starts", () => {
       ),
     );
     const forked = server.paramsFor("thread/fork").config;
-    expect(forked[ENV_KEY]).toEqual({
+    expect(forked[ENV_KEY]).toMatchObject({
       HOAI_RELAY_BACKEND_URL: "https://api.brandgrowthos.test",
       HOAI_RELAY_PAIRING_TOKEN: TOKEN,
       HOAI_RELAY_ASSISTANT_ID: "4242",
@@ -242,7 +242,7 @@ describe("the relay env reaches every thread Codex starts", () => {
     await turn;
   });
 
-  it("survives a resolver that throws, and then carries no relay env", async () => {
+  it("survives a resolver that throws, and refuses unverified private browsing", async () => {
     host.close();
     server = new Server();
     host = new CodexHost({
@@ -261,7 +261,8 @@ describe("the relay env reaches every thread Codex starts", () => {
       ),
     );
     const config = server.paramsFor("thread/start").config;
-    expect(config[ENV_KEY]).toBeUndefined();
+    expect(config[ENV_KEY].HOAI_RELAY_CONTEXT_FILE).toEqual(expect.any(String));
+    expect(config[ENV_KEY].HOAI_RELAY_OWNER_USER_ID).toBe("");
     expect(config[`mcp_servers.${HOAI_BROWSER_SERVER}.command`]).toBe(
       process.execPath,
     );

@@ -45,6 +45,8 @@ export interface InboundFile {
 }
 
 export interface InboundMessagePayload {
+  /** Derived from authenticated sender or reserved scheduler metadata, never userId. */
+  browserActor?: string | null;
   assistantId: number;
   userId: string;
   chatId: number;

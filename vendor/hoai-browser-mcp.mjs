@@ -113,10 +113,12 @@ const CONNECT_REASON_TEXT = {
 
 const CLIENT_ID = crypto.randomUUID(); // the MCP session key on the desktop side
 const RELAY = readRelayCredentials(process.env);
+const MANAGED_CONTEXT_REQUIRED = Object.hasOwn(process.env, "HOAI_RELAY_CONTEXT_FILE");
+const CONTEXT_REFUSAL = Object.freeze({ valid: false, code: "acting_context_unavailable", text: "This browser action was not sent because its current sender could not be verified. Send a new message in your HOAI chat and try again. Nothing ran." });
 
 let mode = "offline"; // offline | local | relay
 let upstream = null; // local: { url, token, sessionId, initialized, instructions }
-let relay = null; // relay: { initialized, instructions, hostLabel }
+const relayConnections = new Map(); // actor/chat/session clientId -> initialized relay
 let clientInfo = null;
 let clientProtocol = PROTOCOL_VERSION;
 let initSeq = 0;
@@ -151,6 +153,52 @@ function readRelayCredentials(env) {
   if (apiKey && assistantId) return { backendUrl: url, headers: { "X-API-Key": apiKey }, assistantId };
   return null;
 }
+
+function boundedJson(file, maxBytes) {
+  let fd;
+  try {
+    fd = fs.openSync(file, "r");
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size > maxBytes) return null;
+    const bytes = Buffer.alloc(maxBytes + 1);
+    let length = 0, count;
+    while (length < bytes.length && (count = fs.readSync(fd, bytes, length, bytes.length - length, null)) > 0) length += count;
+    return length <= maxBytes ? JSON.parse(bytes.subarray(0, length).toString("utf8")) : null;
+  } catch { return null; }
+  finally { if (fd !== undefined) fs.closeSync(fd); }
+}
+
+// A managed shim may never infer the owner from absent or stale turn metadata.
+// The synchronous marker closes the interval before the daemon processes a new
+// prompt. Only the daemon signs the actor; marker contents alone grant nothing.
+function readManagedContext() {
+  if (!MANAGED_CONTEXT_REQUIRED) return null;
+  try {
+    const envelope = boundedJson(process.env.HOAI_RELAY_CONTEXT_FILE, 8192);
+    const context = envelope?.context;
+    const secret = RELAY?.headers["X-BGOS-Pairing"] || RELAY?.headers["X-API-Key"];
+    if (!secret || !context || typeof envelope.signature !== "string" || !/^[a-f0-9]{64}$/.test(envelope.signature)) return CONTEXT_REFUSAL;
+    const expected = crypto.createHmac("sha256", secret).update(JSON.stringify(context)).digest();
+    if (!crypto.timingSafeEqual(expected, Buffer.from(envelope.signature, "hex"))) return CONTEXT_REFUSAL;
+    const userId = value => typeof value === "string" && /^user_[A-Za-z0-9_-]{1,240}$/.test(value);
+    const identifier = value => typeof value === "string" && value.length > 0 && value.length <= 256 && !/[\s\x00-\x1f\x7f]/.test(value);
+    const pid = value => Number.isSafeInteger(value) && value > 0 && value <= 2147483647;
+    const age = Date.now() - context.updatedAt;
+    if (context.schemaVersion !== 1 || context.live !== true || String(context.assistantId) !== RELAY.assistantId ||
+        !userId(context.ownerUserId) || context.ownerUserId !== process.env.HOAI_RELAY_OWNER_USER_ID || !userId(context.actingUserId) ||
+        !identifier(context.chatId) || !/^[1-9][0-9]*$/.test(context.chatId) || !identifier(context.turnId) || !identifier(context.sessionId) ||
+        !pid(context.claudePid) || context.claudePid !== Number(process.env.HOAI_RELAY_CLIENT_PID) || !pid(context.pid) ||
+        !Number.isFinite(context.updatedAt) || age < -5000 || age > 60000 ||
+        typeof context.markerPath !== "string" || !context.markerPath || typeof context.promptHash !== "string" || !/^[a-f0-9]{64}$/.test(context.promptHash)) return CONTEXT_REFUSAL;
+    process.kill(context.pid, 0);
+    const marker = boundedJson(context.markerPath, 2048);
+    if (marker?.schemaVersion !== 1 || marker.live !== true || marker.turnId !== context.turnId || marker.sessionId !== context.sessionId || marker.promptHash !== context.promptHash) return CONTEXT_REFUSAL;
+    const clientId = crypto.createHash("sha256").update(JSON.stringify([CLIENT_ID, context.actingUserId, context.chatId, context.sessionId])).digest("hex");
+    const headers = context.actingUserId === context.ownerUserId ? {} : { "X-BGOS-Acting-User": context.actingUserId };
+    return Object.freeze({ valid: true, clientId, headers: Object.freeze(headers) });
+  } catch { return CONTEXT_REFUSAL; }
+}
+const relayClientId = context => context?.clientId || CLIENT_ID;
 
 function readDiscovery() {
   try {
@@ -228,8 +276,8 @@ async function ensureLocal(doc) {
 
 // ─── Relay door (through the owner's HOAI account to their desktop app) ──────
 
-async function relayFetch(method, pathname, body, signal) {
-  const headers = { Accept: "application/json", ...RELAY.headers };
+async function relayFetch(method, pathname, body, signal, context) {
+  const headers = { Accept: "application/json", ...RELAY.headers, ...context?.headers };
   if (body !== undefined) headers["Content-Type"] = "application/json";
   const res = await fetch(RELAY.backendUrl + pathname, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal });
   let payload = null;
@@ -331,15 +379,15 @@ function sleep(ms, signal) {
  * { ok: false, code, text, transport? } where transport marks a network
  * failure (the relay itself is unreachable) as opposed to an honest answer.
  */
-async function relaySend(message, signal) {
+async function relaySend(message, signal, context) {
   signal?.throwIfAborted();
-  const body = { clientId: CLIENT_ID, message, waitMs: RELAY_WAIT_MS };
+  const body = { clientId: relayClientId(context), message, waitMs: RELAY_WAIT_MS };
   if (RELAY.assistantId) body.assistantId = RELAY.assistantId;
   const startedAt = Date.now();
   let collecting = false; // true once the call went pending: from then on it was SENT, whatever the answer
   let r;
   try {
-    r = await relayFetch("POST", RELAY_MCP_PATH, body, signal);
+    r = await relayFetch("POST", RELAY_MCP_PATH, body, signal, context);
   } catch (e) {
     signal?.throwIfAborted();
     const error = String(e?.message || e);
@@ -362,7 +410,7 @@ async function relaySend(message, signal) {
       await sleep(Math.max(250, Number(r.payload.pollAfterMs) || 2000), signal);
       try {
         collecting = true;
-        r = await relayFetch("GET", `${RELAY_MCP_PATH}/${encodeURIComponent(r.payload.rpcId)}`, undefined, signal);
+        r = await relayFetch("GET", `${RELAY_MCP_PATH}/${encodeURIComponent(r.payload.rpcId)}`, undefined, signal, context);
       } catch (e) {
         signal?.throwIfAborted();
         // The collect never came back, but the call it collects WAS SENT.
@@ -378,14 +426,14 @@ async function relaySend(message, signal) {
   }
 }
 
-async function relayHostOnline() {
+async function relayHostOnline(context) {
   try {
     // With an assistant configured, ask for THAT agent's host: the backend then answers with the agent's own
     // machine when the owner placed it there (hostKind "agent"), and only otherwise with the owner's desktop.
     // The plain probe answers for the desktop alone, so an agent on its own machine read as offline whenever the
     // owner's app was closed, which is the one time that placement exists for (Mission 25 goal 6, 2026-09-25).
     const probePath = RELAY.assistantId ? `${RELAY_HOST_PATH}?assistantId=${encodeURIComponent(RELAY.assistantId)}` : RELAY_HOST_PATH;
-    const r = await relayFetch("GET", probePath);
+    const r = await relayFetch("GET", probePath, undefined, undefined, context);
     // A refused probe (a 429 from the global request throttler, a 5xx, a 401) says NOTHING about the desktop app:
     // it used to read as "no host", and the agent was told the app "is not running or not signed in".
     if (r.status !== 200) return { failed: probeFailure(r.status, r.retryAfter) };
@@ -417,17 +465,21 @@ function probeFailure(status, retryAfter) {
  * false here (review round 2). `text` is the reason behind CONNECT_LEAD, which a tool result shows; the initialize
  * instructions put CONNECT_LEAD_INSTRUCTIONS in front instead, because no call of the agent's exists yet.
  */
-async function ensureRelay() {
-  if (relay && relay.initialized) return { relay };
-  const host = await relayHostOnline();
+async function ensureRelay(context) {
+  const clientId = relayClientId(context);
+  const existing = relayConnections.get(clientId);
+  if (existing?.initialized) return { relay: existing };
+  const host = await relayHostOnline(context);
   if (host && host.failed) return { relay: null, refusal: host.failed };
   if (!host || !host.online) return { relay: null, refusal: null };
-  const init = await relaySend({ jsonrpc: "2.0", id: `shim-init-${++initSeq}`, method: "initialize", params: initializeParams() });
+  const init = await relaySend({ jsonrpc: "2.0", id: `shim-init-${++initSeq}`, method: "initialize", params: initializeParams() }, undefined, context);
   if (!init.ok) return { relay: null, refusal: init.code === "host_offline" ? null : connectRefusal(init) };
   if (init.message && init.message.error) return { relay: null, refusal: connectRefusal({ code: "host_init_error", hostError: init.message.error.message || JSON.stringify(init.message.error) }) };
   if (!init.message) return { relay: null, refusal: null };
-  await relaySend({ jsonrpc: "2.0", method: "notifications/initialized" }).catch(() => {});
-  relay = { initialized: true, instructions: init.message.result?.instructions || "", hostLabel: host.hostLabel };
+  await relaySend({ jsonrpc: "2.0", method: "notifications/initialized" }, undefined, context).catch(() => {});
+  const relay = { initialized: true, instructions: init.message.result?.instructions || "", hostLabel: host.hostLabel };
+  relayConnections.delete(clientId); relayConnections.set(clientId, relay);
+  while (relayConnections.size > 32) relayConnections.delete(relayConnections.keys().next().value);
   return { relay };
 }
 
@@ -436,26 +488,26 @@ function connectRefusal(res) {
   return { code: res.code, connecting: true, reason, text: `${CONNECT_LEAD} ${reason}` };
 }
 
-function dropRelay(code) {
+function dropRelay(code, context) {
   // An honest host_offline, a dropped host (host_disconnected: the window
   // reloaded, so the desktop's session died with its socket) or a dead relay
   // means the session on the desktop is gone; the next call re-elects through
   // a fresh initialize.
-  if (code === "host_offline" || code === "host_disconnected" || code === "relay_unreachable" || code === "relay_unsupported" || code === "call_lost") relay = null;
+  if (code === "host_offline" || code === "host_disconnected" || code === "relay_unreachable" || code === "relay_unsupported" || code === "call_lost") relayConnections.delete(relayClientId(context));
 }
 
 // ─── Mode resolution: local, then relay, then offline ────────────────────────
 
-let resolving = null;
-function resolveMode() {
-  if (!resolving) resolving = doResolveMode().finally(() => {
-    resolving = null;
-  });
-  return resolving;
+const resolving = new Map();
+function resolveMode(context = readManagedContext()) {
+  if (context?.valid === false) { setMode("offline"); return Promise.resolve({ mode: "offline", refusal: context }); }
+  const key = relayClientId(context);
+  if (!resolving.has(key)) resolving.set(key, doResolveMode(context).finally(() => resolving.delete(key)));
+  return resolving.get(key);
 }
 
-async function doResolveMode() {
-  const doc = readDiscovery();
+async function doResolveMode(context) {
+  const doc = MANAGED_CONTEXT_REQUIRED ? null : readDiscovery();
   if (doc) {
     const up = await ensureLocal(doc);
     if (up) {
@@ -466,14 +518,14 @@ async function doResolveMode() {
   upstream = null;
   let refusal = null;
   if (RELAY) {
-    const r = await ensureRelay();
+    const r = await ensureRelay(context);
     if (r.relay) {
       setMode("relay");
       return { mode: "relay", relay: r.relay };
     }
     refusal = r.refusal;
   }
-  relay = null;
+  relayConnections.delete(relayClientId(context));
   setMode("offline");
   return { mode: "offline", refusal };
 }
@@ -511,7 +563,7 @@ async function cancelRequest(notification) {
       const response = await post(message, destination.up, signal);
       if (response.status < 200 || response.status >= 300) throw new Error("Cancellation refused");
     } else {
-      const response = await relaySend(message, signal);
+      const response = await relaySend(message, signal, destination.context);
       if (!response.ok) throw new Error("Cancellation refused");
     }
   } catch {
@@ -530,9 +582,10 @@ async function handle(msg, entry) {
   const reply = (result) => send({ jsonrpc: "2.0", id, result });
   const fail = (code, message) => send({ jsonrpc: "2.0", id, error: { code, message } });
   const signal = entry?.controller.signal;
+  const context = entry?.context ?? readManagedContext();
   const resolveRequestMode = async () => {
     signal?.throwIfAborted();
-    const resolved = await resolveMode();
+    const resolved = await resolveMode(context);
     signal?.throwIfAborted();
     return resolved;
   };
@@ -543,8 +596,8 @@ async function handle(msg, entry) {
   };
   const relayRequest = async body => {
     signal?.throwIfAborted();
-    if (entry) entry.destination = { mode: "relay" };
-    return relaySend(body, signal);
+    if (entry) entry.destination = { mode: "relay", context };
+    return relaySend(body, signal, context);
   };
   if (method === "initialize") {
     clientInfo = params?.clientInfo || null;
@@ -573,8 +626,8 @@ async function handle(msg, entry) {
     }
     const res = await relayRequest({ jsonrpc: "2.0", id, method, params: params || {} });
     if (!res.ok || !res.message || !res.message.result) {
-      dropRelay(res.code);
-      if (!relay) setMode("offline");
+      dropRelay(res.code, context);
+      if (!relayConnections.has(relayClientId(context))) setMode("offline");
       return reply({ tools: [OFFLINE_TOOL] });
     }
     return send({ ...res.message, id });
@@ -592,8 +645,8 @@ async function handle(msg, entry) {
     }
     const res = await relayRequest({ jsonrpc: "2.0", id, method, params });
     if (!res.ok) {
-      dropRelay(res.code);
-      if (!relay) setMode("offline");
+      dropRelay(res.code, context);
+      if (!relayConnections.has(relayClientId(context))) setMode("offline");
       return reply({ content: [{ type: "text", text: res.text }], isError: params?.name !== "hoai_browser_status" || res.code !== "host_offline" });
     }
     if (params?.name === "hoai_browser_status" && res.message?.result && !res.message.result.isError && r.relay.hostLabel) {
@@ -636,7 +689,7 @@ rl.on("line", (line) => {
     write({ jsonrpc: "2.0", id: msg.id, error: { code: -32600, message: "Request ID is already in flight" } });
     return;
   }
-  const entry = hasId ? { id: msg.id, method: msg.method, controller: new AbortController(), destination: null, cancelled: false } : null;
+  const entry = hasId ? { id: msg.id, method: msg.method, context: readManagedContext(), controller: new AbortController(), destination: null, cancelled: false } : null;
   if (entry) requests.set(msg.id, entry);
   chain = chain.then(() => { if (!entry?.cancelled) return handle(msg, entry); }).catch((e) => {
     if (hasId && !entry.cancelled) write({ jsonrpc: "2.0", id: msg.id, error: { code: -32000, message: String(e?.message || e) } });

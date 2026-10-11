@@ -135,6 +135,7 @@ export interface ReplyHandle {
  * Codex's internal pipeline expects.
  */
 export interface DispatchArgs {
+  browserActor?: string | null;
   origin: "bgos";
   agentRoute: string;
   assistantId: number;
@@ -516,6 +517,7 @@ export function createInboundHandler(
         chatId: event.chatId,
         messageId: event.messageId,
         userId: event.userId,
+        browserActor: event.browserActor,
         senderType: event.senderType,
         chatKind: event.chatKind,
         senderUserId: event.senderUserId,

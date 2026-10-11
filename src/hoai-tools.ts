@@ -116,6 +116,10 @@ export interface MissionSelfWrites {
 }
 
 export interface ToolContext extends InteractionContext {
+  /** Verified person frozen at turn admission, distinct from legacy reply routing. */
+  privateActor?: string | null;
+  /** The pairing owner. Owner only tools refuse when it is unknown. */
+  ownerUserId?: string;
   messageId?: number;
   peerConversationId?: number;
   meetingId?: number;
@@ -316,6 +320,18 @@ export class HoaiTools {
       body?: unknown,
     ) => this.api.agentRequest(method, path, context.assistantId, body);
     const post = (path: string, body: unknown) => request("POST", path, body);
+    const privateActor = context.privateActor;
+    const privateRequest = (method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown) => {
+      if (typeof privateActor !== "string" || !/^user_[A-Za-z0-9_-]+$/.test(privateActor))
+        throw new Error("This private action requires a verified current sender. Send a new message in your HOAI chat.");
+      return this.api.agentRequest(method, path, context.assistantId, body, privateActor);
+    };
+    // The health log is always the pairing owner's: its backend ignores the
+    // acting user header, so only a verified owner turn may read or write it.
+    const ownerOnly = () => {
+      if (!context.ownerUserId || privateActor !== context.ownerUserId)
+        throw new Error("The health log on this agent belongs to its owner, so only the owner's own messages can use it.");
+    };
     if (name.startsWith("boards_")) {
       if (typeof args.file_path === "string")
         args.file_path = resolveAllowedMediaPath(args.file_path);
@@ -325,7 +341,7 @@ export class HoaiTools {
         body?: unknown,
       ) => {
         try {
-          return await request(method, path, body);
+          return await privateRequest(method, path, body);
         } catch (error) {
           // The shared Boards handler expects a body-bearing Error rather
           // than Axios's generic status message. Preserve the refusal body,
@@ -622,18 +638,19 @@ export class HoaiTools {
           }),
         );
       case "schedule":
-        return post(
+        return privateRequest("POST",
           "scheduled-tasks/agent",
           built(buildScheduleCreateBody({ ...args, chatId })).body,
         );
       case "list_schedules":
-        return request("GET", built(buildScheduleListPath(args.status)).path);
+        return privateRequest("GET", built(buildScheduleListPath(args.status)).path);
       case "cancel_schedule":
-        return request(
+        return privateRequest(
           "DELETE",
           built(buildScheduleCancelPath(args.schedule_id)).path,
         );
       case "log_health_event": {
+        ownerOnly();
         const body = built(
           buildHealthLogEventBody(args, {
             assistantId: String(context.assistantId),
@@ -652,8 +669,10 @@ export class HoaiTools {
         }
       }
       case "list_health_events":
+        ownerOnly();
         return request("GET", built(buildHealthLogListPath(args)).path);
       case "undo_health_event":
+        ownerOnly();
         return request(
           "DELETE",
           built(buildHealthLogUndoPath(args.event_id)).path,

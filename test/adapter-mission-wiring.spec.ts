@@ -274,6 +274,22 @@ describe("adopting a turn the app server started by itself", () => {
     expect(goalLane.noteTurnStarted).toHaveBeenCalledWith(20);
   });
 
+  it("freezes a goal's last verified private actor and never uses the legacy owner fallback", async () => {
+    const { adapter } = fixture(true);
+    adapter.host = { privateActorForChat: () => "user_recipient" };
+    adapter.ownerId = "user_owner";
+    const adopted = adapter.adoptGoalTurn(20)!;
+    adapter.host.privateActorForChat = () => "user_other";
+    await adopted.callbacks.onRequest("item/tool/call", {});
+    expect(adapter.tools.handleRequest.mock.calls[0][2].privateActor).toBe("user_recipient");
+    // Owner only tools (the health log) compare the actor with the pairing owner.
+    expect(adapter.tools.handleRequest.mock.calls[0][2].ownerUserId).toBe("user_owner");
+    adapter.host.privateActorForChat = () => null;
+    const unknown = adapter.adoptGoalTurn(20)!;
+    await unknown.callbacks.onRequest("item/tool/call", {});
+    expect(adapter.tools.handleRequest.mock.calls[1][2].privateActor).toBeNull();
+  });
+
   it("delivers the reply to the chat and then tells the lane the turn ended", async () => {
     const { adapter, goalLane, sendText } = fixture(true);
     const adopted = adapter.adoptGoalTurn(20)!;

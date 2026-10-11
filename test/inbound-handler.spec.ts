@@ -29,6 +29,7 @@ describe("attachment delivery", () => {
     await handle({
       assistantId: 9,
       userId: "test",
+      browserActor: "user_recipient",
       chatId: 1,
       messageId: 1,
       text: "Read this file",
@@ -45,6 +46,7 @@ describe("attachment delivery", () => {
     });
     expect(readFileSync(downloaded[0], "utf8")).toBe(text);
     expect(dispatch.mock.calls[0][0].attachments[0].fileName).toBe("notes.md");
+    expect(dispatch.mock.calls[0][0].browserActor).toBe("user_recipient");
     expect(outbound.sendAgentError).not.toHaveBeenCalled();
   });
   it("discloses a missing file without dropping the user's text or claiming to read it", async () => {

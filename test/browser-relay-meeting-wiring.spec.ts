@@ -33,7 +33,7 @@
  * inert (the Codex app-server is only spawned by `preflight`), and the three
  * collaborators the meeting path touches are replaced on the real instances.
  */
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -126,7 +126,7 @@ function realAdapter() {
    */
   const configs: Array<Record<string, unknown>> = [];
   adapter.host.runTurn = vi.fn(async (chatId: number) => {
-    configs.push(adapter.host.browserConfig(chatId));
+    configs.push(adapter.host.browserConfig(chatId).config);
     return {
       replyText: "ok",
       finalAgentMessageText: "ok",
@@ -173,17 +173,21 @@ describe("the adapter's own meeting wiring names the agent for the relay", () =>
     expect(adapter.host.runTurn).toHaveBeenCalledTimes(1);
     expect(configs).toHaveLength(1);
     // The production artefact: what the shim is handed for this chat.
-    expect(configs[0][`mcp_servers.${HOAI_BROWSER_SERVER}.env`]).toEqual({
+    expect(configs[0][`mcp_servers.${HOAI_BROWSER_SERVER}.env`]).toMatchObject({
       HOAI_RELAY_BACKEND_URL: "https://api.brandgrowthos.test",
       HOAI_RELAY_PAIRING_TOKEN: TOKEN,
       HOAI_RELAY_ASSISTANT_ID: String(SPEAKER),
     });
+    const env = configs[0][`mcp_servers.${HOAI_BROWSER_SERVER}.env`] as Record<string, string>;
+    expect(JSON.parse(readFileSync(env.HOAI_RELAY_CONTEXT_FILE, "utf8")).context.live).toBe(false);
+    expect(adapter.host.runTurn.mock.calls[0][2].browserActor).toBeUndefined();
     // And the pair outlives the turn, so a later browser call in the same chat
     // relays as the same agent.
     expect(adapter.browserRelay(COLD_CHAT)).toEqual({
       backendUrl: BASE_URL,
       pairingToken: TOKEN,
       assistantId: SPEAKER,
+      ownerUserId: "user_1",
     });
   });
 
