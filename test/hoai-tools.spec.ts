@@ -849,3 +849,35 @@ describe("the shared tool declarations", () => {
     expect(button.required).toEqual(["label", "value"]);
   });
 });
+
+describe("health log tools on a shared agent", () => {
+  // The backend health-log controller scopes every call to the pairing owner
+  // and ignores X-BGOS-Acting-User, so only an owner authored turn may call it.
+  const calls = [
+    ["log_health_event", { event_type: "meal", item_name: "salad" }],
+    ["list_health_events", {}],
+    ["undo_health_event", { event_id: "hle_1" }],
+  ] as const;
+  const tools = (agentRequest: any) => new HoaiTools({ agentRequest } as any, () => "canon");
+
+  it.each(calls)("%s refuses a shared recipient before any owner scoped request", async (name, args) => {
+    const agentRequest = vi.fn(async () => ({ id: "hle_1", events: [] }));
+    await expect(
+      tools(agentRequest).call(name, args, { ...context(), userId: "user_recipient", privateActor: "user_recipient", ownerUserId: "user_owner" }),
+    ).rejects.toThrow("health log");
+    expect(agentRequest).not.toHaveBeenCalled();
+  });
+
+  it.each(calls)("%s refuses a turn with no verified sender or no known owner", async (name, args) => {
+    const agentRequest = vi.fn(async () => ({ id: "hle_1", events: [] }));
+    await expect(tools(agentRequest).call(name, args, { ...context(), privateActor: null, ownerUserId: "user_owner" })).rejects.toThrow();
+    await expect(tools(agentRequest).call(name, args, { ...context(), privateActor: "user_owner" })).rejects.toThrow();
+    expect(agentRequest).not.toHaveBeenCalled();
+  });
+
+  it.each(calls)("%s still works for the owner", async (name, args) => {
+    const agentRequest = vi.fn(async () => ({ id: "hle_1", events: [] }));
+    await tools(agentRequest).call(name, args, { ...context(), privateActor: "user_owner", ownerUserId: "user_owner" });
+    expect(agentRequest).toHaveBeenCalledTimes(1);
+  });
+});

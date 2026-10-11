@@ -1353,6 +1353,7 @@ export class CodexAdapter {
       chatId,
       userId: source?.senderUserId || source?.userId || this.ownerId,
       privateActor: source?.browserActor ?? null,
+      ownerUserId: this.ownerId,
       readUserId: source?.userId || this.ownerId,
       messageId: source?.messageId,
       peerConversationId: source?.peerConversationId,
@@ -2032,6 +2033,7 @@ export class CodexAdapter {
       userId: this.ownerId,
       readUserId: this.ownerId,
       privateActor: this.host?.privateActorForChat?.(chatId) ?? null,
+      ownerUserId: this.ownerId,
       signal: controller.signal,
       onReply: () => {
         sentViaTool = true;
@@ -3079,6 +3081,7 @@ export class CodexAdapter {
               chatId: targetChatId,
               userId: this.ownerId,
               privateActor: this.ownerId,
+              ownerUserId: this.ownerId,
               signal: controller.signal,
               voiceTaskId: taskId,
               completeVoiceTask: async (args) => {
