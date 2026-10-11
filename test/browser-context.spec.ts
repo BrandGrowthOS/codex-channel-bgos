@@ -51,10 +51,36 @@ describe("authenticated browser actors", () => {
       { senderType: "user", sender_user_id: "user_owner", peerConversationId: 5 },
       { senderType: "user", sender_user_id: "user_owner", chat_kind: "group" },
       { senderType: "user", sender_user_id: "user_owner", chatKind: "meeting" },
-      { sender_user_id: "user_owner" },
       { senderType: "system", sender_user_id: "user_owner" },
       { senderType: "system", eventMeta: { source: "agent", payload: { actingUserId: "user_owner" } } },
     ]) expect(browserActorFromDelivery(raw)).toBeNull();
+  });
+  it("admits an ordinary human delivery exactly as the BGOS backend sends it (no senderType)", () => {
+    // WS lane: send-message.service.ts:3513-3541 emits `sender` from buildInboundSender
+    // (sender-identity.ts:48 buildSenderBlock) and spreads senderType only when isSystemMsg.
+    const ws = Object.create(BgosWs.prototype) as any;
+    const live = {
+      assistantId: 42, userId: "user_recipient", chatId: 9, messageId: 7, text: "open example.com", files: [],
+      messageType: "standard", sender: { userId: "user_recipient", displayName: "Recipient A", relationship: "shared_recipient" },
+      isSharedRecipient: true, shareOwnerUserId: "user_owner", sessionHandle: "h",
+    };
+    expect(browserActorFromDelivery(live)).toBe("user_recipient");
+    expect(ws.normalizeInbound(live).browserActor).toBe("user_recipient");
+    // Poll lane: integrations.controller.ts:1449-1461 sets senderType only for a2a or system rows,
+    // and :1500-1503 carries the stored human author as sender_user_id. user_id is the owner.
+    const polled = {
+      id: 8, message_id: 8, chat_id: 9, text: "schedule a reminder", chat_kind: "main", message_type: "standard",
+      assistant_id: 42, user_id: "user_owner", sender_user_id: "user_recipient", sender_display_name: "Recipient A",
+      sender_relationship: "shared_recipient",
+    };
+    expect(browserActorFromDelivery(polled)).toBe("user_recipient");
+    expect(ws.normalizeInbound(polled).browserActor).toBe("user_recipient");
+    // A human delivery without an author block never falls back to the envelope owner.
+    expect(browserActorFromDelivery({ ...polled, sender_user_id: undefined })).toBeNull();
+    // Agent and peer deliveries stay refused even with a stale human block.
+    expect(browserActorFromDelivery({ ...live, senderType: "agent", agentOrigin: { peerConversationId: 3 } })).toBeNull();
+    expect(browserActorFromDelivery({ ...polled, agentOrigin: { peerConversationId: 3 }, peerConversationId: 3 })).toBeNull();
+    expect(browserActorFromDelivery({ ...polled, senderType: "system" })).toBeNull();
   });
   it("normalizes live and backfilled metadata without inheriting the owner fallback", () => {
     const ws = Object.create(BgosWs.prototype) as any;

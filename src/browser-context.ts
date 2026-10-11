@@ -18,7 +18,9 @@ export function browserActorFromDelivery(raw: Record<string, any>): string | nul
     const actor = event?.source === "scheduler" ? event.payload?.actingUserId : null;
     return validUser(actor) ? actor : null;
   }
-  if (type !== "user") return null;
+  // BGOS sends no senderType on an ordinary human turn (agent and peer
+  // deliveries were refused above), so absent means the authored human.
+  if (type != null && type !== "user") return null;
   const actor = raw.senderUserId ?? raw.sender_user_id ?? raw.sender?.userId;
   return validUser(actor) ? actor : null;
 }
