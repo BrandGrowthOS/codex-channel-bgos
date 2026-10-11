@@ -1,5 +1,5 @@
 import { createHash, createHmac, randomUUID } from "node:crypto";
-import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { BrowserRelayCredentials } from "./browser-mcp.js";
 
@@ -25,6 +25,26 @@ export function browserActorFromDelivery(raw: Record<string, any>): string | nul
   return validUser(actor) ? actor : null;
 }
 
+const processAlive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+};
+
+/** Remove the `<pid>-<session>` scope directories of daemons that are gone. */
+export function sweepStaleBrowserContexts(root: string): void {
+  let names: string[];
+  try { names = readdirSync(root); } catch { return; }
+  for (const name of names) {
+    const pid = Number(/^(\d+)-/.exec(name)?.[1]);
+    if (!pid || pid === process.pid || processAlive(pid)) continue;
+    try { rmSync(join(root, name), { recursive: true, force: true }); } catch {}
+  }
+}
+
 function writeJson(path: string, value: unknown): void {
   const temp = `${path}.${randomUUID()}.tmp`;
   writeFileSync(temp, JSON.stringify(value), { mode: 0o600 });
@@ -35,17 +55,19 @@ function writeJson(path: string, value: unknown): void {
 export class BrowserContext {
   readonly env: Record<string, string>;
   readonly sessionId = randomUUID();
+  private readonly dir: string;
   private readonly path: string;
   private readonly markerPath: string;
+  private disposed = false;
   private timer?: ReturnType<typeof setInterval>;
   private generation = 0;
   private lastActor: string | null = null;
 
   constructor(root: string, private readonly chatId: number, readonly relay: BrowserRelayCredentials | null) {
-    const dir = join(root, `${process.pid}-${this.sessionId}`);
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-    this.path = join(dir, "context.json");
-    this.markerPath = join(dir, "marker.json");
+    this.dir = join(root, `${process.pid}-${this.sessionId}`);
+    mkdirSync(this.dir, { recursive: true, mode: 0o700 });
+    this.path = join(this.dir, "context.json");
+    this.markerPath = join(this.dir, "marker.json");
     this.env = {
       HOAI_RELAY_CONTEXT_FILE: this.path,
       HOAI_RELAY_OWNER_USER_ID: relay?.ownerUserId ?? "",
@@ -57,6 +79,7 @@ export class BrowserContext {
   private invalidate(): void {
     clearInterval(this.timer);
     this.timer = undefined;
+    if (this.disposed) return;
     writeJson(this.markerPath, { schemaVersion: 1, live: false });
     writeJson(this.path, { context: { live: false } });
   }
@@ -65,7 +88,7 @@ export class BrowserContext {
     const generation = ++this.generation;
     this.invalidate();
     this.lastActor = validUser(actor) ? actor : null;
-    if (!this.lastActor || !validUser(this.relay?.ownerUserId) || !this.relay?.pairingToken) return () => {};
+    if (this.disposed || !this.lastActor || !validUser(this.relay?.ownerUserId) || !this.relay?.pairingToken) return () => {};
     const turnId = randomUUID();
     const promptHash = createHash("sha256").update(JSON.stringify(input) ?? "").digest("hex");
     const marker = { schemaVersion: 1, turnId, sessionId: this.sessionId, promptHash, live: true };
@@ -99,4 +122,11 @@ export class BrowserContext {
   continuationActor(): string | null { return this.lastActor; }
 
   end(): void { ++this.generation; this.lastActor = null; this.invalidate(); }
+
+  /** End and delete this scope's files once no MCP process will read them. */
+  dispose(): void {
+    this.end();
+    this.disposed = true;
+    try { rmSync(this.dir, { recursive: true, force: true }); } catch {}
+  }
 }

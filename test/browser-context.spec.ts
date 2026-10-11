@@ -1,10 +1,10 @@
 import { EventEmitter } from "node:events";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createServer } from "node:http";
 import { createHmac } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BrowserContext, browserActorFromDelivery } from "../src/browser-context.js";
 import { CodexHost } from "../src/codex-host.js";
@@ -109,6 +109,11 @@ describe("managed browser context lifecycle", () => {
   });
   afterEach(() => { host.close(); for (const scope of contexts.splice(0)) scope.end(); vi.useRealTimers(); vi.unstubAllEnvs(); rmSync(home, { recursive: true, force: true }); });
   const state = (id: string) => json(server.configs.get(id)[envKey].HOAI_RELAY_CONTEXT_FILE).context;
+  /** Revoked: the scope says not live, or its files are gone, which the shim also refuses. */
+  const revoked = (id: string) => {
+    const file = server.configs.get(id)[envKey].HOAI_RELAY_CONTEXT_FILE;
+    return !existsSync(file) || json(file).context.live === false;
+  };
   async function waitStarts(n: number) { await vi.waitFor(() => expect(server.starts).toHaveLength(n)); }
   async function finish(id: string, run: Promise<unknown>) {
     server.finish(id);
@@ -214,6 +219,33 @@ describe("managed browser context lifecycle", () => {
     await finish("thread-1", next);
   });
 
+  it("removes each detached scope's directory when it ends and every scope on close", async () => {
+    const root = () => dirname(dirname(server.configs.get("thread-1")[envKey].HOAI_RELAY_CONTEXT_FILE));
+    const main = host.runTurn(9, "owner", { browserActor: "user_owner" }); await waitStarts(1); await finish("thread-1", main);
+    for (let i = 0; i < 5; i += 1) {
+      const consult = host.runDetached(9, "consult", {}, true); await waitStarts(2 + i);
+      await finish(`thread-${2 + i}`, consult);
+    }
+    expect(readdirSync(root())).toHaveLength(1);
+    const kept = root();
+    host.close();
+    expect(readdirSync(kept)).toHaveLength(0);
+  });
+
+  it("sweeps scope directories left by a dead daemon at startup and keeps live ones", () => {
+    const dead = spawnSync(process.execPath, ["-e", ""]).pid!;
+    const root = join(home, "browser-context");
+    for (const name of [`${dead}-stale`, `${process.pid}-mine`, `${process.ppid}-other`]) {
+      mkdirSync(join(root, name), { recursive: true });
+      writeFileSync(join(root, name, "context.json"), "{}");
+    }
+    host.close();
+    host = new CodexHost({ auth: { ok: true, mode: "chatgpt", label: "fixture" }, workdir: home, server: server as any, relay: () => relay, onAdoptedTurn: () => ({ callbacks: {}, deliver: async () => {} }) });
+    expect(existsSync(join(root, `${dead}-stale`))).toBe(false);
+    expect(existsSync(join(root, `${process.pid}-mine`))).toBe(true);
+    expect(existsSync(join(root, `${process.ppid}-other`))).toBe(true);
+  });
+
   it("abort, reset and daemon close invalidate active authority", async () => {
     const controller = new AbortController();
     const run = host.runTurn(9, "owner", { browserActor: "user_owner", signal: controller.signal }); await waitStarts(1);
@@ -221,7 +253,7 @@ describe("managed browser context lifecycle", () => {
     const again = host.runTurn(9, "owner", { browserActor: "user_owner" }); await waitStarts(2);
     host.resetChat(9); expect(state("thread-1").live).toBe(false); await finish("thread-1", again);
     const last = host.runTurn(9, "owner", { browserActor: "user_owner" }); await waitStarts(3);
-    host.close(); await last; expect(state("thread-2").live).toBe(false);
+    host.close(); await last; expect(revoked("thread-2")).toBe(true);
   });
 
   it("a failed thread startup revokes the context published for MCP discovery", async () => {
@@ -233,7 +265,7 @@ describe("managed browser context lifecycle", () => {
     });
     await expect(host.runTurn(9, "owner", { browserActor: "user_owner" })).rejects.toThrow("synthetic startup failure");
     expect(server.discoveries[0].actingUserId).toBe("user_owner");
-    expect(state("thread-1").live).toBe(false);
+    expect(revoked("thread-1")).toBe(true);
   });
 
   it("abort during thread startup revokes discovery authority before a goal can inherit it", async () => {
@@ -264,7 +296,7 @@ describe("managed browser context lifecycle", () => {
       return method === "thread/start" ? { thread: {} } : result;
     });
     await expect(host.runTurn(9, "owner", { browserActor: "user_owner" })).rejects.toThrow("conversation identity");
-    expect(state("thread-1").live).toBe(false);
+    expect(revoked("thread-1")).toBe(true);
   });
 
   it("routes real bundled-shim calls through the publisher's admitted actor and refuses missing identity", async () => {
@@ -295,6 +327,9 @@ describe("managed browser context lifecycle", () => {
       scope.begin("user_recipient", "recipient"); expect((await call()).result.content[0].text).toBe("synthetic-page");
       const recipient = seen.at(-1)!; expect(recipient.actor).toBe("user_recipient"); expect(recipient.client).not.toBe(owner.client);
       const count = seen.length; scope.begin(null, "unattributed");
+      expect((await call()).result.isError).toBe(true); expect(seen).toHaveLength(count);
+      scope.begin("user_owner", "owner again"); scope.dispose();
+      expect(existsSync(scope.env.HOAI_RELAY_CONTEXT_FILE)).toBe(false);
       expect((await call()).result.isError).toBe(true); expect(seen).toHaveLength(count);
     } finally { child.kill(); await new Promise<void>(resolve => child.once("close", () => resolve())); await new Promise<void>(resolve => backend.close(() => resolve())); }
   });

@@ -29,7 +29,7 @@ import {
   type ThreadMap,
 } from "./thread-map.js";
 import { BGOS_AGENT_HINTS } from "./agent-hints.js";
-import { BrowserContext } from "./browser-context.js";
+import { BrowserContext, sweepStaleBrowserContexts } from "./browser-context.js";
 import {
   goalFromNotification,
   normalizeThreadGoal,
@@ -906,6 +906,7 @@ export class CodexHost {
     );
     mkdirSync(this.workdir, { recursive: true });
     this.threadsFile = threadsPath();
+    sweepStaleBrowserContexts(this.browserRoot());
     this.settings = new SessionSettingsStore(
       join(dirnameOf(this.threadsFile), "session-settings.json"),
     );
@@ -930,7 +931,7 @@ export class CodexHost {
       this.notification(method, params),
     );
     this.server.on("closed", (error: Error) => {
-      for (const scope of this.browserContexts.values()) scope.end();
+      for (const scope of this.browserContexts.values()) scope.dispose();
       this.browserContexts.clear();
       this.loaded.clear();
       for (const [threadId, turn] of this.active)
@@ -1522,6 +1523,7 @@ export class CodexHost {
           "That conversation does not belong to this HOAI chat.",
         );
       const browser = this.browserConfig(chatId, threadId);
+      const fresh = this.browserContexts.get(threadId) !== browser.scope;
       const result = await this.server.request("thread/resume", {
         threadId,
         config: browser.config,
@@ -1529,9 +1531,11 @@ export class CodexHost {
         developerInstructions: this.hints,
         // Only the identity is read below. See PAST_TURNS_NOTE.
         excludeTurns: true,
-      });
-      if (result.thread?.id !== threadId)
+      }).catch(error => { if (fresh) browser.scope.dispose(); throw error; });
+      if (result.thread?.id !== threadId) {
+        if (fresh) browser.scope.dispose();
         throw new Error("Codex returned a different conversation.");
+      }
       this.resetChat(chatId);
       this.browserContexts.set(threadId, browser.scope);
       setThreadId(this.threadsFile, this.map, chatId, threadId);
@@ -1587,10 +1591,12 @@ export class CodexHost {
         // The fork still copies every turn; only its REPLY leaves them out,
         // and only the new id is read below. See PAST_TURNS_NOTE.
         excludeTurns: true,
-      });
+      }).catch(error => { browser.scope.dispose(); throw error; });
       const id = result.thread?.id;
-      if (typeof id !== "string" || !id || id === parent)
+      if (typeof id !== "string" || !id || id === parent) {
+        browser.scope.dispose();
         throw new Error("Codex did not create a fork.");
+      }
       this.rememberThread(chatId, parent);
       this.browserContexts.get(parent)?.end();
       this.browserContexts.set(id, browser.scope);
@@ -1694,7 +1700,7 @@ export class CodexHost {
     }
   }
   close(): void {
-    for (const scope of this.browserContexts.values()) scope.end();
+    for (const scope of this.browserContexts.values()) scope.dispose();
     this.browserContexts.clear();
     this.server.close();
   }
@@ -1757,10 +1763,10 @@ export class CodexHost {
       : this.server.request("thread/start", {
           ...params,
           dynamicTools: readOnly ? [] : this.tools,
-        })).catch(error => { browser.scope.end(); throw error; })
+        })).catch(error => { browser.scope.dispose(); throw error; })
         .finally(() => callbacks.signal?.removeEventListener("abort", abortStartup));
     const threadId = thread?.thread?.id;
-    if (typeof threadId !== "string" || !threadId) { browser.scope.end(); throw new Error("Codex did not return a conversation identity."); }
+    if (typeof threadId !== "string" || !threadId) { browser.scope.dispose(); throw new Error("Codex did not return a conversation identity."); }
     this.browserContexts.set(threadId, browser.scope);
     try {
       return await this.execute(
@@ -1786,7 +1792,7 @@ export class CodexHost {
         },
       );
     } finally {
-      browser.scope.end();
+      browser.scope.dispose();
       this.browserContexts.delete(threadId);
       await this.server
         .request("thread/unsubscribe", { threadId })
@@ -1848,6 +1854,9 @@ export class CodexHost {
    * resolver leaves the private browser unavailable. It never falls back to
    * the owner's local browser without an admitted actor.
    */
+  private browserRoot(): string {
+    return join(dirnameOf(this.threadsFile), "browser-context");
+  }
   private browserConfig(chatId: number, threadId?: string): { config: Record<string, unknown>; scope: BrowserContext } {
     // Codex ignores the config of a resume of a thread it already loaded and
     // keeps that thread's MCP process, so a loaded thread keeps its scope.
@@ -1861,7 +1870,7 @@ export class CodexHost {
     } catch {
       relay = null;
     }
-    const scope = new BrowserContext(join(dirnameOf(this.threadsFile), "browser-context"), chatId, relay);
+    const scope = new BrowserContext(this.browserRoot(), chatId, relay);
     return { scope, config: browserMcpConfigOverrides(
       // Managed threads must not launch an older app-installed shim that ignores context.
       bundledShimPath(), process.execPath, relay, scope.env,
@@ -1907,10 +1916,11 @@ export class CodexHost {
       return [];
     }
     this.historyReads.add(threadId);
+    const browser = this.browserConfig(0);
     try {
       try {
         await this.server.request("thread/resume", {
-          config: this.browserConfig(0).config,
+          config: browser.config,
           threadId,
           cwd: this.workdir,
           excludeTurns: true,
@@ -1926,6 +1936,7 @@ export class CodexHost {
           .catch(() => {});
       }
     } finally {
+      browser.scope.dispose();
       this.historyReads.delete(threadId);
     }
   }
@@ -2025,6 +2036,8 @@ export class CodexHost {
       }
       // After the upgrade decision: a new thread never inherits the old scope.
       const browser = this.browserConfig(chatId, threadId);
+      const fresh = !threadId || this.browserContexts.get(threadId) !== browser.scope;
+      const drop = () => (fresh ? browser.scope.dispose() : browser.scope.end());
       const config: Record<string, unknown> = browser.config;
       if (this.authMode === "apikey")
         Object.assign(config, {
@@ -2048,14 +2061,14 @@ export class CodexHost {
             ...params,
             developerInstructions: this.hints + priorContext,
             dynamicTools: this.tools,
-          })).catch(error => { browser.scope.end(); throw error; });
+          })).catch(error => { drop(); throw error; });
       if (typeof result.thread?.id !== "string" || !result.thread.id) {
-        browser.scope.end();
+        drop();
         throw new Error("Codex did not return a conversation identity.");
       }
       threadId = result.thread.id as string;
       const previous = this.browserContexts.get(threadId);
-      if (previous !== browser.scope) previous?.end();
+      if (previous !== browser.scope) previous?.dispose();
       this.browserContexts.set(threadId, browser.scope);
       setThreadId(
         this.toolVersionsFile,
