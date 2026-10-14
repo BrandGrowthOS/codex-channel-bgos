@@ -52,6 +52,11 @@ const OFFLINE_TOOL = {
 };
 const OFFLINE_TEXT_LOCAL = "The HOAI Agent Browser is not available: the Home of Agents desktop app is not running on this computer (or the agent browser endpoint is off). Ask the owner to open Home of Agents; Cmd or Ctrl+Shift+B opens the Agent Browser. The browser tools appear here as soon as it is up.";
 const OFFLINE_TEXT_RELAY = "The HOAI Agent Browser is not available: your owner's Home of Agents desktop app is not running or not signed in, and there is no desktop app on this machine. Ask them to open Home of Agents on their computer (Cmd or Ctrl+Shift+B opens the Agent Browser); the browser tools appear here as soon as it is online.";
+// On a share recipient's turn (the signed managed context names someone other than the owner) the browser is
+// theirs: the relay elects this agent's own host, else their own desktop app, and never the owner's desktop app
+// (shared agents Phase 0, item 0.2; KC's decision D3). These words say so instead of the owner's.
+const RECIPIENT_BROWSER_TEXT = "On this turn you act for a person this agent is shared with, not its owner: their browser runs on this agent's own host or on their own Home of Agents desktop app, never on the owner's desktop app.";
+const OFFLINE_TEXT_RELAY_RECIPIENT = "The HOAI Agent Browser is not available for this turn: you act for a person this agent is shared with, so their browser runs on this agent's own host or on their own Home of Agents desktop app, never on the owner's desktop app, and neither is online. Ask them to open Home of Agents on their computer (Cmd or Ctrl+Shift+B opens the Agent Browser); the browser tools appear here as soon as it is online.";
 const RELAY_ERROR_TEXT = {
   host_offline: OFFLINE_TEXT_RELAY,
   // The host was there and its connection dropped mid call (the backend's hostGone). The relay rides the desktop
@@ -81,6 +86,12 @@ const RELAY_ERROR_TEXT = {
 };
 
 const RELAY_UNSUPPORTED_TEXT = "This HOAI backend does not have the browser relay yet. Tell the owner to update Home of Agents.";
+
+// The relay answers whose words name the owner's desktop app, as said on a share recipient's turn instead (item 0.2).
+const RECIPIENT_RELAY_ERROR_TEXT = {
+  host_offline: OFFLINE_TEXT_RELAY_RECIPIENT,
+  host_timeout: "The browser's host did not answer the browser call within 50 seconds. On this turn you act for a person this agent is shared with: their browser runs on this agent's own host or on their own Home of Agents desktop app, never on the owner's desktop app. Say so and retry once; if it happens again, tell them their browser looks stuck.",
+};
 
 // A collect (GET .../mcp/:rpcId) that fails AFTER the call went pending: the call WAS SENT, so it may already have
 // run (a click, a purchase, a message), and "Retry in a moment" or "Retry it once" invited a blind repeat.
@@ -194,8 +205,9 @@ function readManagedContext() {
     const marker = boundedJson(context.markerPath, 2048);
     if (marker?.schemaVersion !== 1 || marker.live !== true || marker.turnId !== context.turnId || marker.sessionId !== context.sessionId || marker.promptHash !== context.promptHash) return CONTEXT_REFUSAL;
     const clientId = crypto.createHash("sha256").update(JSON.stringify([CLIENT_ID, context.actingUserId, context.chatId, context.sessionId])).digest("hex");
-    const headers = context.actingUserId === context.ownerUserId ? {} : { "X-BGOS-Acting-User": context.actingUserId };
-    return Object.freeze({ valid: true, clientId, headers: Object.freeze(headers) });
+    const recipient = context.actingUserId !== context.ownerUserId;
+    const headers = recipient ? { "X-BGOS-Acting-User": context.actingUserId } : {};
+    return Object.freeze({ valid: true, clientId, headers: Object.freeze(headers), recipient });
   } catch { return CONTEXT_REFUSAL; }
 }
 const relayClientId = context => context?.clientId || CLIENT_ID;
@@ -212,9 +224,11 @@ function write(msg) {
   process.stdout.write(JSON.stringify(msg) + "\n");
 }
 
-// With a refusal (the relay answered the connect with a limit, not an absence), its words; else the absence.
-function offlineText(refusal) {
+// With a refusal (the relay answered the connect with a limit, not an absence), its words; else the absence, in the
+// words for whose turn it is (a share recipient's browser is never the owner's desktop app).
+function offlineText(refusal, context) {
   if (refusal && refusal.text) return refusal.text;
+  if (RELAY && context?.recipient) return OFFLINE_TEXT_RELAY_RECIPIENT;
   return RELAY ? OFFLINE_TEXT_RELAY : OFFLINE_TEXT_LOCAL;
 }
 
@@ -608,7 +622,7 @@ async function handle(msg, entry) {
       protocolVersion: clientProtocol,
       capabilities: { tools: { listChanged: true } },
       serverInfo: { name: "hoai-agent-browser", version: "shim-2" },
-      instructions: instructions || "HOAI Agent Browser: your default browser once the Home of Agents desktop app is reachable. " + (r.refusal && r.refusal.connecting ? `${CONNECT_LEAD_INSTRUCTIONS} ${r.refusal.reason}` : offlineText(r.refusal)),
+      instructions: instructions || "HOAI Agent Browser: your default browser once the Home of Agents desktop app is reachable. " + (r.refusal && r.refusal.connecting ? `${CONNECT_LEAD_INSTRUCTIONS} ${r.refusal.reason}` : offlineText(r.refusal, context)),
     });
   }
   if (method && method.startsWith("notifications/")) return; // no reply to notifications
@@ -634,12 +648,12 @@ async function handle(msg, entry) {
   }
   if (method === "tools/call") {
     const r = await resolveRequestMode();
-    if (r.mode === "offline") return reply({ content: [{ type: "text", text: offlineText(r.refusal) }], isError: params?.name !== "hoai_browser_status" });
+    if (r.mode === "offline") return reply({ content: [{ type: "text", text: offlineText(r.refusal, context) }], isError: params?.name !== "hoai_browser_status" });
     if (r.mode === "local") {
       const res = await localRequest({ jsonrpc: "2.0", id, method, params }, r.up);
       if (!res?.payload) {
         upstream = null;
-        return reply({ content: [{ type: "text", text: "The HOAI Agent Browser stopped answering (the desktop app may have quit). " + offlineText() }], isError: true });
+        return reply({ content: [{ type: "text", text: "The HOAI Agent Browser stopped answering (the desktop app may have quit). " + offlineText(undefined, context) }], isError: true });
       }
       return send({ ...res.payload, id });
     }
@@ -647,22 +661,28 @@ async function handle(msg, entry) {
     if (!res.ok) {
       dropRelay(res.code, context);
       if (!relayConnections.has(relayClientId(context))) setMode("offline");
-      return reply({ content: [{ type: "text", text: res.text }], isError: params?.name !== "hoai_browser_status" || res.code !== "host_offline" });
+      const text = context?.recipient && Object.hasOwn(RECIPIENT_RELAY_ERROR_TEXT, res.code) ? RECIPIENT_RELAY_ERROR_TEXT[res.code] : res.text;
+      return reply({ content: [{ type: "text", text }], isError: params?.name !== "hoai_browser_status" || res.code !== "host_offline" });
     }
     if (params?.name === "hoai_browser_status" && res.message?.result && !res.message.result.isError && r.relay.hostLabel) {
-      // Say WHERE the browser is and claim nothing about WHOSE it is. This
-      // used to read "Reached through your owner's account on <host>", which
-      // was already loose about an account versus an app and became wrong
-      // outright when the acting-principal election shipped (#1846): the
-      // backend elects a desktop belonging to the ACTING human, and
-      // desktop-host.js refuses a `user-` principal that is not that
-      // desktop's signed-in owner. So for a shared agent the page does not run
-      // on the owner's machine at all, and the old sentence could name the
-      // wrong person. The host label answers the question the line exists for,
-      // which is which computer, since a person may have several.
+      // Say WHERE the browser is. This used to read "Reached through your
+      // owner's account on <host>", which was already loose about an account
+      // versus an app and became wrong outright when the acting-principal
+      // election shipped (#1846): the backend elects a desktop belonging to the
+      // ACTING human, and desktop-host.js refuses a `user-` principal that is
+      // not that desktop's signed-in owner. The host label answers which
+      // computer, since a person may have several.
+      //
+      // On a share recipient's turn it also says WHOSE browser this is, or the
+      // agent assumes the owner's (shared agents Phase 0, item 0.2; KC's
+      // decision D3): the relay elects this agent's own host, which for a
+      // daemon placed agent is the owner's computer and a recipient may browse
+      // on, else the recipient's own desktop app, and never the owner's
+      // desktop app. On the owner's own turn the line is unchanged.
       const result = res.message.result;
       const content = Array.isArray(result.content) ? result.content : [];
-      return send({ ...res.message, id, result: { ...result, content: [...content, { type: "text", text: `Reached on ${r.relay.hostLabel}.` }] } });
+      const where = `Reached on ${r.relay.hostLabel}.` + (context?.recipient ? ` ${RECIPIENT_BROWSER_TEXT}` : "");
+      return send({ ...res.message, id, result: { ...result, content: [...content, { type: "text", text: where }] } });
     }
     return send({ ...res.message, id });
   }
