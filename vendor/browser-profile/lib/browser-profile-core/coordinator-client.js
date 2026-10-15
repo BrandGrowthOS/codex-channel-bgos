@@ -10,6 +10,7 @@ const AUTHORITY_KEYS = ["profileId", "actingUserId", "assistantId", "endpointId"
 const COUNTERS = new Set(["assistantId", "writerEpoch", "revision", "contentKeyEpoch", "grantVersion"]);
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+const isRuntimeSocketId = value => typeof value === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(value);
 const fail = (code, statusCode) => Object.assign(new Error(code), { code, ...(statusCode ? { statusCode } : {}) });
 function canonical(value) {
   const sorted = row => Array.isArray(row) ? row.map(sorted) : row && typeof row === "object" ? Object.fromEntries(Object.keys(row).sort().map(key => [key, sorted(row[key])])) : row;
@@ -195,21 +196,21 @@ class ProfileCoordinatorClient {
   activate(scope, transitionId, expectedWriterEpoch, manifestHash) { return this._request("POST", `transfers/${identifier(transitionId)}/activate`, { expectedWriterEpoch, manifestHash }, scope); }
   dispatch(authority, endpoint, { rpcId, rpcNonce, socketId }) {
     const current = exactAuthority(authority);
-    if (identityFingerprint(endpoint.identity) !== current.keyFingerprint || endpoint.identity.endpointId !== current.endpointId || typeof rpcNonce !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(rpcNonce) || typeof socketId !== "string" || !ID.test(socketId)) throw fail("profile_runtime_dispatch_invalid");
+    if (identityFingerprint(endpoint.identity) !== current.keyFingerprint || endpoint.identity.endpointId !== current.endpointId || typeof rpcNonce !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(rpcNonce) || !isRuntimeSocketId(socketId)) throw fail("profile_runtime_dispatch_invalid");
     const document = { version: 1, kind: "runtime-rpc-dispatch", rpcId: identifier(rpcId), rpcNonce, socketId, authority: current };
     return this._request("POST", `rpc/${document.rpcId}/dispatch`, { socketId, rpcNonce, authority: current, signature: documentSignature(endpoint, document) }, current, 256 * 1024 + 16 * 1024);
   }
   cancellation(authority, endpoint, { rpcId, rpcNonce, socketId }) {
     const current = exactAuthority(authority);
-    if (identityFingerprint(endpoint.identity) !== current.keyFingerprint || endpoint.identity.endpointId !== current.endpointId || typeof rpcNonce !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(rpcNonce) || typeof socketId !== "string" || !ID.test(socketId)) throw fail("profile_runtime_cancellation_invalid");
+    if (identityFingerprint(endpoint.identity) !== current.keyFingerprint || endpoint.identity.endpointId !== current.endpointId || typeof rpcNonce !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(rpcNonce) || !isRuntimeSocketId(socketId)) throw fail("profile_runtime_cancellation_invalid");
     const document = { version: 1, kind: "runtime-rpc-cancellation", rpcId: identifier(rpcId), rpcNonce, socketId, authority: current };
     return this._request("POST", `rpc/${document.rpcId}/cancellation`, { socketId, rpcNonce, authority: current, signature: documentSignature(endpoint, document) }, current);
   }
   result(authority, endpoint, { rpcId, rpcNonce, socketId, payload }) {
     const current = exactAuthority(authority), bytes = canonical(payload);
-    if (bytes.length > 8 * 1024 * 1024 || identityFingerprint(endpoint.identity) !== current.keyFingerprint || endpoint.identity.endpointId !== current.endpointId || typeof rpcNonce !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(rpcNonce) || typeof socketId !== "string" || !ID.test(socketId)) throw fail("profile_runtime_result_invalid");
+    if (bytes.length > 8 * 1024 * 1024 || identityFingerprint(endpoint.identity) !== current.keyFingerprint || endpoint.identity.endpointId !== current.endpointId || typeof rpcNonce !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(rpcNonce) || !isRuntimeSocketId(socketId)) throw fail("profile_runtime_result_invalid");
     const document = { version: 1, kind: "runtime-rpc-result", rpcId: identifier(rpcId), rpcNonce, socketId, authority: current, payloadHash: createHash("sha256").update(bytes).digest("hex") };
     return this._request("POST", `rpc/${document.rpcId}/result`, { socketId, rpcNonce, authority: current, payload: bytes.toString("base64"), signature: documentSignature(endpoint, document) }, current);
   }
 }
-module.exports = { ProfileCoordinatorClient, exactAuthority, sameAuthority, documentSignature, canonical, META_BYTES, CAPSULE_BYTES };
+module.exports = { ProfileCoordinatorClient, isRuntimeSocketId, exactAuthority, sameAuthority, documentSignature, canonical, META_BYTES, CAPSULE_BYTES };

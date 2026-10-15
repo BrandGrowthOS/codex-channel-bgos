@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "sourceCommit": "17a310c044550f906d1d7df30890d2228486c635",
+  "sourceCommit": "f6b5f0c0bde1c7f1c28dc664985c2a7e9a330715",
   "why": "Byte-identical encrypted checkpoint, lossless storage, portable state and resume readiness, cookie codecs, typed runtime endpoint, signed stopped-head lineage, separate permissioned file crypto/client/private materialization and encrypted local journal shared with HOAI. NativeRuntime exports are pure until its injected Electron constructor runs. The pairing adapter shares pure endpoint and document validation and never instantiates or inherits the desktop Bearer client. ProfileFileClient fixes its principal explicitly; paired use obtains only fresh pairing proof. Electron OS folder policy and native dialogs are intentionally excluded.",
   "files": {
     "crypto.js": {
@@ -29,11 +29,11 @@
     },
     "coordinator-client.js": {
       "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/coordinator-client.js",
-      "sha256": "e8c902ebc426c8b40890c73f45826457edab349d77f97a5c04141925db1a64c0"
+      "sha256": "b0ea86161533843dd1e5fa9e4fe4ec06d21de1bd6300e4c8c416dad64a1fd911"
     },
     "runtime-endpoint.js": {
       "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/runtime-endpoint.js",
-      "sha256": "cb5023d79d476cf30edda6facec71c2d60a4192147cbc053d807d2d1ea19cb50"
+      "sha256": "93d570e06f85274a88fcd8206faa718b5ad5132b471944abc08cb74ca9b6372d"
     },
     "stopped-head-stage.js": {
       "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/stopped-head-stage.js",
@@ -45,7 +45,7 @@
     },
     "runtime-status-client.js": {
       "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/runtime-status-client.js",
-      "sha256": "48a0baf9169797577460f2bb6fba2c785d6d6a3fc3f5718ce3a1c895c4a7329a"
+      "sha256": "e40c97d967127a83083df1d3e7a6050b681faca89a009deaf0da9c486971ffa6"
     },
     "return-intent.js": {
       "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/return-intent.js",

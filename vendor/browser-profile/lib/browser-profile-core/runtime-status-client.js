@@ -4,10 +4,9 @@
 // command is accepted here. An unavailable read is unknown, never revocation.
 const { randomUUID } = require("node:crypto");
 const { identityFingerprint } = require("./crypto");
-const { documentSignature, exactAuthority, sameAuthority } = require("./coordinator-client");
+const { documentSignature, exactAuthority, sameAuthority, isRuntimeSocketId } = require("./coordinator-client");
 const META_BYTES = 64 * 1024, VALID_MS = 10_000;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
-const ID = /^[A-Za-z0-9_-]{1,128}$/;
 const fail = code => Object.assign(new Error(code), { code });
 const checkCapability = check => { if (typeof check !== "function") throw fail("profile_runtime_status_capability_required"); const value = check(); if (value?.then) { void Promise.resolve(value).catch(() => {}); throw fail("profile_runtime_status_context_changed"); } if (value === false) throw fail("profile_runtime_status_context_changed"); };
 
@@ -19,7 +18,7 @@ class ProfileRuntimeStatusClient {
   }
   async status({ authority: raw, endpoint, bindingId, socketId, assertCurrent }) {
     const authority = exactAuthority(raw); checkCapability(assertCurrent);
-    if (!UUID.test(bindingId) || !ID.test(socketId) || endpoint?.identity?.endpointId !== authority.endpointId || identityFingerprint(endpoint.identity) !== authority.keyFingerprint) throw fail("profile_runtime_status_scope_invalid");
+    if (!UUID.test(bindingId) || !isRuntimeSocketId(socketId) || endpoint?.identity?.endpointId !== authority.endpointId || identityFingerprint(endpoint.identity) !== authority.keyFingerprint) throw fail("profile_runtime_status_scope_invalid");
     if (this.physical) throw fail("profile_runtime_status_read_in_flight");
     const document = Object.freeze({ version: 1, kind: "runtime-current-status", requestId: randomUUID(), bindingId, socketId, authority, expiresAt: Date.now() + VALID_MS });
     const { version: _version, kind: _kind, ...echo } = document;

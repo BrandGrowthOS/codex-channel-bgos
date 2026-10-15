@@ -1,7 +1,7 @@
 {
   "version": 1,
   "repository": "BrandGrowthOS/bgos-claude-plugin",
-  "sourceCommit": "a97b0ab074e1e72aae5db317489216a9f35bc177",
+  "sourceCommit": "ec984a647d2dd9a05f3eb12fef8d3d367426f6c1",
   "entry": "bin/hoai-browser-host.mjs",
   "why": "The same reviewed browser host, profile runtime, encryption and authorization execute for Claude and Codex. Only the Codex daemon launcher is different.",
   "files": {
@@ -45,13 +45,13 @@
       "sha256": "6a1f21a07b9a5153a13fd1f581de643eb9aa4f5da9f854819f1a36e13d0fcd11"
     },
     "lib/browser-profile-companion.mjs": {
-      "sha256": "666e2357a1c8db25ac578cdd540500b919869c2342dc9127c7c0222386737464"
+      "sha256": "4abdb468e76825f9268c5d6ab03aa20967f6786505ecd54a0ddb5fb850ff12c0"
     },
     "lib/browser-profile-core/checkpoint-store.js": {
       "sha256": "a0ca3ffb3bd8d030bdd1225882a96d1d6801da84534d5190928cf5f71f91a1ac"
     },
     "lib/browser-profile-core/coordinator-client.js": {
-      "sha256": "e8c902ebc426c8b40890c73f45826457edab349d77f97a5c04141925db1a64c0"
+      "sha256": "b0ea86161533843dd1e5fa9e4fe4ec06d21de1bd6300e4c8c416dad64a1fd911"
     },
     "lib/browser-profile-core/crypto.js": {
       "sha256": "634bd2f26d54f21107b1fb5b669efd38330c225e1f685f4ddd95d3aba8bfe99d"
@@ -72,13 +72,13 @@
       "sha256": "3d27a0f8037dc236433cf1d22bd6d61edcc7f8a46e4ef1842ab0737535a33bd1"
     },
     "lib/browser-profile-core/runtime-endpoint.js": {
-      "sha256": "cb5023d79d476cf30edda6facec71c2d60a4192147cbc053d807d2d1ea19cb50"
+      "sha256": "93d570e06f85274a88fcd8206faa718b5ad5132b471944abc08cb74ca9b6372d"
     },
     "lib/browser-profile-core/runtime-readiness.js": {
       "sha256": "357f440d7735791d850dfbf6b2199c13ebaa5a7ba7d698a67d213f242565e99c"
     },
     "lib/browser-profile-core/runtime-status-client.js": {
-      "sha256": "48a0baf9169797577460f2bb6fba2c785d6d6a3fc3f5718ce3a1c895c4a7329a"
+      "sha256": "e40c97d967127a83083df1d3e7a6050b681faca89a009deaf0da9c486971ffa6"
     },
     "lib/browser-profile-core/stopped-head-stage.js": {
       "sha256": "4b350549a4e99d4ef5d8d939ab43e4e9d712c294d9b43329a5364fbf32751eac"
@@ -87,7 +87,7 @@
       "sha256": "a78d8e9daf05e3cff71f3aa100e8a32656a63bca7508529a06923097885bbfd3"
     },
     "lib/browser-profile-core/vendor.json": {
-      "sha256": "e19345ee9e7161d607deacb7edc88a0f3cac403e4b3b1df360cdacc695ee674e"
+      "sha256": "789c71b613ecbd2e626d05d929db30d10dc5411fc965125f821f1da1289c1a25"
     },
     "lib/browser-profile-daemon-stop.mjs": {
       "sha256": "a3698e356b6bb96752f0c38ba4a6b1c5646f6a08ea1655ece62857c99d9bee05"
@@ -111,7 +111,7 @@
       "sha256": "b9e4322ef1cbbc7c289cba1b7889d20417f5ad24ca6d8501de478f67804acb79"
     },
     "lib/browser-profile-permission-client.mjs": {
-      "sha256": "f4663132aa2b81732fc3f8cf13c6feb7356a22288e9fae64a6e2edd0ce4d6f7e"
+      "sha256": "2cf2669ffe958ff70615011b4cd6fbac3a21c2d1ffe939175c1b3ce1349c0257"
     },
     "lib/browser-profile-permission-runner.mjs": {
       "sha256": "5965858cda603f60e4c74346fecd0be85a9322dea51511f8437e68919cffb487"

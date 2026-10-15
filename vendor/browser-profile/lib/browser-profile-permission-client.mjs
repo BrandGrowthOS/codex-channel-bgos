@@ -110,7 +110,7 @@ export class AgentRuntimePermissionClient {
     const current = assertCurrent.bind(undefined); synchronous(current)
     exact(frame, ['event_type', 'version', 'rpcId', 'rpcNonce', 'bindingId', 'authority', 'clientId', 'assistantId', 'message', 'deadlineAt'])
     const authority = shared.exactAuthority(frame.authority), identity = endpointOf(endpoint, authority)
-    if (frame.event_type !== 'browser_profile_rpc' || frame.version !== 1 || !UUID.test(frame.rpcId) || !NONCE.test(frame.rpcNonce) || !UUID.test(binding?.bindingId) || frame.bindingId !== binding.bindingId || typeof binding.socketId !== 'string' || !ID.test(binding.socketId) || !shared.sameAuthority(binding.authority, authority) || frame.assistantId !== authority.assistantId || frame.message?.method !== 'tools/call') throw fail('profile_permission_invalid')
+    if (frame.event_type !== 'browser_profile_rpc' || frame.version !== 1 || !UUID.test(frame.rpcId) || !NONCE.test(frame.rpcNonce) || !UUID.test(binding?.bindingId) || frame.bindingId !== binding.bindingId || !shared.isRuntimeSocketId(binding.socketId) || !shared.sameAuthority(binding.authority, authority) || frame.assistantId !== authority.assistantId || frame.message?.method !== 'tools/call') throw fail('profile_permission_invalid')
     const name = frame.message.params?.name
     if (typeof name !== 'string' || !Object.hasOwn(METHODS, name)) throw fail('profile_permission_handover_required')
     const kind = METHODS[name], canonicalOrigin = originOf(origin), started = this.now(), deadline = Date.parse(frame.deadlineAt)

@@ -1,13 +1,11 @@
 "use strict";
 const { createHash } = require("node:crypto");
-const { exactAuthority, sameAuthority, documentSignature, canonical } = require("./coordinator-client");
+const { exactAuthority, sameAuthority, documentSignature, canonical, isRuntimeSocketId } = require("./coordinator-client");
 const { identityFingerprint } = require("./crypto");
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
-const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const NONCE = /^[A-Za-z0-9_-]{43}$/;
 const METHODS = new Set(["initialize", "notifications/initialized", "tools/list", "tools/call", "ping"]);
 const fail = code => Object.assign(new Error(code), { code });
-const validId = value => typeof value === "string" && ID.test(value);
 const plain = value => value && typeof value === "object" && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value));
 function exact(value, fields) {
   if (!plain(value)) return false;
@@ -42,7 +40,7 @@ class ProfileRuntimeEndpoint {
   }
   async prove({ socketId, exchange }) {
     this._check();
-    if (!validId(socketId) || typeof exchange !== "function" || this.proving || this.physical) throw fail("profile_runtime_proof_busy");
+    if (!isRuntimeSocketId(socketId) || typeof exchange !== "function" || this.proving || this.physical) throw fail("profile_runtime_proof_busy");
     if (this.binding && this.binding.socketId !== socketId) throw fail("profile_runtime_socket_changed");
     const generation = this.generation, token = Symbol("proof"); this.proving = token;
     try {

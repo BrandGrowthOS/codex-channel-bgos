@@ -44,3 +44,11 @@ The next local runtime copy is the committed Claude plugin a97b0ab074e1e72aae5db
 Four selected suites run against the actual vendored host, shipped-byte manifest, child lifecycle and page-selection class: 34 tests pass with zero skips and the upstream cross-tree check enabled. TypeScript passes. Seven selection cases use the pinned actual BrowserBackend and Context with EventEmitter native-page fixtures.
 
 The copied-module drill changes the executable await context.ensureBrowserContext() line to void context. The copied shipped engine fails the selection regression, exact restoration passes all seven cases, and original workspace bytes remain unchanged. The receipt is browser-profile-selection-vendor-mutation.json. The separately qualified Linux Chromium153 proof belongs to the common runtime; a new Codex tarball and full HOAI package acceptance are still required.
+
+## Socket and activation ownership refresh
+
+The committed common source is now ec984a647d2dd9a05f3eb12fef8d3d367426f6c1, still with the complete 48-file executable closure. This incorporates independent activation/proof ownership and the dedicated 1 to 64 character base64url socket validator. General actor and runtime identifier grammar is unchanged. The same shared predicate is used by the agent permission client.
+
+The four exact selected vendor, host, child and selection suites pass 34 tests with zero skips. The upstream check is enabled with HOAI_BROWSER_PROFILE_PLUGIN_SOURCE, and TypeScript passes. An initial filter also selected an old private copied selection suite and used the wrong upstream environment variable; its passing count is excluded from this result. The corrected exact run executes the real upstream comparison.
+
+The copied shipped-byte mutation changes the actual socket predicate to return true, produces an assertion failure in the vendor identity guard, then restores the exact bytes and passes all three vendor tests with the upstream comparison enabled. Original workspace bytes remain unchanged. The receipt is browser-profile-socket-vendor-mutation.json. This byte identity check is distinct from the common runtime's functional socket and permission mutation proofs. Fresh packaged Linux acceptance and final file integration remain open.

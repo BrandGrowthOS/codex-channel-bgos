@@ -35,6 +35,8 @@ export class AgentBrowserProfileCompanion{
   #physical=new Set()
   #retirements=new Map()
   #resumePermits=new WeakMap()
+  #activations=new WeakMap()
+  #proofs=new WeakMap()
   constructor({connection,agentRoot,deviceLabel,environment=process.env,loadBrowser,createEngine,createRelay,assertNoLegacyActive=()=>true,log=/** @type {(line:string)=>void} */(()=>{}),client,keyStore,stateStore,createRuntime=options=>BrowserProfileRuntime.create(options),preloadExtras=options=>BrowserProfilePortableExtrasStore.preload(options),statusClient,permissionClient=/** @type {any} */(null),permissionRunner=/** @type {any} */(null),returnClient=/** @type {any} */(null),returnHandover=/** @type {any} */(null)}){
     if(!connection||typeof loadBrowser!=='function'||typeof createEngine!=='function'||typeof createRelay!=='function'||!path.isAbsolute(agentRoot))throw fail('profile_companion_configuration_invalid')
     Object.assign(this,{connection,deviceLabel,environment,loadBrowser,createEngine,createRelay,assertNoLegacyActive,log,createRuntime,preloadExtras});this.token=connection.pairing.token;this.bootId=connection.bootId
@@ -63,6 +65,8 @@ export class AgentBrowserProfileCompanion{
       if(record.runtime||[...this.#physical].some(token=>token.record===record&&token.kind==='runtime-create'))activeProfiles++
       pendingPhysicalOperations+=record.engineTasks?.size||0
       if(record.returnTask)pendingPhysicalOperations++;if(record.monitorTask)pendingPhysicalOperations++
+      if(this.#activations.get(record)?.pending)pendingPhysicalOperations++
+      if(this.#proofs.get(record)?.pending)pendingPhysicalOperations++
       if(record.statusClient?.physical)pendingPhysicalOperations++
       if(this.#permissionCleanupUnknown.has(record))cleanupUnknown=true
     }
@@ -86,7 +90,7 @@ export class AgentBrowserProfileCompanion{
   monitor(){
     if(this.stopped||this.closing)return Promise.resolve()
     const tasks=[]
-    for(const record of this.records.values())if(record.runtime?.state==='active'){
+    for(const record of this.records.values())if(record.runtime?.state==='active'&&!this.#activations.has(record)){
       if(!record.monitorTask){const task=this._active(record).catch(error=>{if(!record.revoked)record.admission='unknown';this._status(record,genericError(error))});record.monitorTask=task;void task.finally(()=>{if(record.monitorTask===task)record.monitorTask=null}).catch(()=>{})}
       tasks.push(record.monitorTask)
     }
@@ -257,9 +261,19 @@ export class AgentBrowserProfileCompanion{
     try{const staged=await runtime.stage({checkpoint,expectedContext:context,sourceIdentity:record.sourcePin,destination:record.endpoint});check();const saved=await record.journal.write({scope:record.journalScope,checkpoint,manifestHash:transition.manifestHash,receipt:staged.receipt,receiptSignature:staged.signature,assertCurrent:check});check();if(!saved.durability.fileSynced||!saved.durability.directorySynced)throw fail('profile_companion_journal_unproved');const loaded=await record.journal.read({scope:record.journalScope,expectedHead:head(read.profile),assertCurrent:check});check();if(!loaded||!same(loaded.checkpoint,checkpoint)||!same(loaded.receipt,staged.receipt))throw fail('profile_companion_journal_unproved');const acknowledged=await this.client.staged(record.scope,record.endpoint,transition.id,staged);check();if(acknowledged.writerState!=='staged'||acknowledged.headManifestHash!==transition.manifestHash||acknowledged.revision!==authority.revision)throw fail('profile_companion_stage_uncertain');this._status(record,'staged_inactive: waiting for human activation on HOAI')}
     catch(error){record.uncertain=true;await this._dispose(record);throw error}
   }
-  async _activate(record,authority){
+  _activate(record,authority){
+    try{
+      this._newWork();this._cached(record);authority=shared.exactAuthority(authority)
+      const runtime=record.runtime,existing=this.#activations.get(record)
+      if(existing){if(existing.runtime!==runtime||!shared.sameAuthority(existing.authority,authority))throw fail('profile_companion_context_changed');return existing.task}
+      const token={runtime,authority,pending:true,cancelled:false,task:null};this.#activations.set(record,token)
+      const task=Promise.resolve().then(()=>this._activateOwned(record,authority,token)).then(value=>{token.pending=false;if(this.#activations.get(record)===token)this.#activations.delete(record);return value},error=>{token.pending=false;if(!record.revoked&&record.runtime===runtime)record.admission='unknown';throw error})
+      token.task=task;void task.catch(()=>{});return task
+    }catch(error){return Promise.reject(error)}
+  }
+  async _activateOwned(record,authority,token){
     if(this.closing)throw fail('profile_companion_context_changed')
-    const runtime=record.runtime,check=()=>{this._cached(record);if(this.closing||record.runtime!==runtime||!shared.sameAuthority(runtime.authority,authority))throw fail('profile_companion_context_changed')}
+    const runtime=record.runtime,check=()=>{this._cached(record);if(this.closing||token.cancelled||this.#activations.get(record)!==token||record.runtime!==runtime||runtime!==token.runtime||!shared.sameAuthority(runtime.authority,authority))throw fail('profile_companion_context_changed')}
     check();const entry=await this._discover(record);check();if(!this._activeMatches(record,entry,authority))throw fail('profile_companion_authority_changed')
     await runtime.activate(authority);check();const selected=runtime.restoredSelectedPage?.();if(!selected)await runtime.newPage();check()
     record.engineCreating=this._trackPhysical(record,'engine-create',Promise.resolve().then(()=>this.createEngine({runtime,directory:path.join(this.directory,'artifacts',authority.runtimeId)})).then(engine=>{record.engine=engine;return engine}));await record.engineCreating;check()
@@ -279,9 +293,20 @@ export class AgentBrowserProfileCompanion{
     }});record.rpc=rpc
     record.admission='active';record.state='active';await this._prove(record);this._status(record,'active')
   }
-  async _prove(record){this._admit(record);const socket=this.connection.socket,socketId=this.connection.socketId;if(!socketId||!socket?.connected)throw fail('profile_companion_connection_unavailable');await record.rpc.prove({socketId,exchange:(event,body)=>new Promise((resolve,reject)=>{if(this.connection.socketId!==socketId||!socket.connected)return reject(fail('profile_companion_connection_unavailable'));socket.emit(event,body,reply=>resolve(reply))})});this._admit(record)}
+  _prove(record){
+    try{
+      this._admit(record);const socket=this.connection.socket,socketId=this.connection.socketId,rpc=record.rpc,runtime=record.runtime,authority=shared.exactAuthority(runtime.authority)
+      if(!socketId||!socket?.connected||!rpc)throw fail('profile_companion_connection_unavailable')
+      const existing=this.#proofs.get(record)
+      if(existing){if(existing.rpc!==rpc||existing.runtime!==runtime||existing.socket!==socket||existing.socketId!==socketId||!shared.sameAuthority(existing.authority,authority))throw fail('profile_companion_context_changed');return existing.task}
+      const token={rpc,runtime,socket,socketId,authority,pending:true,task:null};this.#proofs.set(record,token)
+      const check=()=>{this._admit(record);if(this.#proofs.get(record)!==token||record.rpc!==rpc||record.runtime!==runtime||this.connection.socket!==socket||this.connection.socketId!==socketId||!socket.connected||!shared.sameAuthority(runtime.authority,authority))throw fail('profile_companion_context_changed')}
+      const task=Promise.resolve().then(()=>{check();return rpc.prove({socketId,exchange:(event,body)=>new Promise((resolve,reject)=>{try{check();socket.emit(event,body,reply=>resolve(reply))}catch(error){reject(error)}})})}).then(value=>{check();return value}).finally(()=>{token.pending=false;if(this.#proofs.get(record)===token)this.#proofs.delete(record)})
+      token.task=task;void task.catch(()=>{});return task
+    }catch(error){return Promise.reject(error)}
+  }
   async _active(record){
-    if(record.returnTask||record.returnRequestId)return
+    if(record.returnTask||record.returnRequestId||this.#activations.has(record))return
     const runtime=record.runtime,rpc=record.rpc,binding=rpc?.binding,unchanged=()=>!this.closing&&!record.returnTask&&!record.returnRequestId&&record.runtime===runtime&&record.rpc===rpc&&rpc?.binding===binding
     if(!binding||binding.socketId!==this.connection.socketId){const entry=await this._discover(record);if(!unchanged())return;if(!this._activeMatches(record,entry,record.runtime.authority))throw fail('profile_companion_authority_changed');record.admission='active';await this._prove(record);return}
     const statusClient=this.statusClient||(record.statusClient??=this.statusClientFactory())
@@ -337,15 +362,17 @@ export class AgentBrowserProfileCompanion{
     }catch(error){record.uncertain=true;await this._dispose(record);throw error}
   }
   _dispose(record){
+    const activation=this.#activations.get(record),proof=this.#proofs.get(record);if(activation)activation.cancelled=true
     if(record.runtime)this.#resumePermits.delete(record.runtime)
     record.admission='blocked';this.#preparations.delete(record);record.permissionAbort?.abort();record.rpc?.disconnect?.();if(record.stopTask)return record.stopTask
-    const task=Promise.resolve().then(async()=>{const failures=[];await record.runtimeCreating?.catch(()=>{});const native=Promise.resolve().then(()=>record.runtime?.dispose()),commands=Promise.resolve().then(()=>this._drainCommands(record));for(const result of await Promise.allSettled([native,commands]))if(result.status==='rejected')failures.push(result.reason);for(const cleanup of [async()=>{await record.engineCreating?.catch(()=>{});await record.engine?.stop()},async()=>{await record.extrasCreating?.catch(()=>{});record.extras?.dispose()}])try{await cleanup()}catch(error){failures.push(error)}record.contentKeyEpoch?.key.fill(0);record.contentKeyEpoch=null;if(failures.length)throw fail('profile_companion_stop_unconfirmed');record.relay?.close();record.runtime=null;record.engine=null;record.extras=null;if(record.rpc){const rpc=record.rpc;this._trackPhysical(record,'rpc-close',Promise.resolve().then(()=>rpc.close()));record.rpc=null}})
+    const task=Promise.resolve().then(async()=>{const failures=[];await record.runtimeCreating?.catch(()=>{});const native=Promise.resolve().then(()=>record.runtime?.dispose()),commands=Promise.resolve().then(()=>this._drainCommands(record));for(const result of await Promise.allSettled([native,commands]))if(result.status==='rejected')failures.push(result.reason);for(const cleanup of [async()=>{await record.engineCreating?.catch(()=>{});await record.engine?.stop()},async()=>{await record.extrasCreating?.catch(()=>{});record.extras?.dispose()}])try{await cleanup()}catch(error){failures.push(error)}await Promise.allSettled([activation?.task,proof?.task].filter(Boolean));if(this.#activations.get(record)===activation)this.#activations.delete(record);record.contentKeyEpoch?.key.fill(0);record.contentKeyEpoch=null;if(failures.length)throw fail('profile_companion_stop_unconfirmed');record.relay?.close();record.runtime=null;record.engine=null;record.extras=null;if(record.rpc){const rpc=record.rpc;this._trackPhysical(record,'rpc-close',Promise.resolve().then(()=>rpc.close()));record.rpc=null}})
     record.stopTask=this._trackPhysical(record,'stop',task);return record.stopTask
   }
   stop(){
     if(this.stopped)return Promise.resolve();if(this.stopTask)return this.stopTask;this.closing=true
+    const activating=[...this.records.values()].filter(record=>this.#activations.get(record)?.pending),activationStops=activating.map(record=>this._dispose(record))
     const task=Promise.resolve().then(async()=>{
-      await Promise.allSettled([this.pending,...[...this.records.values()].flatMap(record=>[record.monitorTask,record.returnTask]),...[...this.#retirements.values()].map(permit=>permit.task)].filter(Boolean))
+      await Promise.allSettled([this.pending,...activationStops,...activating.map(record=>this.#activations.get(record)?.task),...[...this.records.values()].flatMap(record=>[record.monitorTask,record.returnTask]),...[...this.#retirements.values()].map(permit=>permit.task)].filter(Boolean))
       for(const record of this.records.values())if(record.runtime?.state==='active'){if(record.returnRequestId||record.uncertain)throw fail('profile_return_stop_unconfirmed');await this.retire(record,true)}
       for(const record of this.records.values())await this._dispose(record)
       await Promise.allSettled([...this.#physical].filter(token=>token.kind==='rpc-close').map(token=>token.task))
