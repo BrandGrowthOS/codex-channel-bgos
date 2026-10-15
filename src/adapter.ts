@@ -97,6 +97,7 @@ import {
   type ActivityMarker,
 } from "./activity-markers.js";
 import type { BrowserRelayCredentials } from "./browser-mcp.js";
+import { BrowserProfileHost } from "./browser-profile-host.js";
 import { HOAI_TOOLS, HoaiTools, type ToolContext } from "./hoai-tools.js";
 import { BGOS_AGENT_HINTS } from "./agent-hints.js";
 import { DECLARED_CAPABILITIES } from "./declared-capabilities.js";
@@ -297,6 +298,9 @@ export class CodexAdapter {
   private readonly changesHandler: ReturnType<typeof createChangesHandler>;
   private readonly heartbeat: HeartbeatController;
   private readonly host: CodexHost;
+  private readonly browserProfiles: BrowserProfileHost;
+  private browserScopeGeneration = 0;
+  private currentBaseUrl: string;
   private readonly tools: HoaiTools;
   private readonly meetings: MeetingLane;
   private readonly turnControllers = new Map<number, Set<AbortController>>();
@@ -471,6 +475,7 @@ export class CodexAdapter {
   ) {
     this.cfg = cfg;
     this.currentToken = cfg.pairingToken;
+    this.currentBaseUrl = cfg.baseUrl;
     this.api = new BgosApi(cfg);
     this.skillsHandler = createSkillsHandler({ api: this.api });
     this.ws = new BgosWs(cfg, this.api);
@@ -736,7 +741,11 @@ export class CodexAdapter {
     });
     // The busy signal the supervisor reads before an update (finding 9):
     // every edge, any chat, written to the heartbeat file at once.
-    this.host.onBusyChange((busy) => this.heartbeat.setBusy(busy));
+    this.browserProfiles = new BrowserProfileHost({
+      log: (code) => console.warn(`${LOG} ${code}`),
+      onState: () => this.heartbeat.setBusy(this.isAnyBusy()),
+    });
+    this.host.onBusyChange(() => this.heartbeat.setBusy(this.isAnyBusy()));
 
     this.catalog = opts.agents ?? [{ route: "codex", name: "Codex" }];
     this.commandSeedModeOverride = opts.commandSeedMode ?? null;
@@ -793,7 +802,7 @@ export class CodexAdapter {
     const assistantId = this.assistantForChat(chatId);
     if (!assistantId) return null;
     return {
-      backendUrl: this.cfg.baseUrl,
+      backendUrl: this.currentBaseUrl ?? this.cfg.baseUrl,
       pairingToken: this.currentToken,
       assistantId,
       ...(this.ownerId ? { ownerUserId: this.ownerId } : {}),
@@ -905,11 +914,15 @@ export class CodexAdapter {
     });
     this.ws.on("inbound_click", (click) => this.handleInboundClick(click));
     this.ws.on("assistant_bound", (p: AssistantBoundPayload) => {
+      this.browserScopeGeneration++;
       this.assistantToRoute.set(p.assistantId, p.agentRoute);
+      void this.synchronizeBrowserProfiles();
       void this.seedDefaultCommands(p.assistantId, "bind");
     });
     this.ws.on("assistant_unbound", (p: AssistantUnboundPayload) => {
+      this.browserScopeGeneration++;
       this.assistantToRoute.delete(p.assistantId);
+      void this.synchronizeBrowserProfiles();
     });
     this.ws.on("commands_updated", () => {
       // No-op: user changed commands via the BGOS UI.
@@ -1008,6 +1021,7 @@ export class CodexAdapter {
   isAnyBusy(): boolean {
     return (
       this.host.isAnyBusy() ||
+      this.browserProfiles?.busy === true ||
       this.takenWork > 0 ||
       this.replyQueues.size > 0 ||
       this.voiceTasks.size > 0
@@ -1029,13 +1043,17 @@ export class CodexAdapter {
     }
     return pending.finally(settled);
   }
-  backgroundJobCount(): Promise<number> {
-    return this.host.backgroundTerminalCount();
+  async backgroundJobCount(): Promise<number> {
+    return (await this.host.backgroundTerminalCount()) + (this.browserProfiles?.busy ? 1 : 0);
   }
 
   async stop(): Promise<void> {
     this.nativeCommands.close();
-    if (!this.started) return;
+    this.browserScopeGeneration++;
+    const browserStop = this.browserProfiles?.stop();
+    // Observe immediately while independent chat cleanup drains as well.
+    const browserResult = browserStop?.then(() => null, () => new Error("browser_profile_cleanup_unconfirmed"));
+    if (!this.started) {const error = await browserResult;if (error) throw error;return;}
     this.started = false;
     this.clearSessionReportRetries();
     this.stopPollLoop();
@@ -1070,6 +1088,8 @@ export class CodexAdapter {
     } catch {
       /* best-effort on shutdown */
     }
+    const browserError = await browserResult;
+    if (browserError) throw browserError;
   }
 
   /**
@@ -3236,8 +3256,10 @@ export class CodexAdapter {
   // -------------------------------------------------------------------
 
   private async refreshIdentity(): Promise<boolean> {
+    const generation = this.browserScopeGeneration, token = this.currentToken;
     try {
       const me = await this.api.whoami();
+      if (this.fatalLatched || generation !== this.browserScopeGeneration || token !== this.currentToken) return false;
       this.ownerId = me.user_id;
       this.pairingId = me.pairing_id;
       this.heartbeat.setPairingId(this.pairingId);
@@ -3251,6 +3273,7 @@ export class CodexAdapter {
           emptyManifestAssistantIds.push(a.assistant_id);
         }
       }
+      await this.synchronizeBrowserProfiles();
       if (this.pairingId !== null && this.catalog.length > 0) {
         await syncCatalog(this.api, this.pairingId, this.catalog);
       }
@@ -3295,6 +3318,29 @@ export class CodexAdapter {
         err instanceof Error ? err.message : String(err),
       );
       return false;
+    }
+  }
+
+  private async synchronizeBrowserProfiles(): Promise<void> {
+    if (!this.browserProfiles) return;
+    try {
+      const assistantIds = [...this.assistantToRoute.keys()];
+      if (!this.started || this.fatalLatched || !this.ownerId || !this.pairingId || assistantIds.length === 0) {
+        await this.browserProfiles.revoke();
+        return;
+      }
+      await this.browserProfiles.synchronize({
+        backendUrl: this.currentBaseUrl,
+        pairingToken: this.currentToken,
+        pairingId: this.pairingId,
+        ownerUserId: this.ownerId,
+        assistantIds,
+        directory: join(this.resolveSecretsDir(), "..", "browser"),
+        parentPid: process.pid,
+      });
+    } catch {
+      await this.browserProfiles.revoke().catch(() => {});
+      console.warn(`${LOG} browser_profile_authorization_or_cleanup_unconfirmed`);
     }
   }
 
@@ -3409,6 +3455,10 @@ export class CodexAdapter {
   ): void {
     if (this.fatalLatched) return;
     this.fatalLatched = true;
+    this.browserScopeGeneration++;
+    void this.browserProfiles?.revoke().catch(() => {
+      console.warn(`${LOG} browser_profile_cleanup_unconfirmed`);
+    });
     // Tagged, so the unwind fails the plan's mission with the latch's own
     // words rather than "Stopped by you", which is now a pause reason.
     for (const controllers of this.turnControllers.values())
@@ -3536,9 +3586,16 @@ export class CodexAdapter {
   }
 
   private async recover(newToken: string, newBaseUrl?: string): Promise<void> {
+    // A new pairing must not overlap the prior child's physical cleanup.
+    try {await this.browserProfiles?.revoke();} catch {
+      console.warn(`${LOG} browser_profile_cleanup_unconfirmed`);
+      return;
+    }
+    this.browserScopeGeneration++;
     // eslint-disable-next-line no-console
     console.error(`${LOG} re-pair detected, applying new token`);
     this.currentToken = newToken;
+    if (newBaseUrl !== undefined) this.currentBaseUrl = newBaseUrl;
     this.api.updateToken(newToken, newBaseUrl);
     this.ws.updateToken(newToken, newBaseUrl);
     this.fatalLatched = false;

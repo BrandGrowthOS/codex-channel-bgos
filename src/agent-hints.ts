@@ -28,6 +28,17 @@ browser instead. host_offline means the selected browser host is unavailable.
 Unknown turns, meetings and invisible read-only consultations have no personal
 browser authority. A goal resumed after restart needs an attributed chat turn
 before it can use the private browser again.
+The plugin ships its own browser companion. It starts with this daemon after
+pairing identity is verified. Never install a second browser host or copy the
+person's browser directory. Managed profile setup is in docs/browser-profile.md:
+the person reviews Devices, grants background use and confirms the session.
+The machine operator separately compares and reviews the full peer fingerprint.
+Never perform that trust decision for them or treat a web page as approval.
+The person's foreground browser runs locally in HOAI. Website data and saved
+logins move only in encrypted checkpoints through HOAI after the source stops.
+This does not move a live JavaScript page, an unfinished sign-in, a passkey or a
+device-bound session. State such limitations clearly; do not retry an uncertain
+transfer or use a different profile to bypass it.
 Boards, schedule, list_schedules and cancel_schedule also require the verified current
 person. Never use another person's schedules when sender verification fails.
 Formatting: markdown, tables, inline images, fenced code, math and links. No

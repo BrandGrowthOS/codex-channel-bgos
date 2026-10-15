@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "sourceCommit": "901647978b666739575074c44c7e92160fe6bcf9",
+  "why": "Byte-identical encrypted checkpoint, lossless storage, strict complete portable state, cookie codecs, typed runtime endpoint, signed agent stopped-head lineage and encrypted local journal shared with HOAI. NativeRuntime exports are pure until its injected Electron constructor runs. The pairing adapter uses only shared signing methods and never instantiates or inherits the desktop Bearer client.",
+  "files": {
+    "crypto.js": {
+      "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/crypto.js",
+      "sha256": "8618f0702f01bd2a23a59dd3fcbef388512b1b218823953b0a7e63b83158a3a3"
+    },
+    "storage.js": {
+      "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/storage.js",
+      "sha256": "a78d8e9daf05e3cff71f3aa100e8a32656a63bca7508529a06923097885bbfd3"
+    },
+    "portable-state.js": {
+      "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/portable-state.js",
+      "sha256": "0539458b36a2d112277889c151f501881b4a2ff2d0a5653e3dca62818e3409b0"
+    },
+    "native-runtime.js": {
+      "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/native-runtime.js",
+      "sha256": "2cfdbb6f8e207c81061af5830a28cc940d3410a7471558e9a05f06874edae40e"
+    },
+    "coordinator-client.js": {
+      "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/coordinator-client.js",
+      "sha256": "0ad488fdcfe68cd0b54a3b09616d7bd272d913ff6965e277862cd87535d65c6d"
+    },
+    "runtime-endpoint.js": {
+      "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/runtime-endpoint.js",
+      "sha256": "cb5023d79d476cf30edda6facec71c2d60a4192147cbc053d807d2d1ea19cb50"
+    },
+    "stopped-head-stage.js": {
+      "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/stopped-head-stage.js",
+      "sha256": "4b350549a4e99d4ef5d8d939ab43e4e9d712c294d9b43329a5364fbf32751eac"
+    },
+    "checkpoint-store.js": {
+      "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/checkpoint-store.js",
+      "sha256": "a0ca3ffb3bd8d030bdd1225882a96d1d6801da84534d5190928cf5f71f91a1ac"
+    },
+    "runtime-status-client.js": {
+      "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/runtime-status-client.js",
+      "sha256": "48a0baf9169797577460f2bb6fba2c785d6d6a3fc3f5718ce3a1c895c4a7329a"
+    }
+  }
+}
