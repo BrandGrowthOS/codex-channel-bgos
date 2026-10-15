@@ -30,6 +30,23 @@ const source=value=>pick(value,['endpointId','bootId','runtimeId','sessionId','w
 const toolError=(code,message)=>({isError:true,content:[{type:'text',text:`${code}: ${message}`}]})
 const permissionTools=new Set(['browser_navigate','browser_click','browser_handle_dialog','browser_select_option','browser_file_upload','browser_pdf_save'])
 const managedFileRoster=tools=>tools.map(tool=>tool.name==='browser_file_upload'?{...tool,description:'Upload exactly one hoai-file token returned by hoai_browser_files. Host filesystem paths are refused. Original website permission and explicit recipient file consent are both required.',inputSchema:{type:'object',properties:{paths:{type:'array',items:{type:'string',pattern:'^hoai-file:[a-f0-9-]{36}$'},minItems:1,maxItems:1}},required:['paths'],additionalProperties:false}}:['browser_pdf_save','browser_take_screenshot'].includes(tool.name)?{...tool,description:tool.description+' Managed output is a private browser artifact. filename may be only a safe basename. Use its returned hoai-artifact token with hoai_browser_send_file; the recipient approves the individual file in HOAI.'}:tool)
+const managedSessionDescriptions={
+  hoai_browser_open_session:'Report the already authorized managed runtime and advisory backup metadata. Does not enroll a device or select another identity.',
+  browser_close:'Retire this exact managed runtime and commit its encrypted stopped checkpoint through HOAI. An unconfirmed result requires explicit reconciliation and does not prove server commit.',
+  hoai_browser_close_session:'Retire this exact managed runtime and commit its encrypted stopped checkpoint through HOAI. An unconfirmed result requires explicit reconciliation and does not prove server commit.',
+  hoai_browser_status:'Report JSON state and advisory encrypted backup metadata for this authorized managed runtime. This response does not enumerate tabs, human control or a legacy parked gate.'
+}
+const managedToolRoster=tools=>managedFileRoster(tools.filter(tool=>tool.name!=='hoai_browser_wait_gate')).map(tool=>{
+  const result={...tool};if(managedSessionDescriptions[tool.name])result.description=managedSessionDescriptions[tool.name]
+  if(tool.name==='browser_type')result.description+=' Managed mode supports positively classified ordinary input/textarea only, with fresh Enter page text approval. submit and slowly are unsupported.'
+  if(tool.name==='browser_fill_form')result.description+=' Managed mode supports positively classified ordinary textbox fields only, with fresh Enter page text approval; all fields must qualify before any write.'
+  if(['browser_press_key','browser_press_sequentially','browser_keydown','browser_keyup','browser_evaluate'].includes(tool.name))result.description+=' Managed mode refuses this action; ask the person to use the original page directly.'
+  const properties=tool.inputSchema?.properties;if(!properties)return result
+  const next={...properties};let changed=false
+  if(next.wait_seconds){next.wait_seconds={...next.wait_seconds,description:'Legacy compatibility hint only. Managed approval remains bound to the original request and exact page for at most 60 seconds; this value never creates a parked gate or extends that deadline.'};changed=true}
+  if(tool.name==='hoai_browser_open_session')for(const key of ['purpose','profile','caps'])if(next[key]){next[key]={...next[key],description:key==='purpose'?'Compatibility purpose for this existing managed runtime; it does not open or enroll a new session.':'Compatibility hint only; does not change the managed identity, unlock storage, enable tool sets or grant permissions.'};changed=true}
+  if(changed)result.inputSchema={...tool.inputSchema,properties:next};return result
+})
 const genericError=error=>typeof error?.code==='string'&&/^profile_[a-z0-9_]{1,90}$/.test(error.code)?error.code:'profile_companion_unavailable'
 
 /** Main process only. Every network operation goes to the configured HOAI
@@ -350,7 +367,7 @@ export class AgentBrowserProfileCompanion{
     record.engineCreating=this._trackPhysical(record,'engine-create',Promise.resolve().then(()=>this.createEngine({runtime,directory:path.join(this.directory,'artifacts',authority.runtimeId),...(onDownload?{onDownload}:{})})).then(engine=>{record.engine=engine;return engine}));await record.engineCreating;check()
     if(selected){if(typeof record.engine.selectPage!=='function')throw fail('profile_resume_selection_unproved');await record.engine.selectPage(selected);check();if(record.engine.selectedPage()!==selected)throw fail('profile_resume_selection_unproved')}
     const currentExecution=()=>{const execution=this.#executions.getStore();if(!execution||execution.record!==record)throw fail('profile_companion_context_changed');execution.check();return execution}
-    record.relay=this.createRelay({roster:()=>{currentExecution();return [...managedFileRoster(record.engine.roster()),...AGENT_PROFILE_FILE_TOOLS]},callTool:(_context,name,args,signal)=>{currentExecution();return this._tool(record,name,args,signal)}})
+    record.relay=this.createRelay({roster:()=>{currentExecution();return [...managedToolRoster(record.engine.roster()),...AGENT_PROFILE_FILE_TOOLS]},callTool:(_context,name,args,signal)=>{currentExecution();return this._tool(record,name,args,signal)}})
     const rpc=createPairedProfileRuntimeEndpoint({authority,endpoint:record.endpoint,client:this.rpcClient,assertCurrent:()=>this._admit(record),execute:async({frame,signal,assertCurrent})=>{
       assertCurrent();signal.throwIfAborted()
       const runtime=record.runtime,engine=record.engine,relay=record.relay,endpoint=record.endpoint,binding=rpc.binding,originalAuthority=shared.exactAuthority(frame.authority),messageBytes=JSON.stringify(frame.message),snapshot=JSON.parse(JSON.stringify(frame))

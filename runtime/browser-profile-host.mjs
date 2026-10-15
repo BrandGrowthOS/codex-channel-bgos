@@ -4,7 +4,7 @@ import path from 'node:path'
 import { hostname } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { realpathSync } from 'node:fs'
-import { BrowserHost,ChromiumEngine,createManagedProfileEngine,RelaySessions,DEFAULT_CAPS,servedBrowserTools,listTools,loadPlaywright,resolveChromeExecutable,hostInstructions,pidAlive } from '../vendor/browser-profile/bin/hoai-browser-host.mjs'
+import { BrowserHost,ChromiumEngine,createManagedProfileEngine,createManagedProfileRelay,DEFAULT_CAPS,servedBrowserTools,listTools,loadPlaywright,resolveChromeExecutable,pidAlive } from '../vendor/browser-profile/bin/hoai-browser-host.mjs'
 import { ensureBrowser } from '../vendor/browser-profile/lib/browser-bootstrap.mjs'
 import { AgentBrowserProfileCompanion } from '../vendor/browser-profile/lib/browser-profile-companion.mjs'
 import { chromeEnv } from '../vendor/browser-profile/lib/browser-env.mjs'
@@ -22,7 +22,7 @@ export function createHost({config:raw,environment=process.env,io,fetchImpl,log=
   const createProfileCompanion=(connection,legacyHost)=>new AgentBrowserProfileCompanion({connection,agentRoot,environment,deviceLabel,log,
     ...(createProfileRuntime?{createRuntime:createProfileRuntime}:{}),assertNoLegacyActive:scope=>!legacyHost.pool.peek({assistantId:scope.assistantId,principal:`user-${scope.actingUserId}`}),loadBrowser:load,
     createEngine:input=>createManagedProfileEngine({...input,log}),
-    createRelay:core=>new RelaySessions({core,serverInfo:{name:'hoai-codex-profile',version:'1'},instructions:hostInstructions(deviceLabel),log}),
+    createRelay:core=>createManagedProfileRelay({core,deviceLabel,serverInfo:{name:'hoai-codex-profile',version:'1'},log}),
   })
   return new BrowserHost({agentRoot,env:{...environment,HOAI_BROWSER_HOST_AGENTS:config.assistantIds.join(',')},deviceLabel,browserTools,createEngine,createProfileCompanion,log,
     ...(io?{io}:{}),...(fetchImpl?{fetchImpl}:{}),listDir:directory=>directory===agentRoot?[...catalog.keys()].map(name=>path.basename(name)):[],readText:file=>catalog.get(file)??null,
