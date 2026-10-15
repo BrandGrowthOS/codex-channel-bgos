@@ -1,0 +1,39 @@
+{
+  "kind": "committed-core-worker-vendor-closure",
+  "scriptSha256": "147e95406cfb70514ce433b000d7ce3d9ed27b237461eb9dbd7e89b025fd6af4",
+  "testSha256": "9ee897ce8d9969f1e1031994e23e92db089814f53cea9a393952a31a9cb95495",
+  "sharedSourceUnchanged": true,
+  "rows": [
+    {
+      "label": "worker-closure",
+      "line": 43,
+      "changedLine": "          void file",
+      "before": "          queue.push(boundary+'/'+file)",
+      "after": "          void file",
+      "redExit": 1,
+      "redSignal": null,
+      "assertionFailure": true,
+      "restoredExact": true,
+      "greenExit": 0,
+      "greenSignal": null
+    },
+    {
+      "label": "core-pin",
+      "line": 42,
+      "changedLine": "          if(false)throw Error('Committed profile core pin differs')",
+      "before": "if(createHash('sha256').update(read(boundary+'/'+file)).digest('hex')!==pin.sha256)",
+      "after": "if(false)",
+      "redExit": 1,
+      "redSignal": null,
+      "assertionFailure": true,
+      "restoredExact": true,
+      "greenExit": 0,
+      "greenSignal": null
+    }
+  ],
+  "passed": 5,
+  "skipped": 0,
+  "typescriptNoEmitExit": 0,
+  "boundary": "Synthetic committed source repositories and copied actual vendor CLI; real Node worker executes from the resulting private package. The final installed Codex companion acceptance is separate.",
+  "rawReceiptSha256": "70f118f7b8c07b8c1c7a7c44a0c60f8ceb49fe32f5b315595013bb1327367b13"
+}

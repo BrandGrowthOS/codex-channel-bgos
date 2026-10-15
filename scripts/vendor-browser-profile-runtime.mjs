@@ -11,7 +11,7 @@ const git=args=>{const result=spawnSync('git',['-C',source,...args],{windowsHide
 const sourceCommit=git(['rev-parse','--verify',`${ref}^{commit}`]).toString().trim()
 if(!/^[a-f0-9]{40}$/.test(sourceCommit))throw Error('Exact committed browser runtime required')
 const inventory=new Set(git(['ls-tree','-r','--name-only',sourceCommit]).toString().trim().split('\n'))
-const read=name=>git(['show',`${sourceCommit}:${name}`]),files={},queue=['bin/hoai-browser-host.mjs']
+const read=name=>git(['show',`${sourceCommit}:${name}`]),files={},queue=['bin/hoai-browser-host.mjs'],inventoried=new Set()
 const locate=(from,specifier)=>{
   const target=posix.normalize(posix.join(posix.dirname(from),specifier))
   if(target.startsWith('../')||posix.isAbsolute(target))throw Error('Runtime dependency escapes source repository')
@@ -31,6 +31,18 @@ for(let cursor=0;cursor<queue.length;cursor++){
     for(const match of bytes.toString('utf8').matchAll(expression))queue.push(locate(name,match[1]||match[2]||match[3]))
     for(const boundary of ['lib/browser-host-core','lib/browser-profile-core'])if(name.startsWith(boundary+'/')){
       for(const file of ['package.json','vendor.json'])if(inventory.has(boundary+'/'+file))queue.push(boundary+'/'+file)
+      // Worker entry points may be constructed with path.join(__dirname, ...).
+      // Their committed core manifest is the authoritative dependency list.
+      if(boundary==='lib/browser-profile-core'&&inventory.has(boundary+'/vendor.json')&&!inventoried.has(boundary)){
+        inventoried.add(boundary)
+        const declared=JSON.parse(read(boundary+'/vendor.json'))
+        if(declared?.version!==1||!declared.files||typeof declared.files!=='object'||Array.isArray(declared.files)||Object.keys(declared.files).length<1||Object.keys(declared.files).length>128)throw Error('Invalid committed profile core inventory')
+        for(const [file,pin]of Object.entries(declared.files)){
+          if(!/^[a-z][a-z0-9-]*\.js$/.test(file)||!pin||typeof pin!=='object'||!/^[a-f0-9]{64}$/.test(pin.sha256)||!inventory.has(boundary+'/'+file))throw Error('Invalid committed profile core dependency')
+          if(createHash('sha256').update(read(boundary+'/'+file)).digest('hex')!==pin.sha256)throw Error('Committed profile core pin differs')
+          queue.push(boundary+'/'+file)
+        }
+      }
     }
   }
 }
