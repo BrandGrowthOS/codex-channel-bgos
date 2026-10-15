@@ -1064,10 +1064,18 @@ export class PlaywrightEngine {
 
   selectedPage() { return this._backend?._context?.currentTab()?.page || this.pages().at(-1) }
   async selectPage(page) {
-    const context = this._backend?._context
-    const index = context?.tabs().findIndex(tab => tab.page === page)
-    if (!context || index < 0) throw new Error('Browser tab is unavailable')
+    this._managedRuntime?.assertCurrent()
+    const backend = this._backend, context = backend?._context
+    if (!context || typeof context.ensureBrowserContext !== 'function') throw new Error('Browser tab is unavailable')
+    // MCP creates its tab wrappers lazily, even when the native pages exist.
+    await context.ensureBrowserContext()
+    this._managedRuntime?.assertCurrent()
+    if (this._backend !== backend || backend._context !== context) throw new Error('Browser tab is unavailable')
+    const index = context.tabs().findIndex(tab => tab.page === page)
+    if (index < 0) throw new Error('Browser tab is unavailable')
     await context.selectTab(index)
+    this._managedRuntime?.assertCurrent()
+    if (this._backend !== backend || backend._context !== context || context.currentTab()?.page !== page) throw new Error('Browser tab is unavailable')
   }
   async newPage() {
     if (this.pages().length >= REMOTE_BROWSER_TAB_MAX) throw new HostError('browser_tabs_full', 'The browser has reached its tab limit.')

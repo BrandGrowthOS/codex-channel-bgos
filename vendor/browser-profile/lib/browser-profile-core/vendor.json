@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "sourceCommit": "9eb6ca7f7e62919b437a8cd7fe516324174ddf4f",
-  "why": "Byte-identical encrypted checkpoint, lossless storage, portable state and resume readiness, cookie codecs, typed runtime endpoint, signed stopped-head lineage and encrypted local journal shared with HOAI. NativeRuntime exports are pure until its injected Electron constructor runs. The pairing adapter shares pure endpoint and document validation and never instantiates or inherits the desktop Bearer client.",
+  "sourceCommit": "17a310c044550f906d1d7df30890d2228486c635",
+  "why": "Byte-identical encrypted checkpoint, lossless storage, portable state and resume readiness, cookie codecs, typed runtime endpoint, signed stopped-head lineage, separate permissioned file crypto/client/private materialization and encrypted local journal shared with HOAI. NativeRuntime exports are pure until its injected Electron constructor runs. The pairing adapter shares pure endpoint and document validation and never instantiates or inherits the desktop Bearer client. ProfileFileClient fixes its principal explicitly; paired use obtains only fresh pairing proof. Electron OS folder policy and native dialogs are intentionally excluded.",
   "files": {
     "crypto.js": {
       "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/crypto.js",
@@ -50,6 +50,22 @@
     "return-intent.js": {
       "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/return-intent.js",
       "sha256": "3d27a0f8037dc236433cf1d22bd6d61edcc7f8a46e4ef1842ab0737535a33bd1"
+    },
+    "profile-file-crypto.js": {
+      "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/profile-file-crypto.js",
+      "sha256": "5874c0b81e8f7a265af5db5ab7988635621fd28003ab901b5795c1a92d2700f1"
+    },
+    "profile-file-wire.js": {
+      "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/profile-file-wire.js",
+      "sha256": "0640ea0c35f5e26329b542274a93f11f186a8d016a93302e95d00a97b81add69"
+    },
+    "profile-file-client.js": {
+      "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/profile-file-client.js",
+      "sha256": "2e9627acfb1622cf1df6d3c730ea7fa61801c8e2bf874f28fe38926374391d24"
+    },
+    "profile-file-staging.js": {
+      "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/profile-file-staging.js",
+      "sha256": "63e7a86d9d1cc5e34a857ad217edbc80f20c9ff3c04ecc1cec4a9edce0cbd22a"
     }
   }
 }
