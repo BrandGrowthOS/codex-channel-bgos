@@ -5,7 +5,8 @@
 const { randomUUID } = require("node:crypto");
 const { identityFingerprint } = require("./crypto");
 const { documentSignature, exactAuthority, sameAuthority, isRuntimeSocketId } = require("./coordinator-client");
-const META_BYTES = 64 * 1024, VALID_MS = 10_000;
+// Leave clock headroom below the server's strict 10-second proof ceiling.
+const META_BYTES = 64 * 1024, VALID_MS = 9_000;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const fail = code => Object.assign(new Error(code), { code });
 const checkCapability = check => { if (typeof check !== "function") throw fail("profile_runtime_status_capability_required"); const value = check(); if (value?.then) { void Promise.resolve(value).catch(() => {}); throw fail("profile_runtime_status_context_changed"); } if (value === false) throw fail("profile_runtime_status_context_changed"); };

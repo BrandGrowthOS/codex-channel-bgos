@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "sourceCommit": "7b769071503748def458591d8596f30420bbe3d9",
+  "sourceCommit": "6dc212c22f9a62490b3307f9ee2cb832f92033a7",
   "why": "Byte-identical encrypted checkpoint, lossless storage, portable state and resume readiness, cookie codecs, typed runtime endpoint, signed stopped-head lineage, separate permissioned file crypto/client/private materialization and encrypted local journal shared with HOAI. Explicit fixed-principal active backup transport, scheduler, readonly capture and seal/journal workers are included as pure main-only dependencies; they provide no activation authority. NativeRuntime exports are pure until its injected Electron constructor runs. The pairing adapter shares pure endpoint and document validation and never instantiates or inherits the desktop Bearer client. ProfileFileClient fixes its principal explicitly; paired use obtains only fresh pairing proof. Electron OS folder policy and native dialogs are intentionally excluded.",
   "files": {
     "crypto.js": {
@@ -45,7 +45,7 @@
     },
     "runtime-status-client.js": {
       "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/runtime-status-client.js",
-      "sha256": "e40c97d967127a83083df1d3e7a6050b681faca89a009deaf0da9c486971ffa6"
+      "sha256": "11bb72e458054809956bf2e256efb9358bcaf1ad29dd9c1492861dd918f00128"
     },
     "return-intent.js": {
       "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/return-intent.js",

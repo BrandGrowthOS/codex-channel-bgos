@@ -1,4 +1,4 @@
-import { constants, openSync, closeSync, fstatSync, readSync, lstatSync, existsSync } from "node:fs";
+import { constants, openSync, closeSync, fstatSync, readSync, lstatSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
 import { BgosApi } from "./bgos-api.js";
@@ -18,10 +18,19 @@ export function readPublicPeerReview(file:string):unknown{
   }finally{bytes?.fill(0);closeSync(fd)}
 }
 export async function checkBrowserPrerequisites():Promise<Readonly<Record<string,unknown>>>{
-  const module=await import(new URL("../vendor/browser-profile/lib/browser-bootstrap.mjs",import.meta.url).href),bundled=module.bundledChromium();
+  const failure=(code:"browser_install_failed"|"browser_install_recovery_required")=>Object.assign(new Error(code),{code});
+  let state:unknown;
+  try{
+    const module=await import(new URL("../vendor/browser-profile/lib/browser-bootstrap.mjs",import.meta.url).href),readiness=module.browserBootstrapReadiness();
+    if(readiness?.then){void Promise.resolve(readiness).catch(()=>{});throw failure("browser_install_failed");}
+    if(!readiness||typeof readiness!=="object"||Array.isArray(readiness))throw failure("browser_install_failed");
+    state=readiness.state;
+  }catch{throw failure("browser_install_failed");}
+  if(state==="installing"||state==="recovery-required")throw failure("browser_install_recovery_required");
+  if(state!=="installed"&&state!=="needs-install")throw failure("browser_install_failed");
   return Object.freeze({
     managedAgentPlatform:process.platform==="linux"?"supported-with-prerequisites":"linux-agent-required",
-    browser:existsSync(bundled.executable)?"bundled-cache-present":"automatic-first-use-download",
+    browser:state==="installed"?"bundled-cache-present":"automatic-first-use-download",
     keyService:"requires-unlocked-persistent-Secret-Service-and-/usr/bin/gdbus-and-/usr/bin/secret-tool",
     keyServiceAvailability:"not-probed-without-an-enrolled-profile",sandbox:"required",authorization:"device-review-background-grant-and-session-confirmation-required",
   });

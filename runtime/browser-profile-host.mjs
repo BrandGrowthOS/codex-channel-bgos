@@ -31,6 +31,12 @@ export function createHost({config:raw,environment=process.env,io,fetchImpl,log=
 }
 export function activity(host){
   let activeProfiles=0,pendingWork=host.retiringConnections.size
+  try{
+    const installation=typeof host.installationActivity==='function'?host.installationActivity():null
+    if(installation?.then){void Promise.resolve(installation).catch(()=>{});throw Error('browser_install_activity_unavailable')}
+    if(!installation||!Number.isSafeInteger(installation.pendingPhysicalOperations)||installation.pendingPhysicalOperations<0||typeof installation.cleanupUnknown!=='boolean')throw Error('browser_install_activity_unavailable')
+    pendingWork+=installation.pendingPhysicalOperations+(installation.cleanupUnknown?1:0)
+  }catch{pendingWork++}
   // This exact pinned host retains starts, drains and failed stops in _slots.
   // running() alone loses the physical stop after it clears slot.engine.
   if(host.pool?._slots instanceof Map)for(const slot of host.pool._slots.values()){

@@ -54,36 +54,47 @@ export function keyHelperEnvironment(environment = {}) {
  */
 export function runKeyHelper(executable, args, { environment, input = Buffer.alloc(0), timeoutMs = 3000, maxBytes = LIMIT, signal } = {}) {
   return new Promise((resolve, reject) => {
-    let child, timer, settled = false, size = 0
+    let child, timer, settled = false, outcome = null, size = 0
     const chunks = []
+    const discard = () => { for (const chunk of chunks.splice(0)) chunk.fill(0) }
     const finish = (error, result) => {
       if (settled) return
       settled = true; clearTimeout(timer); signal?.removeEventListener('abort', cancel)
-      if (error) { for (const chunk of chunks) chunk.fill(0); reject(error) } else resolve(result)
+      if (error) { discard(); reject(error) } else resolve(result)
     }
-    const stop = code => { try { child?.kill('SIGKILL') } catch {}; finish(fail(code)) }
+    const stop = code => {
+      if (settled || outcome) return
+      outcome = fail(code); clearTimeout(timer); signal?.removeEventListener('abort', cancel); discard()
+      // A stop request is not physical completion. Keep this same promise
+      // pending until the original ChildProcess and its pipes close.
+      try { if (Number.isSafeInteger(child?.pid) && child.pid > 0) child.kill('SIGKILL') } catch {}
+    }
     const cancel = () => stop('profile_key_context_changed')
     if (signal?.aborted) return finish(fail('profile_key_context_changed'))
     try { child = spawn(executable, args, { shell: false, env: environment, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true }) }
     catch { return finish(fail('profile_key_setup_required')) }
-    child.once('error', () => finish(fail('profile_key_setup_required')))
+    child.once('error', () => stop('profile_key_setup_required'))
+    child.once('close', code => {
+      if (settled) { discard(); return }
+      if (outcome) { finish(outcome); return }
+      const output = Buffer.concat(chunks)
+      discard(); finish(null, { code, output })
+    })
+    if (!child.stdout?.on || !child.stderr?.on || !child.stdin?.on || !child.stdin?.end) {
+      stop('profile_key_setup_required'); return
+    }
     child.stdout.on('data', chunk => {
-      if (settled) { chunk.fill(0); return }
+      if (settled || outcome) { chunk.fill(0); return }
       size += chunk.length
       if (size > maxBytes) { chunk.fill(0); stop('profile_key_refused'); return }
       chunks.push(chunk)
     })
     child.stderr.on('data', chunk => chunk.fill(0))
     child.stdin.on('error', () => {})
-    child.once('close', code => {
-      if (settled) { for (const chunk of chunks) chunk.fill(0); return }
-      const output = Buffer.concat(chunks)
-      for (const chunk of chunks) chunk.fill(0)
-      finish(null, { code, output })
-    })
     signal?.addEventListener('abort', cancel, { once: true })
     timer = setTimeout(() => stop('profile_key_unlock_required'), timeoutMs)
-    child.stdin.end(input)
+    if (signal?.aborted) cancel()
+    try { child.stdin.end(outcome ? undefined : input) } catch { stop('profile_key_setup_required') }
   })
 }
 

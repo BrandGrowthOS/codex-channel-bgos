@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "playwrightVersion": "1.64.1",
+  "chromiumRevision": "1248",
+  "sha256": {
+    "cli.js": "7c46f799363eee3e0bb7a7d7c870a92316a1601bf6fda780b656df4209542aa9",
+    "lib/bootstrap.js": "39dd64cc9472275d1b25c170fefa2a98353bcca598b741788faac2e6e15fc737",
+    "lib/coreBundle.js": "829521b67ed7be90c7d6d6098ff39f2241562d47e4ad7ccab13710924a56001d",
+    "lib/utilsBundle.js": "75f1431ea7ee00b2b291a0a72d4fa1c07ae04d999f21a00cd03b8f454a5840fc",
+    "lib/entry/oopBrowserDownload.js": "87567cdbd67dd2f50bb232d47d3784701ece7c81e39c0287bb7d1b466b68cf06"
+  },
+  "upstreamSource": "https://github.com/microsoft/playwright/tree/v1.64.1/packages/playwright-core/src/server/registry"
+}

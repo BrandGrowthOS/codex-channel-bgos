@@ -65,7 +65,7 @@ import { homedir, hostname, tmpdir } from 'node:os'
 import { delimiter, dirname, isAbsolute, join, posix as posixPath, win32 as win32Path } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { AgentBrowserVault, browserVaultScope } from '../lib/agent-browser-vault.mjs'
-import { ensureBrowser, bundledChromium } from '../lib/browser-bootstrap.mjs'
+import { ensureBrowser, bundledChromium, browserBootstrapReadiness, browserInstallActivity, cancelBrowserInstallations, whenBrowserInstallationsDrained } from '../lib/browser-bootstrap.mjs'
 import { terminateBrowserDaemon } from '../lib/browser-profile-daemon-stop.mjs'
 import { BrowserSecretRedactor } from '../lib/browser-secret-redactor.mjs'
 import { DOWNLOAD_ASK_WAIT_S, DownloadStore, SlotDownloads, downloadLines, downloadPaths } from '../lib/browser-downloads.mjs'
@@ -2380,6 +2380,7 @@ export class BrowserHost {
     readText = defaultReadText,
     scope = scopeFromEnv(env),
     createProfileCompanion = null,
+    browserInstallations = { activity: browserInstallActivity, cancel: cancelBrowserInstallations, whenDrained: whenBrowserInstallationsDrained },
   }) {
     this.agentRoot = agentRoot
     this.scope = scope
@@ -2393,6 +2394,7 @@ export class BrowserHost {
     this._readText = readText
     this._allow = parseAgentAllowList(env.HOAI_BROWSER_HOST_AGENTS)
     this._createProfileCompanion = createProfileCompanion
+    this._browserInstallations = browserInstallations
     this._profileTimer = null
     this._deviceLabel = deviceLabel
     /** assistantId -> DownloadStore: what is held and kept for that agent (lib/browser-downloads.mjs). */
@@ -2548,8 +2550,13 @@ export class BrowserHost {
     if (this.connections.size > 0) this._warnedEmpty = false
   }
 
+  installationActivity() { return this._browserInstallations.activity() }
+
   async stop() {
     this._closing = true
+    this._browserInstallations.cancel()
+    const installationDrain = this._browserInstallations.whenDrained()
+    installationDrain.catch(() => {})
     if (this._profileTimer) clearInterval(this._profileTimer)
     this._profileTimer = null
     if (this._rescanTimer) clearInterval(this._rescanTimer)
@@ -2567,11 +2574,13 @@ export class BrowserHost {
     this.connections.clear()
     this.relay.close()
     await this.pool.stopAll()
+    await installationDrain
   }
   async emergencyStopOwnedProfiles() {
     this._closing = true
+    this._browserInstallations.cancel()
     const retained=[...new Set([...this.connections.values(),...this.retiringConnections.values()])]
-    const results=await Promise.allSettled(retained.map(connection=>connection.profileCompanion?.emergencyTerminate()))
+    const results=await Promise.allSettled([...retained.map(connection=>connection.profileCompanion?.emergencyTerminate()),this._browserInstallations.whenDrained()])
     killStartedChromes()
     for(const connection of retained)connection.stop()
     if(results.some(result=>result.status==='rejected'))throw new Error('profile_companion_stop_unconfirmed')
@@ -2671,11 +2680,20 @@ export async function main({
     log('managed profiles: explicit recipient device review, separate background grant and session confirmation are required; no profile is invented by installation')
     log(process.platform === 'linux' ? 'managed profile keys: require an unlocked persistent Secret Service collection, /usr/bin/gdbus and /usr/bin/secret-tool; this read-only check does not unlock it' : 'managed profiles: Linux Secret Service setup is required on the agent machine; no plaintext or alternate key-store fallback is used')
     log(`tools: ${SESSION_TOOLS.length} session tools and ${(await loadBrowserTools()).length} browser_ tools`)
-    if (!chrome.path && !env.HOAI_BROWSER_EXECUTABLE) {
-      const cached = bundledChromium().executable
-      if (existsSync(cached)) { log(`browser: ${cached} (bundled cache)`); return 0 }
-      log('browser: ready for automatic first-use download; --check does not install files.')
-      return 0
+    try {
+        const readiness = browserBootstrapReadiness()
+        if (readiness.state === 'recovery-required' || readiness.state === 'installing') {
+          log('browser: browser_install_recovery_required; verify the original installer and downloader have ended before explicitly recovering the cache. --check does not clear recovery markers.')
+          return 1
+        }
+        if (!chrome.path && !env.HOAI_BROWSER_EXECUTABLE) {
+          if (readiness.state === 'installed') { log(`browser: ${readiness.executable} (complete bundled cache; read-only observation)`); return 0 }
+          log('browser: ready for automatic first-use download; --check does not install files.')
+          return 0
+        }
+    } catch {
+        log('browser: browser_install_failed; verify the pinned package and writable user cache. --check does not install files.')
+        return 1
     }
     return chrome.path ? 0 : 1
   }
