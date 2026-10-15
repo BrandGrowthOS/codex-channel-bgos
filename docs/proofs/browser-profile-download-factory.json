@@ -1,0 +1,58 @@
+{
+  "mutation": "discard-original-download-callback",
+  "path": "runtime/browser-profile-host.mjs",
+  "changedExecutableLines": [
+    {
+      "line": 24,
+      "text": "    createEngine:input=>createManagedProfileEngine({...input,onDownload:undefined,log}),"
+    }
+  ],
+  "redExit": 1,
+  "redSha256": "529f25d360bccc2a9ffcf7d50971c6225076e5895a05c620f02e1ba9cc4e235a",
+  "restoredExit": 0,
+  "restoredSha256": "116b1445e42a0254770335bdc36067ee0ca19dd85f7cd37ea234ef95e4b25d44",
+  "exactRestoration": true,
+  "realWorkspaceUnchanged": true,
+  "selectedCases": 1,
+  "otherCasesIntentionallyUnselected": 13,
+  "date": "2026-10-15",
+  "problem": "The Codex factory discarded the exact Companion onDownload callback. The native Engine fallback cancelled ordinary downloads before quarantine could produce a receipt.",
+  "repair": "Reuse the canonical common createManagedProfileEngine factory, preserving the original callback and managed runtime.",
+  "tests": {
+    "files": 3,
+    "passed": 31,
+    "skipped": 0,
+    "tscNoEmitExit": 0
+  },
+  "sourceHashes": {
+    "runtime/browser-profile-host.mjs": "d440cb394a075c0103facbce4f919dfbfb77ee0514be1e9979716e877d77a4d8",
+    "test/browser-profile-host.spec.ts": "036ca5cd929da01905625a112c6bc074616ef5ea0bbceb6a332064f6d1881c09"
+  },
+  "rawEvidence": [
+    {
+      "path": ".tmp/codex-download-factory-proof/before-fix-red.txt",
+      "sha256": "bcf811968dc021ad67e9481fed26149eb8cc13b36068c10c809c2ac84b18a64f"
+    },
+    {
+      "path": ".tmp/codex-download-factory-proof/fixed-touched.txt",
+      "sha256": "3215ce8db173c5e82b1badee049335d0af1af9e5b97cd87207c9e538879115a4"
+    },
+    {
+      "path": ".tmp/codex-download-factory-proof/mutated-red.txt",
+      "sha256": "529f25d360bccc2a9ffcf7d50971c6225076e5895a05c620f02e1ba9cc4e235a"
+    },
+    {
+      "path": ".tmp/codex-download-factory-proof/restored-green.txt",
+      "sha256": "116b1445e42a0254770335bdc36067ee0ca19dd85f7cd37ea234ef95e4b25d44"
+    },
+    {
+      "path": ".tmp/codex-download-factory-proof/tsc.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "limits": [
+    "The actual Codex host and Companion factory execute; only native start is stubbed in memory. No real download, browser, HOAI relay or recipient release is claimed here.",
+    "Mutation selects one regression case, thirteen other host cases intentionally unselected. The touched three full suites run31cases with no skips.",
+    "The initial before-fix log asserts callback identity. The final stronger mutation asserts real _download dispatch reaches the original callback, then checks identity and no cancellation/deletion."
+  ]
+}

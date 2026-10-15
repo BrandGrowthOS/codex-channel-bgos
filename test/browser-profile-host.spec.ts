@@ -86,6 +86,21 @@ describe("Codex managed browser process ownership",()=>{
 });
 
 describe("the actual common browser host behind Codex",()=>{
+  it("preserves the original managed download callback through the actual companion factory",async()=>{
+    const directory=mkdtempSync(join(tmpdir(),"hoai-codex-download-factory-"));
+    const {createHost}=await import("../runtime/browser-profile-host.mjs");
+    const {PlaywrightEngine}=await import("../vendor/browser-profile/bin/hoai-browser-host.mjs");
+    const started=vi.spyOn(PlaywrightEngine.prototype,"start").mockImplementation(async function(this:any){return this});
+    try{
+      const options=config({directory}),host:any=createHost({config:options});
+      const companion=host._createProfileCompanion({pairing:{backendUrl:options.backendUrl,token:options.pairingToken,pairingId:options.pairingId,ownerUserId:options.ownerUserId},bootId:"synthetic-boot"},host);
+      const runtime={assertCurrent:vi.fn()},onDownload=vi.fn(),download={cancel:vi.fn(async()=>{}),delete:vi.fn(async()=>{})};
+      const engine=await companion.createEngine({runtime,directory:join(directory,"artifacts"),onDownload});
+      expect(started).toHaveBeenCalledTimes(1);expect(engine._managedRuntime).toBe(runtime);
+      engine._download(download);await tick();
+      expect(onDownload).toHaveBeenCalledTimes(1);expect(onDownload).toHaveBeenCalledWith(download);expect(download.cancel).not.toHaveBeenCalled();expect(download.delete).not.toHaveBeenCalled();expect(engine.onDownload).toBe(onDownload);
+    }finally{started.mockRestore();rmSync(directory,{recursive:true,force:true})}
+  });
   it("discovers only its virtual exact pairing and adopts the unchanged Companion",async()=>{
     const directory=mkdtempSync(join(tmpdir(),"hoai-codex-browser-test-"));let host:any;const sockets:any[]=[];
     try{
