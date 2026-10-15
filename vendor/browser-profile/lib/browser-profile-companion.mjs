@@ -14,16 +14,18 @@ import { AgentRuntimePermissionClient } from './browser-profile-permission-clien
 import { AgentRuntimePermissionRunner } from './browser-profile-permission-runner.mjs'
 import { AgentReturnIntentClient } from './browser-profile-return-client.mjs'
 import { AgentReturnHandover } from './browser-profile-return-handover.mjs'
+import { AgentProfileFiles, AGENT_PROFILE_FILE_TOOLS } from './browser-profile-files.mjs'
 const require=createRequire(import.meta.url),codec=require('./browser-profile-core/crypto.js'),shared=require('./browser-profile-core/coordinator-client.js')
 const {EncryptedCheckpointStore}=require('./browser-profile-core/checkpoint-store.js'),{ProfileRuntimeStatusClient}=require('./browser-profile-core/runtime-status-client.js')
 const {createAgentStoppedHeadStageAuthorization,verifyAgentStoppedHeadJournalRecord}=require('./browser-profile-core/stopped-head-stage.js')
-const {validateRuntimeRequestStatus}=require('./browser-profile-core/runtime-readiness.js')
+const {validateRuntimeRequestStatus}=require('./browser-profile-core/runtime-readiness.js'),{ProfileFileClient}=require('./browser-profile-core/profile-file-client.js')
 const policy=require('./browser-host-core/policy.js'),settings=require('./browser-host-core/settings.js')
 const same=(a,b)=>shared.canonical(a).equals(shared.canonical(b)),fail=code=>Object.assign(new Error(code),{code})
 const pick=(value,fields)=>Object.fromEntries(fields.map(key=>[key,value[key]])),destination=value=>pick(value,['endpointId','bootId','runtimeId','sessionId','grantVersion','keyFingerprint'])
 const source=value=>pick(value,['endpointId','bootId','runtimeId','sessionId','writerEpoch']),head=profile=>({manifestHash:profile.headManifestHash,revision:profile.revision,keyEpoch:profile.contentKeyEpoch})
 const toolError=(code,message)=>({isError:true,content:[{type:'text',text:`${code}: ${message}`}]})
 const permissionTools=new Set(['browser_navigate','browser_click','browser_handle_dialog','browser_select_option','browser_file_upload','browser_pdf_save'])
+const managedFileRoster=tools=>tools.map(tool=>tool.name==='browser_file_upload'?{...tool,description:'Upload exactly one hoai-file token returned by hoai_browser_files. Host filesystem paths are refused. Original website permission and explicit recipient file consent are both required.',inputSchema:{type:'object',properties:{paths:{type:'array',items:{type:'string',pattern:'^hoai-file:[a-f0-9-]{36}$'},minItems:1,maxItems:1}},required:['paths'],additionalProperties:false}}:['browser_pdf_save','browser_take_screenshot'].includes(tool.name)?{...tool,description:tool.description+' Managed output is a private browser artifact. filename may be only a safe basename. Use its returned hoai-artifact token with hoai_browser_send_file; the recipient approves the individual file in HOAI.'}:tool)
 const genericError=error=>typeof error?.code==='string'&&/^profile_[a-z0-9_]{1,90}$/.test(error.code)?error.code:'profile_companion_unavailable'
 
 /** Main process only. Every network operation goes to the configured HOAI
@@ -37,7 +39,8 @@ export class AgentBrowserProfileCompanion{
   #resumePermits=new WeakMap()
   #activations=new WeakMap()
   #proofs=new WeakMap()
-  constructor({connection,agentRoot,deviceLabel,environment=process.env,loadBrowser,createEngine,createRelay,assertNoLegacyActive=()=>true,log=/** @type {(line:string)=>void} */(()=>{}),client,keyStore,stateStore,createRuntime=options=>BrowserProfileRuntime.create(options),preloadExtras=options=>BrowserProfilePortableExtrasStore.preload(options),statusClient,permissionClient=/** @type {any} */(null),permissionRunner=/** @type {any} */(null),returnClient=/** @type {any} */(null),returnHandover=/** @type {any} */(null)}){
+  #fileRunners=new WeakMap()
+  constructor({connection,agentRoot,deviceLabel,environment=process.env,loadBrowser,createEngine,createRelay,assertNoLegacyActive=()=>true,log=/** @type {(line:string)=>void} */(()=>{}),client,keyStore,stateStore,createRuntime=options=>BrowserProfileRuntime.create(options),preloadExtras=options=>BrowserProfilePortableExtrasStore.preload(options),statusClient,permissionClient=/** @type {any} */(null),permissionRunner=/** @type {any} */(null),returnClient=/** @type {any} */(null),returnHandover=/** @type {any} */(null),createFiles=options=>new AgentProfileFiles(options)}){
     if(!connection||typeof loadBrowser!=='function'||typeof createEngine!=='function'||typeof createRelay!=='function'||!path.isAbsolute(agentRoot))throw fail('profile_companion_configuration_invalid')
     Object.assign(this,{connection,deviceLabel,environment,loadBrowser,createEngine,createRelay,assertNoLegacyActive,log,createRuntime,preloadExtras});this.token=connection.pairing.token;this.bootId=connection.bootId
     const pairingSnapshot={backendUrl:connection.pairing.backendUrl,pairingId:connection.pairing.pairingId,ownerUserId:connection.pairing.ownerUserId,assistantIds:JSON.stringify(connection.pairing.assistantIds)}
@@ -53,6 +56,7 @@ export class AgentBrowserProfileCompanion{
     this.permissionRunner=permissionRunner||new AgentRuntimePermissionRunner({client:this.permissionClient})
     this.returnClient=returnClient||new AgentReturnIntentClient({origin:connection.pairing.backendUrl,authorizePairing})
     this.returnHandover=returnHandover||new AgentReturnHandover({client:this.returnClient})
+    this.createFiles=createFiles;this.fileClientFactory=()=>new ProfileFileClient({origin:connection.pairing.backendUrl,principal:'paired',authorize:authorizePairing})
   }
   _status(record,state){const key=record?.scope?.endpointId||'setup';if(this.lastState.get(key)===state)return;this.lastState.set(key,state);this.log(`managed browser ${record?.scope?.assistantId||''}: ${state}`)}
   _trackPhysical(record,kind,work){
@@ -68,6 +72,7 @@ export class AgentBrowserProfileCompanion{
       if(this.#activations.get(record)?.pending)pendingPhysicalOperations++
       if(this.#proofs.get(record)?.pending)pendingPhysicalOperations++
       if(record.statusClient?.physical)pendingPhysicalOperations++
+      const files=this.#fileRunners.get(record);if(files){try{const value=files.runner.activity();if(!Number.isSafeInteger(value?.pendingPhysicalOperations)||value.pendingPhysicalOperations<0||typeof value.cleanupUnknown!=='boolean')throw fail('profile_file_cleanup_unconfirmed');pendingPhysicalOperations+=value.pendingPhysicalOperations;cleanupUnknown||=value.cleanupUnknown}catch{pendingPhysicalOperations++;cleanupUnknown=true}}
       if(this.#permissionCleanupUnknown.has(record))cleanupUnknown=true
     }
     if(this.pending)pendingPhysicalOperations++;if(this.statusClient?.physical)pendingPhysicalOperations++
@@ -81,7 +86,14 @@ export class AgentBrowserProfileCompanion{
   _cached(record){this.check();if(record.revoked||this.records.get(record.scope.endpointId)!==record)throw fail('profile_companion_context_changed');return true}
   _newWork(){this.check();if(this.closing)throw fail('profile_companion_context_changed');return true}
   _admit(record){this._cached(record);if(this.closing||record.admission!=='active'||record.uncertain||this.#permissionCleanupUnknown.has(record))throw fail('profile_companion_authority_unknown');record.runtime.assertCurrent();return true}
-  async _drainCommands(record){await Promise.allSettled([...record.engineTasks]);if(record.engineTasks.size||this.#permissionCleanupUnknown.has(record))throw fail('profile_companion_command_drain_unconfirmed')}
+  async _drainCommands(record){await Promise.allSettled([...record.engineTasks]);await this.#fileRunners.get(record)?.runner.whenDrained();if(record.engineTasks.size||this.#permissionCleanupUnknown.has(record))throw fail('profile_companion_command_drain_unconfirmed')}
+  _fileRunner(record){
+    this._admit(record);const runtime=record.runtime,engine=record.engine,endpoint=record.endpoint,authority=shared.exactAuthority(runtime.authority),existing=this.#fileRunners.get(record)
+    if(existing){if(existing.runtime!==runtime||existing.engine!==engine||existing.endpoint!==endpoint||!shared.sameAuthority(existing.authority,authority))throw fail('profile_companion_context_changed');return existing.runner}
+    const check=()=>{this._admit(record);if(record.runtime!==runtime||record.engine!==engine||record.endpoint!==endpoint||!shared.sameAuthority(runtime.authority,authority)||['profileId','actingUserId','assistantId','endpointId','keyFingerprint'].some(key=>record.scope[key]!==authority[key]))throw fail('profile_companion_context_changed')}
+    const runner=this.createFiles({client:this.fileClientFactory(),authority,endpoint,directory:path.join(this.directory,'artifacts',authority.runtimeId,'file-exchanges',createHash('sha256').update(shared.canonical(authority)).digest('hex')),peerIdentities:async current=>{current();check();const identities=await new AgentProfilePeerPins({directory:path.join(this.directory,'peer-pins',record.scope.endpointId)}).list({scope:record.scope,ownIdentity:record.identity,assertCurrent:()=>{current();check()}});current();check();return identities},assertCurrent:check})
+    this.#fileRunners.set(record,{runtime,engine,endpoint,authority,runner});return runner
+  }
   _binding(record,entry){return{profileId:record.scope.profileId,actingUserId:record.scope.actingUserId,assistantId:record.scope.assistantId,endpointId:record.scope.endpointId,keyFingerprint:record.scope.keyFingerprint,grantVersion:entry.grant.generation,keyEpoch:entry.profile.contentKeyEpoch,backgroundUse:true}}
   async _discover(record){this._cached(record);const result=await this.client.discover(record.scope,record.endpoint);this._cached(record);const entry=result.profiles[0];if(!entry)throw fail('profile_companion_background_grant_required');record.entry=entry;return entry}
   async _load(){if(this.loaded)return;const rows=await this.stateStore.loadAll(this.check);this._newWork();for(const row of rows){if(!this.connection.pairing.assistantIds.includes(row.scope.assistantId)||this.connection.pairing.pairingId&&row.scope.pairingId!==this.connection.pairing.pairingId)continue;const record={...row,endpoint:null,runtime:null,admission:'blocked',revoked:false,uncertain:false,attempted:new Set(),engineTasks:new Set(),state:'saved'};this.records.set(row.scope.endpointId,record)}this.loaded=true}
@@ -279,7 +291,7 @@ export class AgentBrowserProfileCompanion{
     record.engineCreating=this._trackPhysical(record,'engine-create',Promise.resolve().then(()=>this.createEngine({runtime,directory:path.join(this.directory,'artifacts',authority.runtimeId)})).then(engine=>{record.engine=engine;return engine}));await record.engineCreating;check()
     if(selected){if(typeof record.engine.selectPage!=='function')throw fail('profile_resume_selection_unproved');await record.engine.selectPage(selected);check();if(record.engine.selectedPage()!==selected)throw fail('profile_resume_selection_unproved')}
     const currentExecution=()=>{const execution=this.#executions.getStore();if(!execution||execution.record!==record)throw fail('profile_companion_context_changed');execution.check();return execution}
-    record.relay=this.createRelay({roster:()=>{currentExecution();return record.engine.roster()},callTool:(_context,name,args,signal)=>{currentExecution();return this._tool(record,name,args,signal)}})
+    record.relay=this.createRelay({roster:()=>{currentExecution();return [...managedFileRoster(record.engine.roster()),...AGENT_PROFILE_FILE_TOOLS]},callTool:(_context,name,args,signal)=>{currentExecution();return this._tool(record,name,args,signal)}})
     const rpc=createPairedProfileRuntimeEndpoint({authority,endpoint:record.endpoint,client:this.rpcClient,assertCurrent:()=>this._admit(record),execute:async({frame,signal,assertCurrent})=>{
       assertCurrent();signal.throwIfAborted()
       const runtime=record.runtime,engine=record.engine,relay=record.relay,endpoint=record.endpoint,binding=rpc.binding,originalAuthority=shared.exactAuthority(frame.authority),messageBytes=JSON.stringify(frame.message),snapshot=JSON.parse(JSON.stringify(frame))
@@ -324,17 +336,23 @@ export class AgentBrowserProfileCompanion{
     let physicalClean=true
     const work=Promise.resolve().then(async()=>{
       check()
+      if(AGENT_PROFILE_FILE_TOOLS.some(tool=>tool.name===name)){
+        if(!execution)return toolError('recipient_permission_required','This file action requires its original recipient-scoped request. It did not run.')
+        record.permissionAbort=controller;const files=this._fileRunner(record)
+        try{if(name==='hoai_browser_files'){if(Object.keys(args).length)throw fail('profile_file_token_required');return await files.list({assertCurrent:check,signal:controller.signal})}return await files.send({args,assertCurrent:check,signal:controller.signal})}
+        finally{if(record.permissionAbort===controller)record.permissionAbort=null}
+      }
       const classification=policy.classifyToolCall(name,args,{currentOrigin:policy.originOf(engine.selectedPage()?.url())}),decision=policy.decide({profile:'signed-in',classification,grants:{},settings:settings.defaultSettings(),preapproved:[]})
       if(classification.kind==='credential'||['browser_type','browser_press_key','browser_press_sequentially','browser_keydown','browser_keyup','browser_fill_form','browser_evaluate'].includes(name)||classification.kind==='vision')return toolError('recipient_handover_required','This action requires the person to use the browser directly. It did not run.')
       if(decision.verdict==='deny')return toolError('recipient_policy_denied','This action is blocked by the browser policy. It did not run.')
       if(classification.kind!=='read'&&(!permissionTools.has(name)||decision.verdict!=='ask'))return toolError('recipient_handover_required','This action has no supported recipient permission. It did not run.')
-      if(decision.verdict==='allow'){check();return engine.callTool(name,args,controller.signal)}
+      if(decision.verdict==='allow'){check();if(execution&&['browser_take_screenshot','browser_pdf_save'].includes(name)){record.permissionAbort=controller;try{return await this._fileRunner(record).capture({name,args,assertCurrent:check,signal:controller.signal,execute:(tool,input)=>{check();return engine.callTool(tool,input,controller.signal)}})}finally{if(record.permissionAbort===controller)record.permissionAbort=null}}return engine.callTool(name,args,controller.signal)}
       if(!execution)return toolError('recipient_permission_required','This action requires its original recipient-scoped request. It did not run.')
       record.permissionAbort=controller
-      try{return await this.permissionRunner.run({frame:execution.frame,binding:execution.binding,endpoint:record.endpoint,engine,assertCurrent:check,signal:controller.signal,execute:(tool,originalArgs,originalSignal)=>{check();return engine.callTool(tool,originalArgs,originalSignal)}})}
+      try{const authorize=execute=>this.permissionRunner.run({frame:execution.frame,binding:execution.binding,endpoint:record.endpoint,engine,assertCurrent:check,signal:controller.signal,execute});if(name==='browser_file_upload')return await this._fileRunner(record).upload({args,engine,assertCurrent:check,signal:controller.signal,authorize});return await authorize((tool,originalArgs,originalSignal)=>{check();return engine.callTool(tool,originalArgs,originalSignal)})}
       finally{try{await this.permissionClient.whenDrained();this.permissionRunner.assertCleanupConfirmed()}catch(error){physicalClean=false;this.#permissionCleanupUnknown.add(record);throw error}finally{if(record.permissionAbort===controller)record.permissionAbort=null}}
     });record.engineTasks.add(work)
-    try{return await work}finally{for(const source of signals)source.removeEventListener('abort',abort);if(physicalClean)record.engineTasks.delete(work)}
+    try{return await work}finally{try{await this.#fileRunners.get(record)?.runner.whenDrained()}catch(error){physicalClean=false;this.#permissionCleanupUnknown.add(record);throw error}finally{for(const source of signals)source.removeEventListener('abort',abort);if(physicalClean)record.engineTasks.delete(work)}}
   }
   receive(frame,socketId){const record=[...this.records.values()].find(value=>value.rpc&&shared.sameAuthority(value.runtime?.authority,frame.authority));if(!record)return Promise.reject(fail('profile_companion_runtime_unavailable'));const hint={rpcId:frame.rpcId,rpcNonce:frame.rpcNonce,bindingId:frame.bindingId,socketId,authority:frame.authority};return frame.event_type==='browser_profile_rpc_cancel'?record.rpc.cancel(hint):record.rpc.receive(hint)}
   disconnected(){for(const record of this.records.values()){record.admission='unknown';record.permissionAbort?.abort();record.rpc?.disconnect();this._status(record,'connection_unknown: new agent actions paused; live page retained')}}
@@ -365,7 +383,7 @@ export class AgentBrowserProfileCompanion{
     const activation=this.#activations.get(record),proof=this.#proofs.get(record);if(activation)activation.cancelled=true
     if(record.runtime)this.#resumePermits.delete(record.runtime)
     record.admission='blocked';this.#preparations.delete(record);record.permissionAbort?.abort();record.rpc?.disconnect?.();if(record.stopTask)return record.stopTask
-    const task=Promise.resolve().then(async()=>{const failures=[];await record.runtimeCreating?.catch(()=>{});const native=Promise.resolve().then(()=>record.runtime?.dispose()),commands=Promise.resolve().then(()=>this._drainCommands(record));for(const result of await Promise.allSettled([native,commands]))if(result.status==='rejected')failures.push(result.reason);for(const cleanup of [async()=>{await record.engineCreating?.catch(()=>{});await record.engine?.stop()},async()=>{await record.extrasCreating?.catch(()=>{});record.extras?.dispose()}])try{await cleanup()}catch(error){failures.push(error)}await Promise.allSettled([activation?.task,proof?.task].filter(Boolean));if(this.#activations.get(record)===activation)this.#activations.delete(record);record.contentKeyEpoch?.key.fill(0);record.contentKeyEpoch=null;if(failures.length)throw fail('profile_companion_stop_unconfirmed');record.relay?.close();record.runtime=null;record.engine=null;record.extras=null;if(record.rpc){const rpc=record.rpc;this._trackPhysical(record,'rpc-close',Promise.resolve().then(()=>rpc.close()));record.rpc=null}})
+    const task=Promise.resolve().then(async()=>{const failures=[];await record.runtimeCreating?.catch(()=>{});const native=Promise.resolve().then(()=>record.runtime?.dispose()),commands=Promise.resolve().then(()=>this._drainCommands(record)),files=Promise.resolve().then(()=>this.#fileRunners.get(record)?.runner.dispose());for(const result of await Promise.allSettled([native,commands,files]))if(result.status==='rejected')failures.push(result.reason);for(const cleanup of [async()=>{await record.engineCreating?.catch(()=>{});await record.engine?.stop()},async()=>{await record.extrasCreating?.catch(()=>{});record.extras?.dispose()}])try{await cleanup()}catch(error){failures.push(error)}await Promise.allSettled([activation?.task,proof?.task].filter(Boolean));if(this.#activations.get(record)===activation)this.#activations.delete(record);record.contentKeyEpoch?.key.fill(0);record.contentKeyEpoch=null;if(failures.length)throw fail('profile_companion_stop_unconfirmed');record.relay?.close();this.#fileRunners.delete(record);record.runtime=null;record.engine=null;record.extras=null;if(record.rpc){const rpc=record.rpc;this._trackPhysical(record,'rpc-close',Promise.resolve().then(()=>rpc.close()));record.rpc=null}})
     record.stopTask=this._trackPhysical(record,'stop',task);return record.stopTask
   }
   stop(){
@@ -386,8 +404,9 @@ export class AgentBrowserProfileCompanion{
     this.closing=true;this.stopped=true
     const results=await Promise.allSettled([...this.records.values()].map(async record=>{
       record.revoked=true;record.uncertain=true;record.admission='revoked';record.permissionAbort?.abort();record.rpc?.disconnect();record.contentKeyEpoch?.key.fill(0);record.contentKeyEpoch=null
-      if(record.runtime||record.runtimeCreating){await record.processOwned;if(!record.processStop||typeof record.processStop.stop!=='function')throw fail('profile_companion_stop_unconfirmed');const result=await record.processStop.stop();if(result?.stopped!==true)throw fail('profile_companion_stop_unconfirmed');await record.runtime?.emergencyStopOwnedProcess()}
-      await this._drainCommands(record);record.extras?.dispose();this._status(record,'recovery_required: explicit daemon termination; no new stopped checkpoint is confirmed')
+      const files=Promise.resolve().then(()=>this.#fileRunners.get(record)?.runner.dispose());void files.catch(()=>{});let physicalFailure
+      try{if(record.runtime||record.runtimeCreating){await record.processOwned;if(!record.processStop||typeof record.processStop.stop!=='function')throw fail('profile_companion_stop_unconfirmed');const result=await record.processStop.stop();if(result?.stopped!==true)throw fail('profile_companion_stop_unconfirmed');await record.runtime?.emergencyStopOwnedProcess()}}catch(error){physicalFailure=error}
+      const cleanup=await Promise.allSettled([files,Promise.resolve().then(()=>this._drainCommands(record))]);if(physicalFailure||cleanup.some(value=>value.status==='rejected'))throw fail('profile_companion_stop_unconfirmed');record.extras?.dispose();this._status(record,'recovery_required: explicit daemon termination; no new stopped checkpoint is confirmed')
     }))
     this.candidates.clear();if(results.some(result=>result.status==='rejected'))throw fail('profile_companion_stop_unconfirmed');return{stopped:true,recoveryRequired:true}
   }
