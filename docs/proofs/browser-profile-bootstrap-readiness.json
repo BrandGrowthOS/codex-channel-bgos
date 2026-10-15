@@ -1,0 +1,429 @@
+{
+  "version": 1,
+  "scope": "Codex source/API, committed runtime asset closure and copied focused unit regressions; no installed package/native acceptance",
+  "sourceCommit": "4dc368f714ccd2b84de10850d9d0aff3f5c64d5d",
+  "baseCommit": "fe84aff7b9c616b4de7dbc89c0bd8d03fc9a0ae0",
+  "commonSourceCommit": "6c8a07277d1de57e85b24d8cdeacf3992fac1391",
+  "sourceFiles": {
+    "runtime/browser-profile-host.mjs": "68fe1b7016dd58e27f5736a7e92523fb802fee3e18a8fbfa54fa82407de5e5f8",
+    "src/browser-profile-setup.ts": "d63cac2019f1fe0a9fc8b3deb742f629b688ee74ae22db7aaa394316edddf749",
+    "test/browser-profile-child.spec.ts": "e28a47ed3df43667b054ecbb93e2af165cc5fad05156f8dff753d956e1c36cf6",
+    "test/browser-profile-setup.spec.ts": "3f66866ccdf54d0b46df879f4b73d36a4b2425671f00e59c5e9e3ef102fa0ae8",
+    "test/browser-profile-vendor-workers.spec.ts": "f1a6600cbc93a4ea43f6f27f9699bb79d7b39a1cda9c7a1a1dc56d6c537e3d0c",
+    "vendor/browser-profile/bin/hoai-browser-host.mjs": "de4a28a28e38a6449ff0c9642203ce86d03b96e3fa1f38fdc147606b039912b9",
+    "vendor/browser-profile/lib/browser-bootstrap.mjs": "76467e8feaca93098fdf270f85a3dea12f9dffad2c4e976c268ba2ff299c3965",
+    "vendor/browser-profile/lib/browser-profile-core/runtime-status-client.js": "11bb72e458054809956bf2e256efb9358bcaf1ad29dd9c1492861dd918f00128",
+    "vendor/browser-profile/lib/browser-profile-core/vendor.json": "c8a5aae36e1c41524fdc17ea1f8de91630eed5e696c29d88f5211502e0498382",
+    "vendor/browser-profile/lib/browser-profile-sync-key-store.mjs": "dab468db70440a7b2fd2a5b919f96f26be7d16bf10b6a5676f840f0ef860ab62",
+    "vendor/browser-profile/source.json": "1ea98bcc0c60922ff81e730aaa99b9a23847661c0f4a42235281629ec08c45be",
+    "vendor/browser-profile/lib/browser-bootstrap.pin.json": "21057fbfe0993ccace1bc9f5ff977039af41cd9b790c6eed473dd58a73cb13ae",
+    "vendor/browser-profile/lib/browser-install-lifetime.mjs": "5bc9de8690f7c3c0a066adebceb063eac93910ede9814f5e58b1870782a03219"
+  },
+  "runtimeFiles": 77,
+  "allRuntimeFilesExactCommonGit": true,
+  "generatedNewRuntimeAssets": [
+    "lib/browser-install-lifetime.mjs",
+    "lib/browser-bootstrap.pin.json"
+  ],
+  "unchangedDependencyAndGeneratorPins": {
+    "package": "f8c17597f60c5d70812d5d2dc31c5d1b258e28a308871fccb227827a1987ac0a",
+    "locks": {
+      "E:\\bgos-worktrees\\browser-profile-sync-codex\\package-lock.json": "e48862e53dbb71308ea99ec7549084f1b46ae32c19786d0523452bec64c9491e"
+    },
+    "generator": "147e95406cfb70514ce433b000d7ce3d9ed27b237461eb9dbd7e89b025fd6af4"
+  },
+  "qualification": {
+    "selectedFiles": [
+      "test/adapter-stop-control.spec.ts",
+      "test/browser-context.spec.ts",
+      "test/browser-managed-context.spec.ts",
+      "test/browser-mcp.spec.ts",
+      "test/browser-profile-adapter.spec.ts",
+      "test/browser-profile-child.spec.ts",
+      "test/browser-profile-host.spec.ts",
+      "test/browser-profile-managed-relay.spec.ts",
+      "test/browser-profile-selection.spec.ts",
+      "test/browser-profile-setup.spec.ts",
+      "test/browser-profile-vendor-workers.spec.ts",
+      "test/browser-profile-vendor.spec.ts",
+      "test/browser-relay-cold-start.spec.ts",
+      "test/browser-relay-identity.spec.ts",
+      "test/browser-relay-meeting-wiring.spec.ts",
+      "test/browser-shim-vendor.spec.ts",
+      "test/cli-args.spec.ts",
+      "test/publish-workflow.spec.ts",
+      "test/setup.spec.ts"
+    ],
+    "testFiles": 19,
+    "passed": 202,
+    "failed": 0,
+    "pendingOrSkipped": 0,
+    "todo": 0,
+    "allTestResultsStatus": "passed",
+    "vitestNestedSuiteCount": 50,
+    "buildExit": 0,
+    "noEmitExit": 0,
+    "node": "v24.16.0",
+    "platform": "win32",
+    "playwright": "1.64.1",
+    "privateNodeModulesNonJunction": true,
+    "optIns": {
+      "HOAI_BROWSER_PROFILE_PLUGIN_SOURCE": "E:\\bgos-worktrees\\browser-profile-sync-plugin",
+      "HOAI_BROWSER_SHIM_SOURCE": "C:\\Users\\karim\\.codex\\worktrees\\browser-profile-integration\\0000 BGOS Final V2\\frontend\\electron-app\\agent-browser\\shim\\hoai-browser-mcp.mjs"
+    },
+    "sourceInputs": 429,
+    "allWorkingAndRestoredCopySourcesUnchanged": true
+  },
+  "regressionBoundaries": {
+    "readiness": "Imported shared read-only browserBootstrapReadiness; installed/needs-install report only those states, installing/recovery refuse with fixed safe recovery code, malformed/missing/throwing/async refuse with fixed safe failure. Setup never launches/clears installer.",
+    "activity": "Imported actual adapter plus actual Common BrowserHost with injected isolated controller; positive pending counters and unknown/malformed/missing API stay busy. Actual child IPC state and stop receipt wait the same original held installation drain. No second stop mechanism.",
+    "assets": "Synthetic committed Git fixture imports real copied lifetime helper and new-URL JSON asset, launches Node to read them, and verifies complete manifest. Final77 also match immutable real CommonGit."
+  },
+  "mutations": [
+    {
+      "name": "activity",
+      "source": "runtime/browser-profile-host.mjs",
+      "test": "test/browser-profile-child.spec.ts",
+      "originalSha256": "68fe1b7016dd58e27f5736a7e92523fb802fee3e18a8fbfa54fa82407de5e5f8",
+      "mutantSha256": "212319f83c8b3aac3e8b15e68225bf6e3316229378cd2cc844651b3a95e09a1b",
+      "restoredSha256": "68fe1b7016dd58e27f5736a7e92523fb802fee3e18a8fbfa54fa82407de5e5f8",
+      "loadedMutant": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\activity-loaded-mutant.mjs",
+      "printedLines": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\activity-loaded-line.txt",
+      "printedLinesSha256": "83bb21518429c3b9f294c2d800129ffecff62de11982dc69e2f45184ae38f7ce",
+      "baseline": {
+        "name": "activity-baseline",
+        "command": [
+          "node",
+          "E:\\bgos-worktrees\\browser-profile-sync-codex\\node_modules\\vitest\\vitest.mjs",
+          "run",
+          "--config",
+          "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\activity-baseline.config.mjs",
+          "--reporter=json",
+          "--outputFile=E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\activity-baseline.json"
+        ],
+        "exit": 0,
+        "total": 14,
+        "passed": 14,
+        "failed": 0,
+        "pending": 0,
+        "todo": 0,
+        "log": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\activity-baseline.log",
+        "logSha256": "ddf0515e2c2e52ed9fcd0de699af880ce9fa0579759d19fdf9bf8880ae3c6fe1",
+        "json": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\activity-baseline.json",
+        "jsonSha256": "59c6bb398dce21ac1e54893acff55551f79aff23754260b62a119cb7952a7fe4",
+        "failures": []
+      },
+      "red": {
+        "name": "activity-red",
+        "command": [
+          "node",
+          "E:\\bgos-worktrees\\browser-profile-sync-codex\\node_modules\\vitest\\vitest.mjs",
+          "run",
+          "--config",
+          "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\activity-red.config.mjs",
+          "--reporter=json",
+          "--outputFile=E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\activity-red.json"
+        ],
+        "exit": 1,
+        "total": 14,
+        "passed": 11,
+        "failed": 3,
+        "pending": 0,
+        "todo": 0,
+        "log": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\activity-red.log",
+        "logSha256": "4958df51284208cd7d2fae25d3514854d3ef97424e7775cc7b0e89ee4bd49ca9",
+        "json": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\activity-red.json",
+        "jsonSha256": "ec99158705e00004b508b1eec8fb7fcc7d6190e9a1b658866757e6faf0a6acd6",
+        "failures": [
+          {
+            "name": "the actual common host child lifecycle counts original installer work and unknown cleanup independently of browser slots",
+            "message": "AssertionError: expected { activeProfiles: +0, pendingWork: +0 } to deeply equal { activeProfiles: +0, pendingWork: 3 }\n    at E:\\bgos-worktrees\\codex-readiness-drills-3019a745\\test\\browser-profile-child.spec.ts:63:28\n    at file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:146:14\n    at file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:533:11\n    at runWithTimeout (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:39:7)\n    at runTest (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1056:17)\n    at runSuite (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1205:15)\n    at runSuite (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1205:15)\n    at runFiles (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1262:5)\n    at startTests (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1271:3)\n    at file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/vitest/dist/chunks/runBaseTests.3qpJUEJM.js:126:11"
+          },
+          {
+            "name": "the actual common host child lifecycle keeps malformed, missing, throwing and asynchronous installation activity busy",
+            "message": "AssertionError: expected { activeProfiles: +0, pendingWork: +0 } to deeply equal { activeProfiles: +0, pendingWork: 1 }\n    at E:\\bgos-worktrees\\codex-readiness-drills-3019a745\\test\\browser-profile-child.spec.ts:69:28\n    at file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:146:14\n    at file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:533:11\n    at runWithTimeout (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:39:7)\n    at runTest (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1056:17)\n    at runSuite (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1205:15)\n    at runSuite (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1205:15)\n    at runFiles (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1262:5)\n    at startTests (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1271:3)\n    at file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/vitest/dist/chunks/runBaseTests.3qpJUEJM.js:126:11"
+          },
+          {
+            "name": "the actual common host child lifecycle actual common host IPC remains busy and its stop receipt waits the original installation drain",
+            "message": "AssertionError: expected { type: 'browser-profile-state', \u2026(2) } to deeply equal { type: 'browser-profile-state', \u2026(2) }\n    at E:\\bgos-worktrees\\codex-readiness-drills-3019a745\\test\\browser-profile-child.spec.ts:86:82\n    at file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:533:5\n    at runTest (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1056:11)\n    at runSuite (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1205:15)\n    at runSuite (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1205:15)\n    at runFiles (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1262:5)\n    at startTests (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1271:3)\n    at file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/vitest/dist/chunks/runBaseTests.3qpJUEJM.js:126:11\n    at withEnv (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/vitest/dist/chunks/runBaseTests.3qpJUEJM.js:90:5)\n    at run (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/vitest/dist/chunks/runBaseTests.3qpJUEJM.js:112:3)"
+          }
+        ]
+      },
+      "restored": {
+        "name": "activity-restored",
+        "command": [
+          "node",
+          "E:\\bgos-worktrees\\browser-profile-sync-codex\\node_modules\\vitest\\vitest.mjs",
+          "run",
+          "--config",
+          "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\activity-restored.config.mjs",
+          "--reporter=json",
+          "--outputFile=E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\activity-restored.json"
+        ],
+        "exit": 0,
+        "total": 14,
+        "passed": 14,
+        "failed": 0,
+        "pending": 0,
+        "todo": 0,
+        "log": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\activity-restored.log",
+        "logSha256": "5ae23fc146c57ff5e51f3b1926bc1cdcdae5a3d0e3f65b29f66d26607e4757da",
+        "json": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\activity-restored.json",
+        "jsonSha256": "26da4c0f680f8c36f5272c25df912202b2857ff9ed944e08f190ce7cc707bbd4",
+        "failures": []
+      }
+    },
+    {
+      "name": "readiness",
+      "source": "src/browser-profile-setup.ts",
+      "test": "test/browser-profile-setup.spec.ts",
+      "originalSha256": "d63cac2019f1fe0a9fc8b3deb742f629b688ee74ae22db7aaa394316edddf749",
+      "mutantSha256": "9625bf03e1c721ec74ed1408915174f6d899b45ef3a5c05db8054024cb74fa97",
+      "restoredSha256": "d63cac2019f1fe0a9fc8b3deb742f629b688ee74ae22db7aaa394316edddf749",
+      "loadedMutant": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\readiness-loaded-mutant.ts",
+      "printedLines": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\readiness-loaded-line.txt",
+      "printedLinesSha256": "cabb120163fe06bf0f8f251c4880bfc5e6ef4756322759294da20cefc6a72d50",
+      "baseline": {
+        "name": "readiness-baseline",
+        "command": [
+          "node",
+          "E:\\bgos-worktrees\\browser-profile-sync-codex\\node_modules\\vitest\\vitest.mjs",
+          "run",
+          "--config",
+          "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\readiness-baseline.config.mjs",
+          "--reporter=json",
+          "--outputFile=E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\readiness-baseline.json"
+        ],
+        "exit": 0,
+        "total": 6,
+        "passed": 6,
+        "failed": 0,
+        "pending": 0,
+        "todo": 0,
+        "log": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\readiness-baseline.log",
+        "logSha256": "8f680c2dad2e4f32f225c60018ca4187fa178873d339a74c10f576a11bdd6bd0",
+        "json": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\readiness-baseline.json",
+        "jsonSha256": "adac0bf8b8fd7a34c870a109db6af0f9d70179e01854e21fc69e327ac199e5fe",
+        "failures": []
+      },
+      "red": {
+        "name": "readiness-red",
+        "command": [
+          "node",
+          "E:\\bgos-worktrees\\browser-profile-sync-codex\\node_modules\\vitest\\vitest.mjs",
+          "run",
+          "--config",
+          "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\readiness-red.config.mjs",
+          "--reporter=json",
+          "--outputFile=E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\readiness-red.json"
+        ],
+        "exit": 1,
+        "total": 6,
+        "passed": 1,
+        "failed": 5,
+        "pending": 0,
+        "todo": 0,
+        "log": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\readiness-red.log",
+        "logSha256": "6c873c8a213a16c2108f6c348cd5f1e1c1719bacdbb8693eae3100955371b8c6",
+        "json": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\readiness-red.json",
+        "jsonSha256": "361353b155014ea6505c4532d3b427cb1fefcd02197f831436262efa893aaf4c",
+        "failures": [
+          {
+            "name": "Codex browser setup surfaces uses shared read-only readiness installed without claiming enrolled keyring setup",
+            "message": "AssertionError: expected \"browserBootstrapReadiness\" to be called 1 times, but got 0 times\n    at E:\\bgos-worktrees\\codex-readiness-drills-3019a745\\test\\browser-profile-setup.spec.ts:27:25\n    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:533:5\n    at runTest (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1056:11)\n    at runSuite (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1205:15)\n    at runSuite (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1205:15)\n    at runFiles (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1262:5)\n    at startTests (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1271:3)\n    at file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/vitest/dist/chunks/runBaseTests.3qpJUEJM.js:126:11\n    at withEnv (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/vitest/dist/chunks/runBaseTests.3qpJUEJM.js:90:5)"
+          },
+          {
+            "name": "Codex browser setup surfaces uses shared read-only readiness needs-install without claiming enrolled keyring setup",
+            "message": "AssertionError: expected 'bundled-cache-present' to be 'automatic-first-use-download' // Object.is equality\n    at E:\\bgos-worktrees\\codex-readiness-drills-3019a745\\test\\browser-profile-setup.spec.ts:26:28\n    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:533:5\n    at runTest (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1056:11)\n    at runSuite (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1205:15)\n    at runSuite (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1205:15)\n    at runFiles (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1262:5)\n    at startTests (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1271:3)\n    at file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/vitest/dist/chunks/runBaseTests.3qpJUEJM.js:126:11\n    at withEnv (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/vitest/dist/chunks/runBaseTests.3qpJUEJM.js:90:5)"
+          },
+          {
+            "name": "Codex browser setup surfaces refuses installing despite a present executable and never clears/installs",
+            "message": "Error: promise resolved \"{ \u2026(6) }\" instead of rejecting\n    at _Assertion.__VITEST_REJECTS__ (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/expect/dist/index.js:1805:21)\n    at _Assertion.propertyGetter (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/chai/index.js:1557:27)\n    at Reflect.get (<anonymous>)\n    at Object.proxyGetter [as get] (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/chai/index.js:1645:22)\n    at E:\\bgos-worktrees\\codex-readiness-drills-3019a745\\test\\browser-profile-setup.spec.ts:30:85\n    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:533:5\n    at runTest (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1056:11)\n    at runSuite (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1205:15)\n    at runSuite (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1205:15)"
+          },
+          {
+            "name": "Codex browser setup surfaces refuses recovery-required despite a present executable and never clears/installs",
+            "message": "Error: promise resolved \"{ \u2026(6) }\" instead of rejecting\n    at _Assertion.__VITEST_REJECTS__ (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/expect/dist/index.js:1805:21)\n    at _Assertion.propertyGetter (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/chai/index.js:1557:27)\n    at Reflect.get (<anonymous>)\n    at Object.proxyGetter [as get] (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/chai/index.js:1645:22)\n    at E:\\bgos-worktrees\\codex-readiness-drills-3019a745\\test\\browser-profile-setup.spec.ts:30:85\n    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:533:5\n    at runTest (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1056:11)\n    at runSuite (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1205:15)\n    at runSuite (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1205:15)"
+          },
+          {
+            "name": "Codex browser setup surfaces fails closed on malformed, throwing and asynchronous readiness without leaking native diagnostics",
+            "message": "Error: promise resolved \"{ \u2026(6) }\" instead of rejecting\n    at _Assertion.__VITEST_REJECTS__ (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/expect/dist/index.js:1805:21)\n    at _Assertion.propertyGetter (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/chai/index.js:1557:27)\n    at Reflect.get (<anonymous>)\n    at Object.proxyGetter [as get] (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/chai/index.js:1645:22)\n    at E:\\bgos-worktrees\\codex-readiness-drills-3019a745\\test\\browser-profile-setup.spec.ts:36:82\n    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:533:5\n    at runTest (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1056:11)\n    at runSuite (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1205:15)\n    at runSuite (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1205:15)"
+          }
+        ]
+      },
+      "restored": {
+        "name": "readiness-restored",
+        "command": [
+          "node",
+          "E:\\bgos-worktrees\\browser-profile-sync-codex\\node_modules\\vitest\\vitest.mjs",
+          "run",
+          "--config",
+          "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\readiness-restored.config.mjs",
+          "--reporter=json",
+          "--outputFile=E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\readiness-restored.json"
+        ],
+        "exit": 0,
+        "total": 6,
+        "passed": 6,
+        "failed": 0,
+        "pending": 0,
+        "todo": 0,
+        "log": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\readiness-restored.log",
+        "logSha256": "a8ed3111dca451f00867b412b0a97d561c1f20b01bb575235e43b56c45afa434",
+        "json": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\readiness-restored.json",
+        "jsonSha256": "c6a02aa58bd4d98c9c929029d38cf75becb89838365f8fceb580bbe81f56840e",
+        "failures": []
+      }
+    },
+    {
+      "name": "assets",
+      "source": "scripts/vendor-browser-profile-runtime.mjs",
+      "test": "test/browser-profile-vendor-workers.spec.ts",
+      "originalSha256": "147e95406cfb70514ce433b000d7ce3d9ed27b237461eb9dbd7e89b025fd6af4",
+      "mutantSha256": "9ab38a5c897f5ef5c54162b61411c30942d6145b7bdfd33f5daf80fbc2e5605f",
+      "restoredSha256": "147e95406cfb70514ce433b000d7ce3d9ed27b237461eb9dbd7e89b025fd6af4",
+      "loadedMutant": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\assets-loaded-mutant.mjs",
+      "printedLines": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\assets-loaded-line.txt",
+      "printedLinesSha256": "f0c9bac98a0981c2a6ec0b622c555ab9b839bd3fe32543061959bee2a5e475c9",
+      "baseline": {
+        "name": "assets-baseline",
+        "command": [
+          "node",
+          "E:\\bgos-worktrees\\browser-profile-sync-codex\\node_modules\\vitest\\vitest.mjs",
+          "run",
+          "--config",
+          "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\assets-baseline.config.mjs",
+          "--reporter=json",
+          "--outputFile=E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\assets-baseline.json"
+        ],
+        "exit": 0,
+        "total": 3,
+        "passed": 3,
+        "failed": 0,
+        "pending": 0,
+        "todo": 0,
+        "log": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\assets-baseline.log",
+        "logSha256": "2a3e1863ce694f3c84db9359b852b9d9bb43025a7a0d4d2b7a2f49ad18c39cfa",
+        "json": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\assets-baseline.json",
+        "jsonSha256": "44183ed21be29898db0850318cbdccaf82393554e60a1cfbdc6317911f54945a",
+        "failures": []
+      },
+      "red": {
+        "name": "assets-red",
+        "command": [
+          "node",
+          "E:\\bgos-worktrees\\browser-profile-sync-codex\\node_modules\\vitest\\vitest.mjs",
+          "run",
+          "--config",
+          "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\assets-red.config.mjs",
+          "--reporter=json",
+          "--outputFile=E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\assets-red.json"
+        ],
+        "exit": 1,
+        "total": 3,
+        "passed": 2,
+        "failed": 1,
+        "pending": 0,
+        "todo": 0,
+        "log": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\assets-red.log",
+        "logSha256": "0053ba7ef612601de179d5f56ab917c4e3c7e0a5a03b9235fcb2264e58490c98",
+        "json": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\assets-red.json",
+        "jsonSha256": "42eb091f633266584fe26f7ebca555a6c4840b331a81a4b6551760c9f8944d5f",
+        "failures": [
+          {
+            "name": "committed profile core worker closure ships the committed static lifetime helper and URL-resolved bootstrap pin",
+            "message": "AssertionError: lib/browser-bootstrap.pin.json: expected undefined to be defined\n    at E:\\bgos-worktrees\\codex-readiness-drills-3019a745\\test\\browser-profile-vendor-workers.spec.ts:42:153\n    at file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:146:14\n    at file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:533:11\n    at runWithTimeout (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:39:7)\n    at runTest (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1056:17)\n    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at runSuite (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1205:15)\n    at runSuite (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1205:15)\n    at runFiles (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1262:5)\n    at startTests (file:///E:/bgos-worktrees/browser-profile-sync-codex/node_modules/@vitest/runner/dist/index.js:1271:3)"
+          }
+        ]
+      },
+      "restored": {
+        "name": "assets-restored",
+        "command": [
+          "node",
+          "E:\\bgos-worktrees\\browser-profile-sync-codex\\node_modules\\vitest\\vitest.mjs",
+          "run",
+          "--config",
+          "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\assets-restored.config.mjs",
+          "--reporter=json",
+          "--outputFile=E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\assets-restored.json"
+        ],
+        "exit": 0,
+        "total": 3,
+        "passed": 3,
+        "failed": 0,
+        "pending": 0,
+        "todo": 0,
+        "log": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\assets-restored.log",
+        "logSha256": "703f01529877814a88a5ad3e348b9e250b952d2a24b27843150184723fc56c80",
+        "json": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\bootstrap-readiness-delivery\\assets-restored.json",
+        "jsonSha256": "1e7476827fd8a348bb87a4c91eb4a76636f4d7ba709d8cee27a06072cc84a46a",
+        "failures": []
+      }
+    }
+  ],
+  "mutationClassifications": {
+    "activity": "3 Vitest assertion/matcher failures,11 pass; full14 baseline/restored pass.",
+    "readiness": "Exact prior fe84 whole setup module, including existsSync import;5 matcher/rejection failures,1 pass. Positive needs-install reports wrong installed state and recovery promises resolve. Full6 baseline/restored pass.",
+    "assets": "Only new-URL regex alternative removed in private copy of unchanged shipped scanner;1 missing-pin matcher failure,2 pass. Full3 baseline/restored pass.",
+    "all": "Exit0/1/0, zero pending/todo, loaded executable lines/whole mutant files retained. No blanket literal ERR_ASSERTION claim."
+  },
+  "reviews": [
+    {
+      "reviewer": "/root/handover_completion",
+      "receipt": ".tmp/bootstrap-readiness-delivery/independent-handover-review.json",
+      "sha256": "a6748aa7b0ee75687444cd3e1a1e2c2946ea1dee2420fd48ecdeedb0a10246fc",
+      "mode": "read-only; no reruns"
+    },
+    {
+      "reviewer": "/root/final_browser_review",
+      "receipt": ".tmp/bootstrap-readiness-delivery/independent-final-review.json",
+      "sha256": "167fc41b7b4cde66e0aaa0fa6ffee77f3004a6d7bd3a8dba4b7c099cfd1f80b3",
+      "mode": "read-only; no reruns"
+    }
+  ],
+  "rawRefs": {
+    ".tmp\\bootstrap-readiness-delivery\\activity-baseline.json": "59c6bb398dce21ac1e54893acff55551f79aff23754260b62a119cb7952a7fe4",
+    ".tmp\\bootstrap-readiness-delivery\\activity-baseline.log": "ddf0515e2c2e52ed9fcd0de699af880ce9fa0579759d19fdf9bf8880ae3c6fe1",
+    ".tmp\\bootstrap-readiness-delivery\\activity-loaded-line.txt": "83bb21518429c3b9f294c2d800129ffecff62de11982dc69e2f45184ae38f7ce",
+    ".tmp\\bootstrap-readiness-delivery\\activity-loaded-mutant.mjs": "212319f83c8b3aac3e8b15e68225bf6e3316229378cd2cc844651b3a95e09a1b",
+    ".tmp\\bootstrap-readiness-delivery\\activity-red.json": "ec99158705e00004b508b1eec8fb7fcc7d6190e9a1b658866757e6faf0a6acd6",
+    ".tmp\\bootstrap-readiness-delivery\\activity-red.log": "4958df51284208cd7d2fae25d3514854d3ef97424e7775cc7b0e89ee4bd49ca9",
+    ".tmp\\bootstrap-readiness-delivery\\activity-restored.json": "26da4c0f680f8c36f5272c25df912202b2857ff9ed944e08f190ce7cc707bbd4",
+    ".tmp\\bootstrap-readiness-delivery\\activity-restored.log": "5ae23fc146c57ff5e51f3b1926bc1cdcdae5a3d0e3f65b29f66d26607e4757da",
+    ".tmp\\bootstrap-readiness-delivery\\assets-baseline.json": "44183ed21be29898db0850318cbdccaf82393554e60a1cfbdc6317911f54945a",
+    ".tmp\\bootstrap-readiness-delivery\\assets-baseline.log": "2a3e1863ce694f3c84db9359b852b9d9bb43025a7a0d4d2b7a2f49ad18c39cfa",
+    ".tmp\\bootstrap-readiness-delivery\\assets-loaded-line.txt": "f0c9bac98a0981c2a6ec0b622c555ab9b839bd3fe32543061959bee2a5e475c9",
+    ".tmp\\bootstrap-readiness-delivery\\assets-loaded-mutant.mjs": "9ab38a5c897f5ef5c54162b61411c30942d6145b7bdfd33f5daf80fbc2e5605f",
+    ".tmp\\bootstrap-readiness-delivery\\assets-red.json": "42eb091f633266584fe26f7ebca555a6c4840b331a81a4b6551760c9f8944d5f",
+    ".tmp\\bootstrap-readiness-delivery\\assets-red.log": "0053ba7ef612601de179d5f56ab917c4e3c7e0a5a03b9235fcb2264e58490c98",
+    ".tmp\\bootstrap-readiness-delivery\\assets-restored.json": "1e7476827fd8a348bb87a4c91eb4a76636f4d7ba709d8cee27a06072cc84a46a",
+    ".tmp\\bootstrap-readiness-delivery\\assets-restored.log": "703f01529877814a88a5ad3e348b9e250b952d2a24b27843150184723fc56c80",
+    ".tmp\\bootstrap-readiness-delivery\\build.log": "902f8ec3ff3e6d231af26c732756928c3fa95b7579437f9c8ca8e7087e8dafbc",
+    ".tmp\\bootstrap-readiness-delivery\\checks.json": "0b2df4cb625dce14f10a25462c1ea56b9e48db902acfa2596d4f81b5192d849c",
+    ".tmp\\bootstrap-readiness-delivery\\matrix.json": "2e78be8096c1ea7ee46949048a83c36982b5ac378fa111c9676ceb40ed6a6f6e",
+    ".tmp\\bootstrap-readiness-delivery\\noemit.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    ".tmp\\bootstrap-readiness-delivery\\prove.py": "283adc7f63da7735517f4200fd2d75717bd9869acae5c6fce4607bac0484345f",
+    ".tmp\\bootstrap-readiness-delivery\\readiness-baseline.json": "adac0bf8b8fd7a34c870a109db6af0f9d70179e01854e21fc69e327ac199e5fe",
+    ".tmp\\bootstrap-readiness-delivery\\readiness-baseline.log": "8f680c2dad2e4f32f225c60018ca4187fa178873d339a74c10f576a11bdd6bd0",
+    ".tmp\\bootstrap-readiness-delivery\\readiness-loaded-line.txt": "cabb120163fe06bf0f8f251c4880bfc5e6ef4756322759294da20cefc6a72d50",
+    ".tmp\\bootstrap-readiness-delivery\\readiness-loaded-mutant.ts": "9625bf03e1c721ec74ed1408915174f6d899b45ef3a5c05db8054024cb74fa97",
+    ".tmp\\bootstrap-readiness-delivery\\readiness-red.json": "361353b155014ea6505c4532d3b427cb1fefcd02197f831436262efa893aaf4c",
+    ".tmp\\bootstrap-readiness-delivery\\readiness-red.log": "6c873c8a213a16c2108f6c348cd5f1e1c1719bacdbb8693eae3100955371b8c6",
+    ".tmp\\bootstrap-readiness-delivery\\readiness-restored.json": "c6a02aa58bd4d98c9c929029d38cf75becb89838365f8fceb580bbe81f56840e",
+    ".tmp\\bootstrap-readiness-delivery\\readiness-restored.log": "a8ed3111dca451f00867b412b0a97d561c1f20b01bb575235e43b56c45afa434",
+    ".tmp\\bootstrap-readiness-delivery\\resolver.json": "8e5b0d805f5327448e9f476ea683619ed0b1a7482b8d6f049bcc34957ace1217",
+    ".tmp\\bootstrap-readiness-delivery\\selected.config.mjs": "e1d6ec35c28b6327f629592e39a08d50bcedab206d11d15233a9dfb7a40d2f92",
+    ".tmp\\bootstrap-readiness-delivery\\selected19.json": "af444a66cddf52b21622baa92b71a2b6f8a85431f34843fb1c7a1764350a7265",
+    ".tmp\\bootstrap-readiness-delivery\\selected19.log": "7f34a9e96e3ab46d7050e3bd0801a85d962d914d4d92182c94137b10fc140270",
+    ".tmp\\bootstrap-readiness-delivery\\source-before.json": "96ea726f8a2c983d60dc448cdc1c17f8b644f0c320d024ef134dc6aabf834e38",
+    ".tmp\\bootstrap-readiness-delivery\\source-closure.json": "cc0b0312f9064ac52220fe6d3530dee8e338eede311f60505447cb17b030b5fb",
+    ".tmp\\bootstrap-readiness-delivery\\final-qualification.json": "08dbcbbc0350dbc02f4088bbbbfe4aa2c908e8c1a5d990d8aea4f465f5c7d017",
+    ".tmp\\bootstrap-readiness-delivery\\independent-handover-review.json": "a6748aa7b0ee75687444cd3e1a1e2c2946ea1dee2420fd48ecdeedb0a10246fc",
+    ".tmp\\bootstrap-readiness-delivery\\independent-final-review.json": "167fc41b7b4cde66e0aaa0fa6ffee77f3004a6d7bd3a8dba4b7c099cfd1f80b3"
+  },
+  "limits": [
+    "Synthetic controller and Git asset fixture are labeled; no real installer subprocess, browser, keyring or native session was launched by this unit qualification.",
+    "Common lifetime/key-helper source proofs are independent. Vendoring their bytes does not extend those results to an installed Codex package.",
+    "Historical fe84/cb505 installed package and older automatic bootstrap receipts remain scoped to their original sources. Current4dc fresh dependency installation and composed runtime qualification remain separate pending work.",
+    "No fresh OS/Secret Service setup, full daemon/model, provider, Windows/macOS input parity or overall mission completion claim."
+  ]
+}
