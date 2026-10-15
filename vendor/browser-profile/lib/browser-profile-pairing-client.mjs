@@ -45,6 +45,8 @@ function callerBody(authority, raw, call = false) {
 // Pairing principal only. No human management methods or desktop inheritance.
 // The only actor header belongs to original caller call/poll/cancel requests.
 export class PairedProfileCoordinatorClient {
+  #physical = new Set()
+  #cleanupUnknown = false
   /** @param {any} options */
   constructor({ endpoint, authorizePairing, fetchImpl = globalThis.fetch, timeoutMs = 8000 }) {
     let url; try { url = new URL(endpoint) } catch { throw fail('profile_sync_configuration_invalid') }
@@ -60,7 +62,15 @@ export class PairedProfileCoordinatorClient {
     const caller = purpose === 'caller' && /^(?:rpc\/(?:resolve|call)|rpc\/[a-f0-9-]{36}\/(?:poll|cancel))$/.test(route)
     const endpoint = purpose === 'endpoint' && /^(?:rpc\/[a-f0-9-]{36}\/(?:dispatch|cancellation|result)|transfers\/[a-f0-9-]{36}\/(?:checkpoint|capsule|staged))$/.test(route)
     if (!caller && !endpoint) throw fail('profile_sync_route_refused')
-    const scope = Object.freeze({ purpose, actingUserId: authority.actingUserId, assistantId: authority.assistantId }), proof = await this.authorizePairing(scope)
+    if (this.#cleanupUnknown) throw fail('profile_sync_cleanup_unconfirmed')
+    const key=canonical([authority.actingUserId,authority.assistantId,authority.profileId??null]).toString('utf8')
+    if(this.#physical.size>=8||[...this.#physical].filter(value=>value.key===key).length>=2)throw fail('profile_sync_request_busy')
+    const token = { task: null, key }, scope = Object.freeze({ purpose, actingUserId: authority.actingUserId, assistantId: authority.assistantId })
+    this.#physical.add(token)
+    let controller, timer, dispatched = false, expired = false, rejectDeadline
+    const mutating=route!=='rpc/resolve',deadline=new Promise((_,reject)=>{rejectDeadline=reject})
+    const physical=Promise.resolve().then(async()=>{
+    const proof = await this.authorizePairing(scope)
     if (!proof || !Number.isSafeInteger(proof.pairingId) || proof.pairingId < 1 || typeof proof.ownerUserId !== 'string' || !ID.test(proof.ownerUserId) || proof.assistantId !== authority.assistantId || typeof proof.token !== 'string' || !proof.token || proof.token.length > 16384 || /\s/.test(proof.token) || typeof proof.assertCurrent !== 'function') throw fail('profile_sync_pairing_required')
     const binding = Object.freeze({ pairingId: proof.pairingId, ownerUserId: proof.ownerUserId, assistantId: proof.assistantId, token: proof.token }), current = proof.assertCurrent
     const check = () => {
@@ -70,24 +80,25 @@ export class PairedProfileCoordinatorClient {
       if (value === false) throw fail('profile_sync_context_changed')
     }
     check()
-    const controller = new AbortController(), chunks = [], mutating=route!=='rpc/resolve'; let reader, dispatched = false, timer
-    const deadline = new Promise((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(fail(dispatched&&mutating ? 'profile_sync_outcome_unknown' : 'profile_sync_connection_unavailable')) }, this.timeoutMs) })
-    const wait = value => Promise.race([value, deadline])
+    controller = new AbortController(); const chunks = []; let reader, responseBody
+    const admitted=()=>{check();if(expired||controller.signal.aborted)throw fail(dispatched&&mutating?'profile_sync_outcome_unknown':'profile_sync_connection_unavailable')}
+    timer=setTimeout(()=>{expired=true;controller.abort();rejectDeadline(fail(dispatched&&mutating?'profile_sync_outcome_unknown':'profile_sync_connection_unavailable'))},this.timeoutMs)
     try {
       const bytes = JSON.stringify(body), limit = route.endsWith('/checkpoint') ? CAPSULE_BYTES : route.endsWith('/result') ? RESULT_BYTES : CALL_BYTES
       if (Buffer.byteLength(bytes) > limit) throw fail('profile_sync_request_too_large')
       const url = new URL(`/api/v1/browser/profile-sync/${route}`, this.origin)
-      check(); dispatched = true
-      const response = await wait(this.fetchImpl(url.href, { method: 'POST', headers: { 'X-BGOS-Pairing': binding.token, ...(caller ? { 'X-BGOS-Acting-User': authority.actingUserId } : {}), Accept: 'application/json', 'Accept-Encoding': 'identity', 'Content-Type': 'application/json' }, body: bytes, credentials: 'omit', redirect: 'error', cache: 'no-store', signal: controller.signal }))
-      check()
-      if (!response || !Number.isInteger(response.status) || !response.body?.getReader || response.redirected === true) throw fail('profile_sync_response_invalid')
-      reader = response.body.getReader(); let length = 0
+      admitted(); dispatched = true
+      const response = await this.fetchImpl(url.href, { method: 'POST', headers: { 'X-BGOS-Pairing': binding.token, ...(caller ? { 'X-BGOS-Acting-User': authority.actingUserId } : {}), Accept: 'application/json', 'Accept-Encoding': 'identity', 'Content-Type': 'application/json' }, body: bytes, credentials: 'omit', redirect: 'error', cache: 'no-store', signal: controller.signal })
+      responseBody=response?.body;if(typeof responseBody?.getReader==='function')reader=responseBody.getReader()
+      admitted()
+      if (!response || !Number.isInteger(response.status) || !reader || response.redirected === true) throw fail('profile_sync_response_invalid')
+      let length = 0
       for (;;) {
-        const { value, done } = await wait(reader.read()); check(); if (done) break
-        if (!(value instanceof Uint8Array) || (length += value.byteLength) > maxResponse) { void reader.cancel().catch(() => {}); throw fail('profile_sync_response_too_large') }
+        const { value, done } = await reader.read(); admitted(); if (done) break
+        if (!(value instanceof Uint8Array) || (length += value.byteLength) > maxResponse) throw fail('profile_sync_response_too_large')
         chunks.push(Buffer.from(value))
       }
-      check(); let result
+      admitted(); let result
       try { result = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))) } catch { throw fail('profile_sync_response_invalid') }
       if (response.status < 200 || response.status >= 300) throw fail(typeof result?.code === 'string' && /^[a-z][a-z0-9_]{1,79}$/.test(result.code) ? result.code : 'profile_sync_request_refused', response.status)
       if (!plain(result)) throw fail('profile_sync_response_invalid')
@@ -97,10 +108,16 @@ export class PairedProfileCoordinatorClient {
       if (error?.code?.startsWith('profile_') || error?.statusCode) throw error
       throw fail(dispatched&&mutating ? 'profile_sync_outcome_unknown' : 'profile_sync_connection_unavailable')
     } finally {
-      clearTimeout(timer); controller.abort(); if (reader) { void reader.cancel().catch(() => {}); try { reader.releaseLock() } catch {} }
-      for (const chunk of chunks) chunk.fill(0)
+      try { if(reader)await reader.cancel();else if(responseBody){if(typeof responseBody.cancel!=='function')throw Error();await responseBody.cancel()} }
+      catch { this.#cleanupUnknown=true;throw fail('profile_sync_cleanup_unconfirmed') }
+      finally { try {reader?.releaseLock()}catch{this.#cleanupUnknown=true;throw fail('profile_sync_cleanup_unconfirmed')}finally{for(const chunk of chunks)chunk.fill(0)} }
     }
+    });token.task=physical
+    void physical.finally(()=>{if(!this.#cleanupUnknown)this.#physical.delete(token)}).catch(()=>{})
+    try{return await Promise.race([physical,deadline])}finally{clearTimeout(timer);controller?.abort()}
   }
+  activity(){return Object.freeze({pendingPhysicalOperations:this.#physical.size,cleanupUnknown:this.#cleanupUnknown})}
+  async whenDrained(){await Promise.allSettled([...this.#physical].map(token=>token.task));if(this.#cleanupUnknown)throw fail('profile_sync_cleanup_unconfirmed')}
   async resolve(scope) {
     scope=Object.freeze({...exact(scope,['actingUserId','assistantId'])})
     const result=await this.#request('caller','rpc/resolve',{assistantId:scope?.assistantId},scope)

@@ -1,0 +1,15 @@
+{
+  "kind": "isolated executable loader mutation",
+  "changedLine": "const resumedPages = null",
+  "originalLine": "const resumedPages = new WeakMap()",
+  "sourceSha256": "646989a4291e54e4ec4fbc704a85b9c14d80218ce1a3862deeeb231366b664c4",
+  "red": {
+    "exit": 1,
+    "output": "\n RUN  v2.1.9 E:/bgos-worktrees/browser-profile-sync-codex\n\n ❯ test/browser-profile-vendor.spec.ts (3 tests | 1 failed | 2 skipped) 29ms\n   × the shared managed browser runtime shipped to Codex > pins the exact complete source closure and both module boundaries 29ms\n     → lib/browser-profile-runtime.mjs: expected '84cf434d8c33402acb9d3d536b8a9bd04c1dc…' to be '646989a4291e54e4ec4fbc704a85b9c14d802…' // Object.is equality\n\n Test Files  1 failed (1)\n      Tests  1 failed | 2 skipped (3)\n   Start at  12:27:53\n   Duration  967ms (transform 87ms, setup 0ms, collect 101ms, tests 29ms, environment 0ms, prepare 164ms)\n\nMUTATION_LOADED: const resumedPages = null\n⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯\n\n FAIL  test/browser-profile-vendor.spec.ts > the shared managed browser runtime shipped to Codex > pins the exact complete source closure and both module boundaries\nAssertionError: lib/browser-profile-runtime.mjs: expected '84cf434d8c33402acb9d3d536b8a9bd04c1dc…' to be '646989a4291e54e4ec4fbc704a85b9c14d802…' // Object.is equality\n\nExpected: \"646989a4291e54e4ec4fbc704a85b9c14d80218ce1a3862deeeb231366b664c4\"\nReceived: \"84cf434d8c33402acb9d3d536b8a9bd04c1dc58aef67f26ac72977c29ca9e90e\"\n\n ❯ test/browser-profile-vendor.spec.ts:16:356\n\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\n\n"
+  },
+  "restored": {
+    "exit": 0,
+    "output": "\n RUN  v2.1.9 E:/bgos-worktrees/browser-profile-sync-codex\n\n ✓ test/browser-profile-vendor.spec.ts (3 tests | 2 skipped) 23ms\n\n Test Files  1 passed (1)\n      Tests  1 passed | 2 skipped (3)\n   Start at  12:27:55\n   Duration  950ms (transform 69ms, setup 0ms, collect 75ms, tests 23ms, environment 0ms, prepare 177ms)\n\n"
+  },
+  "sourceUnchanged": true
+}

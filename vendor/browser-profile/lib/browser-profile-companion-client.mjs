@@ -3,6 +3,7 @@ import { createHash, randomUUID, sign, verify } from 'node:crypto'
 const require = createRequire(import.meta.url)
 const codec = require('./browser-profile-core/crypto.js')
 const shared = require('./browser-profile-core/coordinator-client.js')
+const { validateRuntimeRequestStatus } = require('./browser-profile-core/runtime-readiness.js')
 const fail = code => Object.assign(new Error(code), { code })
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/
 const ID = /^[A-Za-z0-9_-]{1,128}$/, HASH = /^[a-f0-9]{64}$/
@@ -27,13 +28,20 @@ const endpointOf = (endpoint, scope) => { if (endpoint?.identity?.endpointId !==
 const signature = (endpoint, document) => sign(null, shared.canonical(document), endpoint.signingPrivateKey).toString('base64url')
 const signed = (endpoint, document, value) => typeof value === 'string' && /^[A-Za-z0-9_-]{86}$/.test(value) && Buffer.from(value, 'base64url').toString('base64url') === value && verify(null, shared.canonical(document), { key: Buffer.from(endpoint.identity.signingPublicKey, 'base64url'), type: 'spki', format: 'der' }, Buffer.from(value, 'base64url'))
 const requestFields = ['version','kind','requestId','endpointId','purpose','expectedWriterEpoch','expectedRevision','expectedHeadManifestHash','profileId','actingUserId','assistantId','endpointOwnerUserId','pairingId','nonce','expiresAt','grantVersion','keyFingerprint','contentKeyEpoch']
+const formatFields = value => value && typeof value === 'object' && Object.hasOwn(value, 'schemaVersion') ? [...requestFields, 'schemaVersion', 'sourceEndpoint'] : requestFields
 const destinationFields = ['endpointId','bootId','runtimeId','sessionId','grantVersion','keyFingerprint']
 function runtimeRequest(raw, scope) {
-  exact(raw, requestFields); uuid(raw.requestId)
-  if (raw.version !== 1 || raw.kind !== 'agent-runtime-request' || !['start','receive-transfer'].includes(raw.purpose) ||
+  exact(raw, formatFields(raw)); uuid(raw.requestId)
+  const format = Object.hasOwn(raw, 'schemaVersion')
+  if (raw.version !== (format ? 2 : 1) || format && (raw.schemaVersion !== 2 || raw.purpose !== 'receive-transfer') || raw.kind !== 'agent-runtime-request' || !['start','receive-transfer'].includes(raw.purpose) ||
       raw.profileId !== scope.profileId || raw.actingUserId !== scope.actingUserId || raw.assistantId !== scope.assistantId || raw.endpointId !== scope.endpointId || raw.keyFingerprint !== scope.keyFingerprint || raw.endpointOwnerUserId !== scope.ownerUserId || raw.pairingId !== scope.pairingId ||
       !HASH.test(raw.nonce) || !Number.isSafeInteger(raw.expiresAt) || raw.expiresAt < 1 || ['grantVersion','contentKeyEpoch'].some(key => !Number.isSafeInteger(raw[key]) || raw[key] < 1) ||
       ['expectedWriterEpoch','expectedRevision'].some(key => !Number.isSafeInteger(raw[key]) || raw[key] < 0) || !(raw.expectedRevision === 0 ? raw.expectedHeadManifestHash === null : HASH.test(raw.expectedHeadManifestHash))) throw fail('profile_companion_readiness_invalid')
+  if (format) {
+    const value = exact(raw.sourceEndpoint, ['kind','ownerUserId','pairingId','identity','keyFingerprint','grantVersion'])
+    exact(value.identity, ['version','endpointId','signingPublicKey','encryptionPublicKey'])
+    if (value.kind !== 'desktop' || value.ownerUserId !== scope.actingUserId || value.pairingId !== null || value.identity.endpointId === scope.endpointId || !UUID.test(value.identity.endpointId) || !Number.isSafeInteger(value.grantVersion) || value.grantVersion < 1 || codec.identityFingerprint(value.identity) !== value.keyFingerprint) throw fail('profile_companion_readiness_invalid')
+  }
   return structuredClone(raw)
 }
 function startDocument(request, process) {
@@ -41,10 +49,14 @@ function startDocument(request, process) {
 }
 function runtimeStatus(raw, scope, endpoint) {
   exact(raw,['request','state','ready','confirmation']); const request = runtimeRequest(raw.request,scope)
+  if (request.schemaVersion === 2) {
+    try { return validateRuntimeRequestStatus(raw, Object.fromEntries(['actingUserId','assistantId','profileId','requestId','purpose','expectedWriterEpoch','expectedRevision','expectedHeadManifestHash','contentKeyEpoch','schemaVersion','sourceEndpoint'].map(key => [key,request[key]])), { identity: endpoint.identity, keyFingerprint: scope.keyFingerprint, ownerUserId: scope.ownerUserId, pairingId: scope.pairingId, grantVersion: request.grantVersion }) }
+    catch { throw fail('profile_companion_readiness_invalid') }
+  }
   if (!['pending','ready','confirmed','expired'].includes(raw.state)) throw fail('profile_companion_readiness_invalid')
   if (raw.ready !== null) {
     exact(raw.ready,['document','signature','startSignature','readyHash']); const ready = raw.ready, document = ready.document
-    exact(document,[...requestFields,'bootId','runtimeId','sessionId']); const process = Object.fromEntries(['bootId','runtimeId','sessionId'].map(key => [key,identifier(document[key])]))
+    exact(document,[...formatFields(request),'bootId','runtimeId','sessionId']); const process = Object.fromEntries(['bootId','runtimeId','sessionId'].map(key => [key,identifier(document[key])]))
     if (!equal(document,{...request,kind:'agent-runtime-ready',...process}) || !signed(endpoint,document,ready.signature) ||
         (request.purpose === 'start' ? !signed(endpoint,startDocument(request,process),ready.startSignature) : ready.startSignature !== null) ||
         ready.readyHash !== createHash('sha256').update(shared.canonical({document,signature:ready.signature,startSignature:ready.startSignature})).digest('hex')) throw fail('profile_companion_readiness_invalid')
@@ -63,6 +75,7 @@ function runtimeStatus(raw, scope, endpoint) {
 /** Agent host only. Setup metadata never becomes runtime authorization. */
 export class AgentProfileCoordinatorClient {
   #pending = null
+  #cleanupUnknown = false
   /** @param {{endpoint:string,authorizePairing:(context:Record<string,unknown>)=>unknown,fetchImpl?:(url:string,options:RequestInit)=>Promise<Response>,timeoutMs?:number}} options */
   constructor({ endpoint, authorizePairing, fetchImpl = globalThis.fetch, timeoutMs = 8000 }) {
     let url; try { url = new URL(endpoint) } catch { throw fail('profile_companion_configuration_invalid') }
@@ -70,11 +83,11 @@ export class AgentProfileCoordinatorClient {
     Object.defineProperties(this, { origin: { value: url.origin }, authorizePairing: { value: authorizePairing }, fetchImpl: { value: fetchImpl }, timeoutMs: { value: timeoutMs } })
   }
   async #request(route, body, context, write = false, maximum = META) {
-    if (this.#pending) throw fail('profile_companion_request_busy')
+    if (this.#pending || this.#cleanupUnknown) throw fail('profile_companion_request_busy')
     if (!/^(?:endpoint-offers\/pending|endpoint-offers\/[a-f0-9-]{36}\/candidate|endpoints\/[a-f0-9-]{36}\/(?:enrollment|discovery)|runtime-requests\/(?:pending|[a-f0-9-]{36}\/(?:ready|read))|profiles\/[a-f0-9-]{36}\/(?:retire|agent-stopped-head\/readdress)|transfers\/[a-f0-9-]{36}\/(?:resume|status|capsule|staged))$/.test(route)) throw fail('profile_companion_route_refused')
     const bytes = JSON.stringify(body)
     if (Buffer.byteLength(bytes) > (route.endsWith('/retire') ? LARGE : META)) throw fail('profile_companion_request_too_large')
-    const controller = new AbortController(), state = { dispatched: false }, chunks = []; let reader, timer
+    const controller = new AbortController(), state = { dispatched: false }, chunks = []; let reader, responseBody, timer
     const task = (async () => {
       let proof; try { proof = await this.authorizePairing(Object.freeze({ ...context })) } catch { throw fail('profile_companion_pairing_required') }
       if (!proof || typeof proof.token !== 'string' || !proof.token || proof.token.length > 16384 || /\s/.test(proof.token) || typeof proof.assertCurrent !== 'function') throw fail('profile_companion_pairing_required')
@@ -83,9 +96,10 @@ export class AgentProfileCoordinatorClient {
       try {
         assertCurrent(); state.dispatched = true
         const response = await this.fetchImpl(new URL('/api/v1/browser/profile-sync/' + route, this.origin).href, { method: 'POST', headers: { 'X-BGOS-Pairing': token, Accept: 'application/json', 'Accept-Encoding': 'identity', 'Content-Type': 'application/json' }, body: bytes, credentials: 'omit', redirect: 'error', cache: 'no-store', signal: controller.signal })
+        responseBody = response?.body; if (typeof responseBody?.getReader === 'function') reader = responseBody.getReader()
         assertCurrent()
-        if (!response || !Number.isInteger(response.status) || response.redirected || !response.body?.getReader) throw fail('profile_companion_response_invalid')
-        reader = response.body.getReader(); let length = 0
+        if (!response || !Number.isInteger(response.status) || response.redirected || !reader) throw fail('profile_companion_response_invalid')
+        let length = 0
         for (;;) { const { value, done } = await reader.read(); assertCurrent(); if (done) break; if (!(value instanceof Uint8Array) || (length += value.byteLength) > maximum) throw fail('profile_companion_response_too_large'); chunks.push(Buffer.from(value)) }
         assertCurrent(); let result
         try { result = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))) } catch { throw fail('profile_companion_response_invalid') }
@@ -95,13 +109,19 @@ export class AgentProfileCoordinatorClient {
       } catch (error) {
         if (error?.code?.startsWith('profile_companion_')) throw error
         throw fail(state.dispatched && write ? 'profile_companion_outcome_unknown' : 'profile_companion_connection_unavailable')
-      } finally { if (reader) { void reader.cancel().catch(() => {}); try { reader.releaseLock() } catch {} }; for (const chunk of chunks) chunk.fill(0) }
+      } finally {
+        try { if (reader) await reader.cancel(); else if (responseBody) { if (typeof responseBody.cancel !== 'function') throw Error(); await responseBody.cancel() } }
+        catch { this.#cleanupUnknown = true; throw fail('profile_companion_cleanup_unconfirmed') }
+        finally { try { reader?.releaseLock() } catch { this.#cleanupUnknown = true; throw fail('profile_companion_cleanup_unconfirmed') } finally { for (const chunk of chunks) chunk.fill(0) } }
+      }
     })()
     this.#pending = task
-    void task.finally(() => { if (this.#pending === task) this.#pending = null }).catch(() => {})
+    void task.finally(() => { if (this.#pending === task && !this.#cleanupUnknown) this.#pending = null }).catch(() => {})
     try { return await Promise.race([task, new Promise((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(fail(state.dispatched && write ? 'profile_companion_outcome_unknown' : 'profile_companion_connection_unavailable')) }, this.timeoutMs) })]) }
     finally { clearTimeout(timer); controller.abort() }
   }
+  activity() { return Object.freeze({ pendingPhysicalOperations: this.#pending ? 1 : 0, cleanupUnknown: this.#cleanupUnknown }) }
+  async whenDrained() { if (this.#pending) await Promise.allSettled([this.#pending]); if (this.#cleanupUnknown) throw fail('profile_companion_cleanup_unconfirmed') }
   async pending(assistantId, bootId) {
     if (!Number.isSafeInteger(assistantId) || assistantId < 1) throw fail('profile_companion_scope_invalid')
     const result = await this.#request('endpoint-offers/pending', { assistantId, bootId: identifier(bootId) }, { purpose: 'setup-intents', assistantId })
@@ -194,7 +214,7 @@ export class AgentProfileCoordinatorClient {
   retire(authority, endpoint, stopped) {
     authority = shared.exactAuthority(authority); if (codec.identityFingerprint(endpoint.identity) !== authority.keyFingerprint) throw fail('profile_companion_pin_changed')
     const manifest = stopped.checkpoint.manifest, manifestHash = codec.manifestHash(manifest), document = { version: 1, kind: 'agent-runtime-retire', profileId: authority.profileId, authority, transitionId: manifest.transitionId, manifestHash, revision: manifest.revision, destination: manifest.destination }
-    return this.#request(`profiles/${uuid(authority.profileId)}/retire`, { authority, manifest, manifestSignature: stopped.checkpoint.manifestSignature, encryptedPayload: stopped.checkpoint.ciphertext, stoppedReceipt: stopped.receipt, stoppedSignature: stopped.signature, signature: signature(endpoint, document) }, { purpose: 'retirement', actingUserId: authority.actingUserId, assistantId: authority.assistantId }, true)
+    return this.#request(`profiles/${uuid(authority.profileId)}/retire`, { authority, manifest, manifestSignature: stopped.checkpoint.manifestSignature, encryptedPayload: stopped.checkpoint.ciphertext, stoppedReceipt: stopped.receipt, stoppedSignature: stopped.signature, signature: signature(endpoint, document) }, { purpose: 'retirement', actingUserId: authority.actingUserId, assistantId: authority.assistantId, authority }, true)
   }
   readdress(raw, endpoint, body) {
     const scope = scopeOf(raw); endpointOf(endpoint, scope)

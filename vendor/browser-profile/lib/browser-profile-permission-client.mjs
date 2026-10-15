@@ -148,5 +148,6 @@ export class AgentRuntimePermissionClient {
   }
   read(handle) { return this.#query(handle, false) }
   consume(handle) { return this.#query(handle, true) }
+  activity() { return Object.freeze({ pendingPhysicalOperations: this.#pending ? 1 : 0, cleanupUnknown: this.#cleanupUnconfirmed }) }
   async whenDrained() { if (this.#pending) await Promise.allSettled([this.#pending]); if (this.#cleanupUnconfirmed) throw fail('profile_permission_cleanup_unconfirmed') }
 }

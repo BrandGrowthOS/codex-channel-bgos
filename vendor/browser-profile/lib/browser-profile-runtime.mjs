@@ -11,6 +11,7 @@ export const profileCrypto = require('./browser-profile-core/crypto.js')
 const { createStorageAdapter } = require('./browser-profile-core/storage.js')
 const { cookies, cookieParams } = require('./browser-profile-core/native-runtime.js')
 const portableState = require('./browser-profile-core/portable-state.js')
+const { validateResumeTabs, classifyResumeURL, MAX_TABS } = require('./browser-profile-core/resume-tabs.js')
 const { consumeStoppedHeadStageAuthorization } = require('./browser-profile-core/stopped-head-stage.js')
 const fail = reason => Object.assign(new Error(reason), { reason, code: reason })
 const freeze = value => { if (value && typeof value === 'object') { for (const child of Object.values(value)) freeze(child); Object.freeze(value) } return value }
@@ -22,12 +23,22 @@ const syncCall = (callback, receiver, value) => {
 }
 const limits = Object.freeze({ targets: 2048, history: 8192, requests: 16384, commands: 4096, messageBytes: 1024 * 1024, frames: 10000, pages: 256 })
 const ownedProcesses = new WeakMap()
+const resumedPages = new WeakMap()
+const resumeImports = new WeakMap()
 const canonical = value => JSON.stringify((function sorted(value) { return Array.isArray(value) ? value.map(sorted) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, sorted(value[key])])) : value })(value))
 const fields = ['profileId', 'actingUserId', 'assistantId', 'endpointId', 'bootId', 'runtimeId', 'sessionId', 'writerEpoch', 'revision', 'contentKeyEpoch', 'grantVersion', 'keyFingerprint']
 const identityFields = ['profileId', 'actingUserId', 'endpointId', 'bootId', 'runtimeId', 'sessionId']
 const originOf = value => { try { const url = new URL(value); return url.protocol === 'https:' || url.protocol === 'http:' && ['127.0.0.1', '[::1]'].includes(url.hostname) ? url.origin : null } catch { return null } }
 const sourceOf = value => Object.fromEntries(['endpointId', 'bootId', 'runtimeId', 'sessionId', 'writerEpoch'].map(key => [key, value[key]]))
 const destinationOf = value => Object.fromEntries(['endpointId', 'bootId', 'runtimeId', 'sessionId', 'grantVersion', 'keyFingerprint'].map(key => [key, value[key]]))
+const resumeURLBase = value => { try { const url = new URL(value); url.hash = ''; return url.href } catch { return null } }
+const resumeFrameURL = frame => {
+  if (typeof frame?.url !== 'string') return null
+  if (frame.urlFragment === undefined || frame.urlFragment === '') return frame.url
+  return typeof frame.urlFragment === 'string' && frame.urlFragment.startsWith('#') && !frame.url.includes('#') ? frame.url + frame.urlFragment : null
+}
+const resumeId = value => typeof value === 'string' && value.length > 0 && value.length <= 512
+const hasResumeOpener = value => !value || value.canAccessOpener !== false || Object.hasOwn(value, 'openerId') || Object.hasOwn(value, 'openerFrameId')
 const authorityOf = value => {
   if (!value || Object.keys(value).length !== fields.length || identityFields.some(key => typeof value[key] !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value[key])) ||
       ['assistantId', 'writerEpoch', 'contentKeyEpoch', 'grantVersion'].some(key => !Number.isSafeInteger(value[key]) || value[key] < 1) || !Number.isSafeInteger(value.revision) || value.revision < 0 || !/^[a-f0-9]{64}$/.test(value.keyFingerprint)) throw fail('profile_runtime_authority_invalid')
@@ -117,12 +128,35 @@ export class ProfileTargetLedger {
       if (this.active.size >= limits.requests && !this.active.has(`${sessionId}:${params.requestId}`)) { this.failure = 'profile_inventory_limit'; return }
       this.active.set(`${sessionId}:${params.requestId}`, { sessionId, targetId: target.targetId })
       if (this.frozen) target.activityAfterFreeze = true
+      if (target.type === 'page' && params.type === 'Document') {
+        target.resumeRequests ??= new Map()
+        const prior = target.resumeRequests.get(params.requestId), request = params.request
+        const valid = [params.requestId, params.frameId, params.loaderId].every(resumeId) && typeof request?.url === 'string' && request.url.length <= 8192 && request.method === 'GET' && request.hasPostData !== true && request.postData === undefined && request.postDataEntries === undefined
+        const safe = valid && (params.redirectResponse ? prior?.safe === true && prior.frameId === params.frameId && prior.loaderId === params.loaderId && params.redirectResponse.status >= 300 && params.redirectResponse.status < 400 && resumeURLBase(params.redirectResponse.url) === resumeURLBase(prior.url) : !prior)
+        if (target.resumeRequests.size >= 128 && !target.resumeRequests.has(params.requestId)) target.resumeRequests.delete(target.resumeRequests.keys().next().value)
+        target.resumeRequests.set(params.requestId, { requestId: params.requestId, frameId: resumeId(params.frameId) ? params.frameId : null, loaderId: resumeId(params.loaderId) ? params.loaderId : null, url: typeof request?.url === 'string' && request.url.length <= 8192 ? request.url : null, safe, response: false, finished: false, failed: false })
+      }
     }
+    const resumeRequest = target.resumeRequests?.get(params.requestId)
+    if (method === 'Network.responseReceived' && params.type === 'Document' && resumeRequest) resumeRequest.response = params.frameId === resumeRequest.frameId && params.loaderId === resumeRequest.loaderId && params.response?.status >= 200 && params.response.status < 300 && ![204,205].includes(params.response.status) && params.response.fromServiceWorker !== true && resumeURLBase(params.response.url) === resumeURLBase(resumeRequest.url)
+    if (method === 'Network.loadingFinished' && resumeRequest) resumeRequest.finished = true
+    if (method === 'Network.loadingFailed' && resumeRequest) resumeRequest.failed = true
     if (['Network.loadingFinished', 'Network.loadingFailed'].includes(method)) {
       if (!this.active.delete(`${sessionId}:${params.requestId}`)) target.missedRequest = true
     }
     if (method === 'Network.responseReceived' && !this.active.has(`${sessionId}:${params.requestId}`)) target.missedRequest = true
     if (['Network.webSocketCreated', 'Network.webTransportCreated', 'Network.directTCPSocketCreated', 'Network.directUDPSocketCreated'].includes(method) || method === 'Network.responseReceived' && params.type === 'EventSource') target.persistentTransport = true
+  }
+  resumeDocument(targetId, frame) {
+    const target = [...this.targets.values()].find(value => value.targetId === targetId)
+    if (!target?.ready || target.type !== 'page' || hasResumeOpener(target) || target.detached || target.interrupted || target.unqualified || target.missedRequest || !frame || frame.parentId || !resumeId(frame.id) || !resumeId(frame.loaderId) || typeof frame.url !== 'string' || frame.unreachableUrl) throw fail('profile_resume_document_unproved')
+    if (frame.url === 'about:blank') {
+      if (target.url !== 'about:blank' || target.resumeRequests?.size || frame.securityOrigin !== '://' || frame.secureContextType !== 'InsecureScheme' || frame.urlFragment) throw fail('profile_resume_document_unproved')
+      return true
+    }
+    const matches = [...(target.resumeRequests?.values() || [])].filter(value => value.frameId === frame.id && value.loaderId === frame.loaderId && resumeURLBase(value.url) === resumeURLBase(frame.url))
+    if (matches.length !== 1 || matches[0].safe !== true || matches[0].response !== true || matches[0].finished !== true || matches[0].failed) throw fail('profile_resume_document_unproved')
+    return true
   }
   async inventory(contextId) {
     if (!contextId) throw fail('profile_context_unqualified')
@@ -256,7 +290,7 @@ function ownProcessStop(identity,timeoutMs) {
 
 /** Main/agent-only adapter. Not yet connected to host RPC or MCP commands. */
 export class BrowserProfileRuntime {
-  static async create({ chromium, executable, environment = process.env, authority, closeAndDrain, checkpoint, authorizeActivation, assertTransferAllowed, transferQualification, transferQualificationFactory, preflightExtras, captureExtras, commitExtras, onOwnedProcess, timeoutMs = 5000, captureProcessIdentity = processIdentity, assertProcessExited = processExited }) {
+  static async create({ chromium, executable, environment = process.env, authority, closeAndDrain, checkpoint, authorizeActivation, assertTransferAllowed, transferQualification, transferQualificationFactory, preflightExtras, captureExtras, commitExtras, onOwnedProcess, selectedPage, authorizeReviewedResume, timeoutMs = 5000, captureProcessIdentity = processIdentity, assertProcessExited = processExited }) {
     const binding = authorityOf(authority)
     if (!chromium?.launch || typeof closeAndDrain !== 'function' || typeof checkpoint !== 'function' || typeof authorizeActivation !== 'function') throw fail('profile_runtime_dependencies_required')
     if ([preflightExtras, captureExtras, commitExtras].some(callback => typeof callback !== 'function')) throw fail('profile_runtime_extras_dependencies_required')
@@ -282,7 +316,7 @@ export class BrowserProfileRuntime {
       }
       const context = await browser.newContext({ serviceWorkers: 'block', acceptDownloads: false })
       if(transportObserver){const after=await contexts(),added=after.filter(value=>!before.includes(value));if(after.length!==before.length+1||before.some(value=>!after.includes(value))||added.length!==1||context.pages().length)throw fail('profile_context_unqualified');contextId=added[0];await transportObserver.bindContext({context,contextId});if(context.pages().length)throw fail('profile_context_unqualified');transferQualification=transportObserver}
-      runtime = new BrowserProfileRuntime({ browser, browserVersion, root, ledger, context, authority: binding, closeAndDrain, checkpoint, authorizeActivation, assertTransferAllowed, transferQualification, transportObserver,preflightExtras, captureExtras, commitExtras, timeoutMs, assertProcessExited })
+      runtime = new BrowserProfileRuntime({ browser, browserVersion, root, ledger, context, authority: binding, closeAndDrain, checkpoint, authorizeActivation, assertTransferAllowed, transferQualification, transportObserver,preflightExtras, captureExtras, commitExtras, selectedPage, authorizeReviewedResume, timeoutMs, assertProcessExited })
       runtime.processIdentity = nativeProcess
       if (ownedStop) ownedProcesses.set(runtime, ownedStop)
       await context.route('**/*', runtime.route)
@@ -297,7 +331,9 @@ export class BrowserProfileRuntime {
   }
   constructor(options) {
     if ([options.preflightExtras, options.captureExtras, options.commitExtras].some(callback => typeof callback !== 'function')) throw fail('profile_runtime_extras_dependencies_required')
+    if ([options.selectedPage, options.authorizeReviewedResume].some(callback => callback !== undefined && typeof callback !== 'function')) throw fail('profile_resume_configuration_invalid')
     Object.assign(this, options); this.authority = authorityOf(options.authority); this.state = 'new'; this.network = 'blocked'; this.privatePages = new Set(); this.privateURLs = new Map(); this.pages = new Set(); this.markers = []; this.frameJobs = new Set(); this.knownOrigins = new Set(); this.operation = null; this.contentKeyEpoch = null
+    Object.defineProperties(this, { selectedPage: { value: options.selectedPage, writable: false, configurable: false }, authorizeReviewedResume: { value: options.authorizeReviewedResume, writable: false, configurable: false } })
     const qualification=options.transferQualification
     if(qualification!==undefined){
       if(!qualification||!['qualified-chromium-native-observer-v1','restricted-disposable-fixture'].includes(qualification.kind)||typeof qualification.assertQualified!=='function')throw fail('profile_transport_qualification_required')
@@ -328,6 +364,31 @@ export class BrowserProfileRuntime {
     } finally { this.creatingPrivate = false }
   }
   async newPage(url = 'about:blank') { this.assertCurrent(); const page = await this._newPage(); if (url !== 'about:blank') await page.goto(url); return page }
+  restoredSelectedPage() { return this.state === 'active' ? resumedPages.get(this) || null : null }
+  async preflightResumeTabs() {
+    this.assertCurrent()
+    return this._captureResumeTabs()
+  }
+  async _captureResumeTabs() {
+    const pages = this.context.pages().filter(page => !this.privatePages.has(page))
+    if (pages.length > MAX_TABS || typeof this.selectedPage !== 'function') throw fail('profile_resume_selection_unproved')
+    const selected = syncCall(this.selectedPage, undefined), selectedIndex = pages.length ? pages.indexOf(selected) : -1
+    if (pages.length && selectedIndex < 0 || !pages.length && selected != null) throw fail('profile_resume_selection_unproved')
+    const tabs = []
+    for (const page of pages) {
+      if (!this.pages.has(page) || page.isClosed()) throw fail('profile_resume_document_unproved')
+      const cdp = await this.context.newCDPSession(page)
+      try {
+        const info = (await cdp.send('Target.getTargetInfo')).targetInfo, frame = (await cdp.send('Page.getFrameTree')).frameTree?.frame, url = resumeFrameURL(frame)
+        if (info?.type !== 'page' || hasResumeOpener(info) || info.browserContextId !== this.contextId || !frame || url === null || info.url !== url || page.url() !== url) throw fail('profile_resume_document_unproved')
+        this.ledger.resumeDocument(info.targetId, frame)
+        tabs.push({ url, title: info.title })
+      } finally { await cdp.detach().catch(() => {}) }
+    }
+    const current = this.context.pages().filter(page => !this.privatePages.has(page))
+    if (current.length !== pages.length || current.some((page, index) => page !== pages[index] || page.url() !== tabs[index].url) || syncCall(this.selectedPage, undefined) !== selected) throw fail('profile_resume_selection_unproved')
+    return validateResumeTabs({ version: 1, selectedIndex, tabs })
+  }
   _frame(page, frame) {
     const url = frame.url(); if (frame === page.mainFrame() && url === 'about:blank') return
     if (this.markers.length >= limits.frames || this.frameJobs.size >= limits.frames || typeof url !== 'string' || url.length > 16384) { this.inventoryFailure = 'profile_inventory_limit'; return }
@@ -336,10 +397,11 @@ export class BrowserProfileRuntime {
       const cdp = await this.context.newCDPSession(page)
       try {
       const tree = (await cdp.send('Page.getFrameTree')).frameTree
-      const frames = node => [node.frame, ...(node.childFrames || []).flatMap(frames)], candidates = frames(tree).filter(value => value.url === url)
+      const main = frame === page.mainFrame(), sameDocument = value => value === url || main && resumeURLBase(url) !== null && resumeURLBase(value) === resumeURLBase(url)
+      const frames = node => [node.frame, ...(node.childFrames || []).flatMap(frames)], candidates = main ? [tree.frame] : frames(tree).filter(value => value.url === url)
       if (candidates.length !== 1) throw fail('profile_frame_ambiguous')
       const { storageKey } = await cdp.send('Storage.getStorageKeyForFrame', { frameId: candidates[0].id }), top = originOf(tree.frame.url)
-      if (frame.isDetached() || frame.url() !== url || !top || storageKey !== top + '/' || marker.origin && marker.origin !== top || !marker.origin && url !== 'about:blank') throw fail('profile_partitioned_origin_unsupported')
+      if (frame.isDetached() || !sameDocument(frame.url()) || !sameDocument(candidates[0].url) || !top || storageKey !== top + '/' || marker.origin && marker.origin !== top || !marker.origin && url !== 'about:blank') throw fail('profile_partitioned_origin_unsupported')
       marker.origin = top; marker.qualified = true
       } finally { await cdp.detach().catch(() => {}) }
     })().catch(error => { marker.reason = error.reason || 'profile_frame_unqualified' })
@@ -404,6 +466,7 @@ export class BrowserProfileRuntime {
   async activate(grant) {
     if (this.state === 'new' && this.authority.revision) throw fail('profile_runtime_checkpoint_required')
     const token = this._admit(['new', 'staged'])
+    let restoring = false
     try {
       if (this.extrasCommitFailure) throw fail('profile_runtime_extras_commit_uncertain')
       const proof = await this.authorizeActivation({ authority: this.authority, receipt: this.stagedReceipt || null, grant }); this._current(token)
@@ -416,9 +479,24 @@ export class BrowserProfileRuntime {
           this.extrasCommitted = true; this.stagedExtras = null
         } catch (error) { this.extrasCommitFailure = true; this.network = 'blocked'; throw error }
       }
-      assertCurrent(); this._current(token); this.activeProof = assertCurrent; await this.context.setOffline(false); this._current(token); assertCurrent(); this.network = 'active'; this.state = 'active'
+      const resume = resumeImports.get(this)
+      const resumeCurrent = () => { assertCurrent(); this._current(token); if (resume?.assertCurrent) syncCall(resume.assertCurrent, undefined) }
+      resumeCurrent(); this.activeProof = assertCurrent; await this.context.setOffline(false); resumeCurrent(); this.network = 'active'
+      if (resume) {
+        // The frozen hints remain private until fresh coordinator authority is
+        // proved. Each original GET is attempted once; a partial failure stops
+        // the destination rather than silently retrying a possible action.
+        restoring = true; resumeImports.delete(this); const pages = []
+        for (const tab of resume.tabs.tabs) {
+          resumeCurrent(); const page = await this._newPage(); resumeCurrent(); pages.push(page)
+          if (tab.url !== 'about:blank') { await page.goto(tab.url, { waitUntil: 'load', timeout: 30000 }); resumeCurrent() }
+        }
+        resumeCurrent(); resumedPages.set(this, pages[resume.tabs.selectedIndex] || null)
+      }
+      this.state = 'active'
       return { state: this.state, authority: this.authority }
-    } finally { if (this.operation === token) this.operation = null }
+    } catch (error) { if (restoring) await this.dispose(); throw error }
+    finally { if (this.operation === token) this.operation = null }
   }
   async _exporter(origin, token) {
     this._current(token); const page = await this._newPage(true), url = `${origin}/.well-known/hoai-private-profile/${randomUUID()}`
@@ -436,6 +514,7 @@ export class BrowserProfileRuntime {
     if (profileCrypto.identityFingerprint(source.identity) !== this.authority.keyFingerprint || contentKeyEpoch?.epoch !== this.authority.contentKeyEpoch || !Buffer.isBuffer(contentKeyEpoch.key) || contentKeyEpoch.key.length !== 32) throw fail('profile_runtime_identity_mismatch')
     this.assertCurrent(); portableState.validatePortableBundle(syncCall(this.preflightExtras, this, { authority: this.authority }))
     this._assertTransportQualified([...new Set([...this.knownOrigins,...this.markers.map(marker=>marker.origin).filter(Boolean)])])
+    const initialResume = context.schemaVersion === 2 ? await this.preflightResumeTabs() : null
     const token = this._admit(['active']); contentKeyEpoch = { epoch: contentKeyEpoch.epoch, key: Buffer.from(contentKeyEpoch.key) }; let destructive = false, plaintext, releaseExtras
     try {
       this.activeProof(); const barrier = await this.closeAndDrain(this.authority); this._current(token)
@@ -450,6 +529,9 @@ export class BrowserProfileRuntime {
       this.activeProof(); await this.assertTransferAllowed?.({ authority: this.authority, context: this.context }); this._current(token)
       this.network = 'quiescing'; await this.context.setOffline(true); await this.assertMovable(); this._current(token)
       if (this.ledger.generation !== generation) throw fail('profile_activity_during_freeze')
+      const resumeTabs = context.schemaVersion === 2 ? await this._captureResumeTabs() : null
+      this._current(token); this.activeProof()
+      if (context.schemaVersion === 2 && (canonical(initialResume) !== canonical(resumeTabs) || this.ledger.generation !== generation)) throw fail('profile_resume_snapshot_changed')
       destructive = true; this.state = 'quiescing'; await this._destroyPages()
       const targets = await this.ledger.inventory(this.contextId)
       for (const target of targets) await this.root.send('Target.closeTarget', { targetId: target.targetId })
@@ -464,7 +546,7 @@ export class BrowserProfileRuntime {
       this.ledger.frozen = false; this.network = 'private'; const control = await this._exporter(origins[0] || 'https://hoai-profile.invalid', token), cdp = await this.context.newCDPSession(control)
       const capturedCookies = cookies((await cdp.send('Network.getAllCookies')).cookies), storage = []; let measured = Buffer.byteLength(JSON.stringify(capturedCookies))
       for (const origin of origins) { const page = origin === origins[0] ? control : await this._exporter(origin, token), state = await page.evaluate('globalThis.__hoaiProfileStorage.read()'); if (state.origin !== origin) throw fail('profile_storage_origin_mismatch'); measured += Buffer.byteLength(JSON.stringify(state)); if (measured > profileCrypto.MAX_PLAINTEXT_BYTES) throw fail('profile_runtime_state_too_large'); storage.push(state) }
-      plaintext = portableState.encodePortableState({ schema: portableState.SCHEMA, cookies: capturedCookies, origins: storage, ...extras })
+      plaintext = portableState.encodePortableState({ schema: portableState.schemaForVersion(context.schemaVersion), cookies: capturedCookies, origins: storage, ...extras, ...(context.schemaVersion === 2 ? { resumeTabs } : {}) }, context.schemaVersion)
       if (canonical(cookies((await cdp.send('Network.getAllCookies')).cookies)) !== canonical(capturedCookies)) throw fail('profile_storage_changed_during_export')
       await this._terminalStop(token); this.network = 'blocked'; this.state = 'stopped'
       this.activeProof(); syncCall(assertExtras, undefined)
@@ -491,9 +573,16 @@ export class BrowserProfileRuntime {
   }
   async _stageImported({ checkpoint, expectedContext, sourceIdentity, destination, receiptTransitionId, stageCheck = () => {}, readdress }) {
     expectedContext = structuredClone(expectedContext); checkpoint = structuredClone(checkpoint); sourceIdentity = structuredClone(sourceIdentity); destination = { identity: structuredClone(destination?.identity), signingPrivateKey: destination?.signingPrivateKey, encryptionPrivateKey: destination?.encryptionPrivateKey }
-    syncCall(stageCheck, undefined); const token = this._admit(['new']), current = () => { this._current(token); syncCall(stageCheck, undefined) }; let opened
+    syncCall(stageCheck, undefined); const token = this._admit(['new']); let opened, resumeProof
+    const current = () => { this._current(token); syncCall(stageCheck, undefined); if (resumeProof) syncCall(resumeProof, undefined) }
     try {
-      opened = profileCrypto.openCheckpoint({ checkpoint, expectedContext, sourceIdentity, destination }); const payload = portableState.decodePortableState(opened.plaintext), restoredCookies = cookies(payload.cookies)
+      opened = profileCrypto.openCheckpoint({ checkpoint, expectedContext, sourceIdentity, destination }); const payload = portableState.decodePortableState(opened.plaintext, expectedContext.schemaVersion), restoredCookies = cookies(payload.cookies)
+      if (expectedContext.schemaVersion === 2 && payload.resumeTabs.tabs.some(tab => classifyResumeURL(tab.url) === 'review')) {
+        if (typeof this.authorizeReviewedResume !== 'function') throw fail('profile_resume_review_required')
+        const proof = syncCall(this.authorizeReviewedResume, undefined, { checkpoint, expectedContext, sourceIdentity, resumeTabs: payload.resumeTabs })
+        if (!proof || Object.keys(proof).length !== 1 || typeof proof.assertCurrent !== 'function') throw fail('profile_resume_review_required')
+        resumeProof = proof.assertCurrent.bind(proof); syncCall(resumeProof, undefined)
+      }
       if (this.context.pages().some(page => page !== this.bootstrapPage)) throw fail('profile_runtime_payload_invalid')
       const origins = new Set(); for (const state of payload.origins) { if (!originOf(state.origin) || state.origin !== originOf(state.origin) || origins.has(state.origin)) throw fail('profile_runtime_payload_invalid'); origins.add(state.origin) }
       await this.context.setOffline(true); current(); this.network = 'private'; const control = await this._exporter([...origins][0] || 'https://hoai-profile.invalid', token); current(); const cdp = await this.context.newCDPSession(control); current()
@@ -506,10 +595,12 @@ export class BrowserProfileRuntime {
       const receipt = { version: 1, kind: 'destination-staged', profileId: expectedContext.profileId, transitionId: receiptTransitionId, manifestHash: profileCrypto.manifestHash(checkpoint.manifest), revision: expectedContext.revision, destination: destinationOf(this.authority), stagedInactive: true }
       this.stagedReceipt = freeze(receipt); this.stagedExtras = freeze(portableState.validatePortableBundle({ passwordVault: payload.passwordVault, preferences: payload.preferences })); this.extrasCommitted = false
       this.stagedReaddress = readdress || null
+      if (expectedContext.schemaVersion === 2) resumeImports.set(this, { tabs: payload.resumeTabs, assertCurrent: resumeProof })
       return { receipt, signature: sign(null, Buffer.from(canonical(receipt)), destination.signingPrivateKey).toString('base64url'), ...(readdress ? { readdress } : {}) }
     } catch (error) { await this.dispose(); throw error } finally { opened?.plaintext.fill(0); opened?.contentKeyEpoch.key.fill(0); if (this.operation === token) this.operation = null }
   }
   async dispose() {
+    resumeImports.delete(this); resumedPages.delete(this)
     this.state = 'disposed'; this.operation = null; this.network = 'blocked'; this.activeProof = null; this.stagedExtras = null; this.stagedReaddress = null
     try { this.ledger.dispose(); await this.browser.close(); const exited = await this.assertProcessExited(this.processIdentity); if (this.browser.isConnected() || exited !== true) throw fail('profile_runtime_process_alive') }
     finally { try{await this.transportObserver?.dispose()}finally{this.contentKeyEpoch?.key.fill(0); this.contentKeyEpoch = null; this.context.removeListener('page', this.pageCreated)} }

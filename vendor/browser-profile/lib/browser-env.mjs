@@ -75,9 +75,11 @@ export const OPT_IN_ENV = 'HOAI_BROWSER_CHROME_ENV'
  * What the HOST needs beyond the base: its own settings, the one node
  * setting its TLS to the backend may depend on (a path, not a secret), and
  * where OneDrive is, so its kept downloads guard can refuse a synced folder
- * (lib/browser-downloads.mjs syncedRoots). Chrome gets none of these.
+ * (lib/browser-downloads.mjs syncedRoots). The Node host also needs the exact
+ * session bus and runtime directory for its privileged OS key-store helpers,
+ * including with a headless browser. Headless Chrome gets none of these.
  */
-export const HOST_ONLY_ENV = ['HOAI_BROWSER_EXECUTABLE', 'HOAI_BROWSER_HEADED', 'HOAI_BROWSER_HOST_AGENTS', OPT_IN_ENV, 'NODE_EXTRA_CA_CERTS', 'ONEDRIVE', 'ONEDRIVECONSUMER', 'ONEDRIVECOMMERCIAL']
+export const HOST_ONLY_ENV = ['HOAI_BROWSER_EXECUTABLE', 'HOAI_BROWSER_HEADED', 'HOAI_BROWSER_HOST_AGENTS', OPT_IN_ENV, 'NODE_EXTRA_CA_CERTS', 'DBUS_SESSION_BUS_ADDRESS', 'XDG_RUNTIME_DIR', 'ONEDRIVE', 'ONEDRIVECONSUMER', 'ONEDRIVECOMMERCIAL']
 
 /** The names in HOAI_BROWSER_CHROME_ENV, upper cased. */
 export function optedInNames(env) {

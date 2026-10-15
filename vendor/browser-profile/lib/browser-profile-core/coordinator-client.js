@@ -98,6 +98,13 @@ class ProfileCoordinatorClient {
   endpointMetadata(scope, endpointId) { return this._request("GET", `endpoints/${identifier(endpointId)}`, undefined, scope); }
   create(scope) { return this._request("POST", "profiles", { assistantId: scopeOf(scope).assistantId }, scope); }
   read(scope, profileId) { return this._request("GET", `profiles/${identifier(profileId)}`, undefined, scope); }
+  createReturnIntent(scope, profileId, endpoint, rawRequest) {
+    const request = require("./return-intent").validateReturnIntentDocument(rawRequest), current = scopeOf(scope);
+    if (request.sourceAuthority.profileId !== identifier(profileId) || request.sourceAuthority.actingUserId !== current.actingUserId || request.sourceAuthority.assistantId !== current.assistantId ||
+        endpoint?.identity?.endpointId !== request.destination.endpointId || identityFingerprint(endpoint.identity) !== request.destination.keyFingerprint) throw fail("profile_sync_return_invalid");
+    return this._request("POST", `profiles/${profileId}/return-intents`, { request, signature: documentSignature(endpoint, request) }, current);
+  }
+  returnIntent(scope, profileId, requestId) { return this._request("GET", `profiles/${identifier(profileId)}/return-intents/${identifier(requestId)}`, undefined, scope); }
   transition(scope, profileId, transitionId) { return this._request("GET", `profiles/${identifier(profileId)}/transfers/${identifier(transitionId)}`, undefined, scope); }
   quota(scope, profileId) { return this._request("GET", `profiles/${identifier(profileId)}/quota`, undefined, scope); }
   endpoints(scope, profileId, { after } = {}) {
@@ -124,9 +131,11 @@ class ProfileCoordinatorClient {
     return this._request("POST", `profiles/${identifier(profileId)}/endpoint-offers/${intentId}/accept`, { offerHash: reviewed.offerHash, keyFingerprint: reviewed.keyFingerprint }, scope);
   }
   createRuntimeRequest(scope, profileId, input) {
-    const fields = ["requestId", "endpointId", "purpose", "expectedWriterEpoch", "expectedRevision", "expectedHeadManifestHash"];
+    const formatted = !!input && typeof input === "object" && Object.hasOwn(input, "schemaVersion");
+    const fields = ["requestId", "endpointId", "purpose", "expectedWriterEpoch", "expectedRevision", "expectedHeadManifestHash", ...(formatted ? ["schemaVersion"] : [])];
     exactRuntimeRequestData(input, fields);
     if (![input.requestId, input.endpointId].every(value => typeof value === "string" && UUID.test(value)) || !["start", "receive-transfer"].includes(input.purpose) ||
+        formatted && (input.schemaVersion !== 2 || input.purpose !== "receive-transfer") ||
         ![input.expectedWriterEpoch, input.expectedRevision].every(value => Number.isSafeInteger(value) && value >= 0) ||
         !(input.expectedHeadManifestHash === null || typeof input.expectedHeadManifestHash === "string" && /^[a-f0-9]{64}$/.test(input.expectedHeadManifestHash))) throw fail("profile_sync_runtime_request_invalid");
     const body = Object.fromEntries(fields.map(key => [key, input[key]]));

@@ -4,6 +4,8 @@
 // Cookie attributes and rich origin records retain their existing native
 // import validators; this layer owns the envelope, vault and preference schema.
 const SCHEMA = "hoai-portable-profile-state-v1";
+const SCHEMA_V2 = "hoai-portable-profile-state-v2";
+const { validateResumeTabs } = require("./resume-tabs");
 const MAX_BYTES = 16 * 1024 * 1024, MAX_ROWS = 10000, MAX_ORIGINS = 100;
 const ENGINES = Object.freeze(["google", "bing", "duckduckgo"]);
 const VAULT_FIELDS = ["v", "entries", "neverOrigins"];
@@ -68,20 +70,27 @@ function validatePortableBundle(value) {
   exact(value, ["passwordVault", "preferences"]); boundedJson(value);
   return { passwordVault: validatePortableVault(value.passwordVault), preferences: validatePreferences(value.preferences) };
 }
-function validatePortableState(value) {
-  exact(value, ["schema", "cookies", "origins", "passwordVault", "preferences"]);
-  if (value.schema !== SCHEMA || !Array.isArray(value.cookies) || value.cookies.length > MAX_ROWS || !Array.isArray(value.origins) || value.origins.length > MAX_ORIGINS) throw fail();
-  boundedJson(value); const extras = validatePortableBundle({ passwordVault: value.passwordVault, preferences: value.preferences });
-  return { schema: SCHEMA, cookies: structuredClone(value.cookies), origins: structuredClone(value.origins), ...extras };
+function schemaForVersion(version) {
+  if (version !== 1 && version !== 2) throw fail();
+  return version === 2 ? SCHEMA_V2 : SCHEMA;
 }
-function encodePortableState(value) {
-  const validated = validatePortableState(value), bytes = Buffer.from(JSON.stringify(validated));
+function validatePortableState(value, schemaVersion = 1) {
+  const schema = schemaForVersion(schemaVersion);
+  exact(value, ["schema", "cookies", "origins", "passwordVault", "preferences", ...(schemaVersion === 2 ? ["resumeTabs"] : [])]);
+  if (value.schema !== schema || !Array.isArray(value.cookies) || value.cookies.length > MAX_ROWS || !Array.isArray(value.origins) || value.origins.length > MAX_ORIGINS) throw fail();
+  boundedJson(value); const extras = validatePortableBundle({ passwordVault: value.passwordVault, preferences: value.preferences });
+  let resumeTabs;
+  if (schemaVersion === 2) { try { resumeTabs = validateResumeTabs(value.resumeTabs); } catch { throw fail(); } }
+  return { schema, cookies: structuredClone(value.cookies), origins: structuredClone(value.origins), ...extras, ...(schemaVersion === 2 ? { resumeTabs } : {}) };
+}
+function encodePortableState(value, schemaVersion = 1) {
+  const validated = validatePortableState(value, schemaVersion), bytes = Buffer.from(JSON.stringify(validated));
   if (bytes.length > MAX_BYTES) { bytes.fill(0); throw fail(); }
   return bytes;
 }
-function decodePortableState(bytes) {
+function decodePortableState(bytes, schemaVersion = 1) {
   if (!Buffer.isBuffer(bytes) || !bytes.length || bytes.length > MAX_BYTES) throw fail();
   let value; try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); } catch { throw fail(); }
-  return validatePortableState(value);
+  return validatePortableState(value, schemaVersion);
 }
-module.exports = { SCHEMA, MAX_BYTES, validatePortableVault, validatePreferences, validatePortableBundle, validatePortableState, encodePortableState, decodePortableState };
+module.exports = { SCHEMA, SCHEMA_V2, schemaForVersion, MAX_BYTES, validatePortableVault, validatePreferences, validatePortableBundle, validatePortableState, encodePortableState, decodePortableState };

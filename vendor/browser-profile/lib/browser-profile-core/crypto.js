@@ -54,7 +54,7 @@ const canonical = value => Buffer.from(JSON.stringify(sorted(value)), "utf8");
 
 function validateContext(value) {
   exact(value, CONTEXT_KEYS);
-  if (value.version !== 1 || value.schemaVersion !== 1 ||
+  if (value.version !== 1 || ![1, 2].includes(value.schemaVersion) ||
       !["profileId", "actingUserId", "transitionId"].every(key => identifier(value[key])) ||
       !["assistantId", "revision", "keyEpoch"].every(key => positive(value[key])) ||
       !(value.previousManifestHash === null || typeof value.previousManifestHash === "string" && HASH.test(value.previousManifestHash))) throw fail();

@@ -3,7 +3,9 @@ const { randomUUID, sign } = require("node:crypto");
 const { createStorageAdapter } = require("./storage");
 const { consumeStoppedHeadStageAuthorization } = require("./stopped-head-stage");
 const { sealCheckpoint, openCheckpoint, manifestHash, MAX_PLAINTEXT_BYTES } = require("./crypto");
-const { validatePortableBundle, encodePortableState, decodePortableState, SCHEMA } = require("./portable-state");
+const { validatePortableBundle, encodePortableState, decodePortableState, schemaForVersion } = require("./portable-state");
+const { validateResumeTabs, classifyResumeURL } = require("./resume-tabs");
+const pendingResumeTabs = new WeakMap(), sourceResumeApprovals = new WeakMap();
 const AUTHORITY = ["profileId", "actingUserId", "assistantId", "endpointId", "bootId", "runtimeId", "sessionId", "writerEpoch", "revision", "contentKeyEpoch", "grantVersion", "keyFingerprint"];
 const COUNTERS = new Set(["assistantId", "writerEpoch", "revision", "contentKeyEpoch", "grantVersion"]);
 const WORLD = 1007, MAX_ORIGINS = 100, MAX_MARKERS = 10000, MAX_COOKIES = 10000;
@@ -68,10 +70,10 @@ function cookieParams(row) {
 // Main-only foundation. Platform qualification is separate from these unit
 // contracts. Host code must supply physical admission/drain and serialized CDP.
 class NativeProfileRuntime {
-  constructor({ electron, authority, closeAndDrain, checkpoint, authorizeActivation, assertNoWorkers, sendCdp, createExporter, observeRequest, assertSourceTransferReady, preflightExtras, captureExtras, commitExtras, onFrame = () => {}, destroyTimeoutMs = 5000, workerTimeoutMs = 5000 }) {
+  constructor({ electron, authority, closeAndDrain, checkpoint, authorizeActivation, assertNoWorkers, sendCdp, createExporter, observeRequest, assertSourceTransferReady, captureResumeTabs, preflightExtras, captureExtras, commitExtras, onFrame = () => {}, destroyTimeoutMs = 5000, workerTimeoutMs = 5000 }) {
     if (!electron?.session?.fromPartition || !electron.app?.on || !electron.webContents?.getAllWebContents || typeof closeAndDrain !== "function" || typeof checkpoint !== "function" || typeof authorizeActivation !== "function") throw new TypeError("profile_runtime_dependencies_required");
     if ([preflightExtras, captureExtras, commitExtras].some(callback => typeof callback !== "function")) throw new TypeError("profile_runtime_extras_dependencies_required");
-    Object.assign(this, { electron, closeAndDrain, checkpoint, authorizeActivation, onFrame, assertNoWorkers, observeRequest, preflightExtras, captureExtras, commitExtras });
+    Object.assign(this, { electron, closeAndDrain, checkpoint, authorizeActivation, onFrame, assertNoWorkers, observeRequest, captureResumeTabs, preflightExtras, captureExtras, commitExtras });
     this._assertSourceTransferReady = assertSourceTransferReady;
     this.destroyTimeoutMs = Math.max(1, Math.min(10000, destroyTimeoutMs));
     this.workerTimeoutMs = Math.max(1, Math.min(10000, workerTimeoutMs));
@@ -240,7 +242,7 @@ class NativeProfileRuntime {
     return { state: this.state, authority: this.authority };
     } finally { if (this.operation === token) this.operation = null; }
   }
-  assertSourceTransferReady() {
+  assertSourceTransferReady({ schemaVersion = 1 } = {}) {
     // Check native activity synchronously before closing admission or changing
     // state. Aborting a provider POST can rotate credentials remotely while
     // losing its response, so an in-flight request is not a drain proof.
@@ -250,17 +252,47 @@ class NativeProfileRuntime {
     const ready = this._assertSourceTransferReady({ authority: this.authority, session: this.session });
     if (ready === false || ready?.then) throw fail("profile_runtime_activity_unqualified");
     validatePortableBundle(syncCall(this.preflightExtras, this, { authority: this.authority }));
+    if (schemaVersion === 2) this._captureResumeTabs();
+    else if (schemaVersion !== 1) throw fail("profile_runtime_format_refused");
     return true;
   }
+  _captureResumeTabs() {
+    if (typeof this.captureResumeTabs !== "function") throw fail("profile_native_resume_unproved");
+    return validateResumeTabs(syncCall(this.captureResumeTabs, this, { authority: this.authority, session: this.session }));
+  }
+  peekResumeTabs() { this.assertCurrent(); return pendingResumeTabs.get(this) || null; }
+  consumeResumeTabs(expected) {
+    this.assertCurrent();
+    if (!expected || pendingResumeTabs.get(this) !== expected) throw fail("profile_runtime_resume_changed");
+    pendingResumeTabs.delete(this);
+  }
+  approveResumeTabs({ context, resumeTabs, assertCurrent }) {
+    this.assertCurrent(); this._manifestContext(context, "source");
+    if (context.schemaVersion !== 2 || typeof assertCurrent !== "function" || canonical(validateResumeTabs(resumeTabs)) !== canonical(this._captureResumeTabs())) throw fail("profile_runtime_resume_changed");
+    syncCall(assertCurrent, undefined);
+    sourceResumeApprovals.set(this, { context: canonical(context), snapshot: canonical(resumeTabs), assertCurrent });
+  }
   async finalize({ context, source, destinationIdentity, contentKeyEpoch }) {
-    this.assertSourceTransferReady();
+    schemaForVersion(context?.schemaVersion);
+    this.assertSourceTransferReady({ schemaVersion: context?.schemaVersion });
     context = freeze(structuredClone(context));
+    const reviewed = sourceResumeApprovals.get(this); sourceResumeApprovals.delete(this);
+    const checkResume = snapshot => {
+      if (context.schemaVersion !== 2 || !snapshot.tabs.some(tab => classifyResumeURL(tab.url) === "review")) return;
+      if (!reviewed || reviewed.context !== canonical(context) || reviewed.snapshot !== canonical(snapshot)) throw fail("profile_runtime_resume_review_required");
+      syncCall(reviewed.assertCurrent, undefined);
+    };
+    if (context.schemaVersion === 2) checkResume(this._captureResumeTabs());
     this._inventory();
     this._manifestContext(context, "source"); const token = this._admit("finalize", ["active"]); this.state = "quiescing"; this.network = "blocked";
     let plaintext, extrasBarrier, releaseExtras;
     try {
       const barrier = await this.closeAndDrain(this.authority); this._current(token);
       if (barrier?.admissionClosed !== true || barrier?.drained !== true) throw fail("profile_runtime_drain_unproved");
+      // The native adapter's drain has frozen execution. Capture exact tab
+      // order and completed GET evidence before destroying the old documents.
+      const resumeTabs = context.schemaVersion === 2 ? this._captureResumeTabs() : undefined;
+      if (resumeTabs) checkResume(resumeTabs);
       const origins = this._inventory(); await this._destroyAll(); await this._stopBackground(token); this._inventory();
       // Old unload handlers and workers are gone before any state capture.
       extrasBarrier = syncCall(this.captureExtras, this, { authority: this.authority });
@@ -276,9 +308,11 @@ class NativeProfileRuntime {
         if (state?.origin !== origin || state?.schema !== "hoai-origin-storage-v1") throw fail("profile_storage_origin_mismatch");
         storage.push(state);
       }
-      plaintext = encodePortableState({ schema: SCHEMA, cookies: capturedCookies, origins: storage, ...extras });
+      plaintext = encodePortableState({ schema: schemaForVersion(context.schemaVersion), cookies: capturedCookies, origins: storage, ...extras,
+        ...(context.schemaVersion === 2 ? { resumeTabs } : {}) }, context.schemaVersion);
       await this._destroyAll(); await this._stopBackground(token); this.network = "blocked"; this.state = "stopped";
       syncCall(assertExtrasCurrent, undefined);
+      if (resumeTabs) checkResume(resumeTabs);
       const sealed = freeze(sealCheckpoint({ plaintext, context, source, destinationIdentity, contentKeyEpoch })), hash = manifestHash(sealed.manifest);
       const receipt = Object.freeze({ version: 1, kind: "source-stopped", profileId: context.profileId, transitionId: context.transitionId, manifestHash: hash,
         revision: context.revision, source: Object.freeze(runtimeOf(this.authority)), stopped: true });
@@ -286,6 +320,7 @@ class NativeProfileRuntime {
       this.stoppedCheckpoint = Object.freeze({ checkpoint: sealed, receipt, signature });
       const saved = await this.checkpoint(this.stoppedCheckpoint); this._current(token);
       syncCall(assertExtrasCurrent, undefined);
+      if (resumeTabs) checkResume(resumeTabs);
       if (saved?.durable !== true || saved.manifestHash !== hash) throw fail("profile_checkpoint_not_durable");
       return this.stoppedCheckpoint;
     } catch (error) {
@@ -319,7 +354,7 @@ class NativeProfileRuntime {
     let opened;
     try {
       opened = openCheckpoint({ checkpoint, expectedContext, sourceIdentity, destination });
-      const payload = decodePortableState(opened.plaintext);
+      const payload = decodePortableState(opened.plaintext, expectedContext.schemaVersion);
       const restoredCookies = cookies(payload.cookies), origins = new Set();
       for (const state of payload.origins) if (!state || !originOf(state.origin) || state.origin !== originOf(state.origin) || origins.has(state.origin)) throw fail("profile_runtime_payload_invalid"); else origins.add(state.origin);
       await this._stopBackground(token); current(); await this._privateMode(token); current();
@@ -340,6 +375,7 @@ class NativeProfileRuntime {
       const receipt = Object.freeze({ version: 1, kind: "destination-staged", profileId: expectedContext.profileId, transitionId: receiptTransitionId,
         manifestHash: manifestHash(checkpoint.manifest), revision: expectedContext.revision, destination: Object.freeze(destinationOf(this.authority)), stagedInactive: true });
       this.stagedReceipt = receipt; this.stagedExtras = freeze(validatePortableBundle({ passwordVault: payload.passwordVault, preferences: payload.preferences }));
+      if (expectedContext.schemaVersion === 2) pendingResumeTabs.set(this, validateResumeTabs(payload.resumeTabs));
       this.stagedReaddress = readdress || null;
       this.extrasCommitted = false; this.knownOrigins = origins; this.contentKeyEpoch = opened.contentKeyEpoch; opened.plaintext.fill(0); opened = null; this.state = "staged";
       return { receipt, signature: sign(null, Buffer.from(canonical(receipt)), destination.signingPrivateKey).toString("base64url"), ...(readdress ? { readdress } : {}) };
@@ -347,6 +383,8 @@ class NativeProfileRuntime {
     finally { opened?.plaintext.fill(0); opened?.contentKeyEpoch.key.fill(0); if (this.operation === token) this.operation = null; }
   }
   async dispose() {
+    pendingResumeTabs.delete(this);
+    sourceResumeApprovals.delete(this);
     this.network = "blocked"; this.state = "disposed"; this.operation = null; this.activeProof = null; this.stagedExtras = null; this.stagedReaddress = null;
     this.electron.app.removeListener("web-contents-created", this.created);
     const failures = [];
