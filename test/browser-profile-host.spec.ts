@@ -24,7 +24,7 @@ function fixture(options={}){
 afterEach(()=>vi.useRealTimers());
 describe("Codex managed browser process ownership",()=>{
   it("uses one exact IPC configuration with a sanitized child environment and private stdio",async()=>{
-    const {manager,children,spawn}=fixture();expect((await manager.synchronize(config())).state).toBe("starting");const child=children[0];
+    const {manager,children,spawn}=fixture();expect(manager.status()).toEqual({state:"idle",busy:false,activeProfiles:null,pendingWork:null});expect(await manager.synchronize(config())).toEqual({state:"starting",busy:true,activeProfiles:null,pendingWork:null});const child=children[0];
     expect(child.sent).toEqual([{type:"browser-profile-configure",configuration:configuration(config())}]);
     const options=spawn.mock.calls[0][2];expect(options.env).toEqual({PATH:"/usr/bin",HOME:"/tmp/synthetic-home"});expect(options.stdio).toEqual(["pipe","ignore","pipe","ipc"]);expect(options.execArgv).toEqual([]);
     child.ready();expect(manager.status()).toEqual({state:"running",busy:false,activeProfiles:0,pendingWork:0});await manager.synchronize(config());expect(spawn).toHaveBeenCalledTimes(1);
@@ -37,13 +37,14 @@ describe("Codex managed browser process ownership",()=>{
     const stopped=manager.stop();await tick();child.stopped();await stopped;
   });
   it("requires both its original stop receipt and actual process exit",async()=>{
-    const {manager,children}=fixture();await manager.synchronize(config());children[0].ready();let settled=false;const work=manager.stop().then(()=>{settled=true});await tick();
-    children[0].emit("message",{type:"browser-profile-stopped",code:0});await tick();expect(settled).toBe(false);expect(manager.busy).toBe(true);children[0].emit("exit",0,null);await work;expect(settled).toBe(true);
+    const {manager,children}=fixture();await manager.synchronize(config());children[0].ready();children[0].emit("message",{type:"browser-profile-state",activeProfiles:2,pendingWork:3});let settled=false;const work=manager.stop().then(()=>{settled=true});await tick();
+    expect(manager.status()).toEqual({state:"stopping",busy:true,activeProfiles:2,pendingWork:3});
+    children[0].emit("message",{type:"browser-profile-stopped",code:0});await tick();expect(settled).toBe(false);expect(manager.status()).toEqual({state:"stopping",busy:true,activeProfiles:2,pendingWork:3});children[0].emit("exit",0,null);await work;expect(settled).toBe(true);expect(manager.status()).toEqual({state:"stopped",busy:false,activeProfiles:0,pendingWork:0});
   });
   it("waits for the requested receipt when process exit is delivered first",async()=>{
-    const {manager,children}=fixture();await manager.synchronize(config());children[0].ready();let settled=false;const work=manager.revoke().then(()=>{settled=true;return "stopped"},()=>{settled=true;return "refused"});await tick();
-    children[0].emit("exit",0,null);await tick();expect(settled).toBe(false);expect(manager.busy).toBe(true);
-    children[0].emit("message",{type:"browser-profile-stopped",code:0});expect(await work).toBe("stopped");expect(manager.status().state).toBe("stopped");await manager.stop();
+    const {manager,children}=fixture();await manager.synchronize(config());children[0].ready();children[0].emit("message",{type:"browser-profile-state",activeProfiles:1,pendingWork:2});let settled=false;const work=manager.revoke().then(()=>{settled=true;return "stopped"},()=>{settled=true;return "refused"});await tick();
+    children[0].emit("exit",0,null);await tick();expect(settled).toBe(false);expect(manager.status()).toEqual({state:"stopping",busy:true,activeProfiles:1,pendingWork:2});
+    children[0].emit("message",{type:"browser-profile-stopped",code:0});expect(await work).toBe("stopped");expect(manager.status()).toEqual({state:"stopped",busy:false,activeProfiles:0,pendingWork:0});await manager.stop();
   });
   it("invalidates authorization awaiting its environment before any child exists",async()=>{
     const {manager,spawn}=fixture();let release!:(env:Record<string,string>)=>void;
@@ -64,8 +65,8 @@ describe("Codex managed browser process ownership",()=>{
     await manager.synchronize(config());expect(spawn).toHaveBeenCalledTimes(1);await expect(manager.synchronize(config({assistantIds:[42,43]}))).rejects.toThrow("browser_profile_cleanup_unconfirmed");expect(spawn).toHaveBeenCalledTimes(1);await expect(manager.stop()).rejects.toThrow();
   });
   it("retains uncertainty after a timeout even when late process exit arrives",async()=>{
-    const {manager,children,spawn}=fixture({stopTimeoutMs:10});await manager.synchronize(config());children[0].ready();await expect(manager.revoke()).rejects.toThrow("browser_profile_cleanup_unconfirmed");
-    children[0].stopped();expect(manager.status().state).toBe("recovery-required");expect(manager.busy).toBe(true);await expect(manager.synchronize(config({pairingToken:"SYNTHETIC_DIFFERENT_TOKEN_0123456789"}))).rejects.toThrow();expect(spawn).toHaveBeenCalledTimes(1);await expect(manager.stop()).rejects.toThrow();
+    const {manager,children,spawn}=fixture({stopTimeoutMs:10});await manager.synchronize(config());children[0].ready();children[0].emit("message",{type:"browser-profile-state",activeProfiles:1,pendingWork:2});await expect(manager.revoke()).rejects.toThrow("browser_profile_cleanup_unconfirmed");
+    children[0].stopped();expect(manager.status()).toEqual({state:"recovery-required",busy:true,activeProfiles:1,pendingWork:2});await expect(manager.synchronize(config({pairingToken:"SYNTHETIC_DIFFERENT_TOKEN_0123456789"}))).rejects.toThrow();expect(spawn).toHaveBeenCalledTimes(1);await expect(manager.stop()).rejects.toThrow();
   });
   it("waits for the old owned child to stop before a changed authorized catalog is configured",async()=>{
     const {manager,children,spawn}=fixture();await manager.synchronize(config());children[0].ready();const changed=manager.synchronize(config({assistantIds:[43,42]}));await tick();expect(spawn).toHaveBeenCalledTimes(1);

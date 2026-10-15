@@ -30,7 +30,7 @@ export class BrowserProfileHost {
     onState?:(status:ReturnType<BrowserProfileHost["status"]>)=>void;
   }={}){}
   get busy():boolean {if(this.queued>0)return true;const row=this.record;return Boolean(row&&(row.state!=="running"||row.activeProfiles===null||row.pendingWork===null||row.activeProfiles>0||row.pendingWork>0)&&row.state!=="stopped")}
-  status(){const row=this.record;return Object.freeze({state:row?.state??"idle",busy:this.busy,activeProfiles:row?.activeProfiles??null,pendingWork:row?.pendingWork??null})}
+  status(){const row=this.record,stopped=row?.state==="stopped";return Object.freeze({state:row?.state??"idle",busy:this.busy,activeProfiles:stopped?0:row?.activeProfiles??null,pendingWork:stopped?0:row?.pendingWork??null})}
   private changed(){try{this.options.onState?.(this.status())}catch{}}
   private async environment(){
     const supplied=this.options.hostEnvironment??await import(new URL("../vendor/browser-profile/lib/browser-env.mjs",import.meta.url).href) as HostEnvironment;
