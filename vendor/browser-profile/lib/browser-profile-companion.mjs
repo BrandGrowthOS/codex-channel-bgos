@@ -259,10 +259,21 @@ export class AgentBrowserProfileCompanion{
     if(record.stopTask){await record.stopTask;this._cached(record);record.stopTask=null}
     record.processStop=null;record.runtimeCreating=null;record.engineCreating=null;record.extrasCreating=null;record.downloadsCreating=null
     let ownedReady;record.processOwned=new Promise(resolve=>{ownedReady=resolve})
-    const preparation={};this.#preparations.set(record,preparation);let physicalRuntime
+    const preparation={};this.#preparations.set(record,preparation);let physicalRuntime,physicalContext
     const creatingCurrent=()=>{this._cached(record);if(this.closing||this.#preparations.get(record)!==preparation)throw fail('profile_companion_context_changed')}
     const authority=shared.exactAuthority(rawAuthority),binding={profileId:authority.profileId,actingUserId:authority.actingUserId,assistantId:authority.assistantId,endpointId:authority.endpointId,keyFingerprint:authority.keyFingerprint,grantVersion:authority.grantVersion,keyEpoch:authority.contentKeyEpoch,backgroundUse:true}
     const extrasCurrent=()=>{this._cached(record);if(this.#preparations.get(record)!==preparation||(physicalRuntime?record.runtime!==physicalRuntime:record.runtime!=null)||record.runtime&&!shared.sameAuthority(record.runtime.authority,authority)||['profileId','actingUserId','assistantId','endpointId','keyFingerprint'].some(key=>record.scope[key]!==authority[key]))throw fail('profile_companion_context_changed')}
+    const originalEndpoint=record.endpoint,originalIdentity=record.identity,originalEndpointIdentity=record.endpoint.identity,originalScope=Object.freeze({...record.scope})
+    const assertTransferAllowed=input=>{
+      extrasCurrent()
+      if(!physicalRuntime||record.runtime!==physicalRuntime||physicalRuntime.context!==physicalContext||input?.context!==physicalContext||!shared.sameAuthority(input?.authority,authority)||record.endpoint!==originalEndpoint||record.identity!==originalIdentity||originalEndpoint.identity!==originalEndpointIdentity||codec.identityFingerprint(originalIdentity)!==authority.keyFingerprint||codec.identityFingerprint(originalEndpointIdentity)!==authority.keyFingerprint||Object.keys(originalScope).some(key=>record.scope[key]!==originalScope[key])||!record.entry||!this._activeMatches(record,record.entry,authority))throw fail('profile_companion_transfer_changed')
+      const retirement=this.#retirements.get(record)
+      if(this.closing&&(!retirement||retirement.runtime!==physicalRuntime||retirement.endpoint!==originalEndpoint||!shared.sameAuthority(retirement.authority,authority)))throw fail('profile_companion_transfer_changed')
+      if(!['active','stopping'].includes(record.admission)||record.uncertain||record.permissionAbort||this.#permissionCleanupUnknown.has(record)||record.engineTasks.size!==0||physicalRuntime.state!=='active'||physicalRuntime.network!=='active')throw fail('profile_companion_transfer_busy')
+      for(const map of [this.#fileRunners,this.#fieldRunners]){const runner=map.get(record)?.runner;if(runner){const value=runner.activity();if(!Number.isSafeInteger(value?.pendingPhysicalOperations)||value.pendingPhysicalOperations!==0||value.cleanupUnknown!==false||value.outcomeUnknown!==undefined&&value.outcomeUnknown!==false)throw fail('profile_companion_transfer_busy')}}
+      const backup=this.#backups.get(record),backupActivity=backup?.runner?.activity();if(backup&&(backup.cleanupUnknown||backup.runner&&(!Number.isSafeInteger(backupActivity?.pendingPhysicalOperations)||backupActivity.pendingPhysicalOperations<0||backupActivity.cleanupUnknown!==false)))throw fail('profile_companion_transfer_busy')
+      physicalRuntime.assertCurrent();this.#downloads.get(record)?.binding.assertIdle();return true
+    }
     record.journal=this._journal(record);record.journalScope=pick(binding,['actingUserId','assistantId','profileId','endpointId','keyFingerprint','grantVersion'])
     try{
       record.extrasCreating=this._trackPhysical(record,'extras-load',Promise.resolve().then(()=>{creatingCurrent();return this.preloadExtras({directory:path.join(this.directory,'runtime-extras',authority.runtimeId,authority.sessionId),binding,pinnedIdentity:record.identity,keyStore:this.keyStore,assertCurrent:extrasCurrent,createNew:true})}).then(extras=>{record.extras=extras;return extras}))
@@ -273,12 +284,13 @@ export class AgentBrowserProfileCompanion{
       record.runtimeCreating=this._trackPhysical(record,'runtime-create',Promise.resolve().then(()=>{creatingCurrent();return this.createRuntime({chromium,executable,environment:this.environment,authority,transferQualificationFactory:createChromiumRtcActivity,
         ...(this.#downloads.has(record)?{downloads:this.#downloads.get(record).manager}:{}),
         selectedPage:()=>{extrasCurrent();return record.engine?.selectedPage?.()??null},
+        assertTransferAllowed,
         authorizeReviewedResume:input=>this._authorizeReviewedResume(record,physicalRuntime,input),
         onOwnedProcess:capability=>{if(record.processStop&&record.processStop!==capability)throw fail('profile_companion_process_replaced');record.processStop=capability;ownedReady();creatingCurrent()},
         preflightExtras:input=>record.extras.preflightExtras(input),captureExtras:input=>record.extras.captureExtras(input),commitExtras:input=>record.extras.commitExtras(input),
         closeAndDrain:async()=>{this.#downloads.get(record)?.binding.assertIdle();record.admission='stopping';record.permissionAbort?.abort();await this._drainCommands(record);this._cached(record);return{admissionClosed:true,drained:true}},
         checkpoint:async stopped=>{this._cached(record);const hash=codec.manifestHash(stopped.checkpoint.manifest),saved=await record.journal.write({scope:record.journalScope,checkpoint:stopped.checkpoint,manifestHash:hash,receipt:stopped.receipt,receiptSignature:stopped.signature,assertCurrent:()=>this._cached(record)});if(!saved.durability.fileSynced||!saved.durability.directorySynced)throw fail('profile_companion_journal_unproved');const read=await record.journal.read({scope:record.journalScope,expectedHead:{manifestHash:hash,revision:stopped.checkpoint.manifest.revision,keyEpoch:stopped.checkpoint.manifest.keyEpoch},assertCurrent:()=>this._cached(record)});if(!read||!same(read.checkpoint,stopped.checkpoint))throw fail('profile_companion_journal_unproved');return{durable:true,manifestHash:hash}},
-        authorizeActivation:async()=>{const entry=await this._discover(record);if(!this._activeMatches(record,entry,authority))throw fail('profile_companion_authority_changed');return{authority,assertCurrent:()=>this._cached(record)}}})}).then(runtime=>{physicalRuntime=runtime;record.runtime=runtime;return runtime}))
+        authorizeActivation:async()=>{const entry=await this._discover(record);if(!this._activeMatches(record,entry,authority))throw fail('profile_companion_authority_changed');return{authority,assertCurrent:()=>this._cached(record)}}})}).then(runtime=>{physicalRuntime=runtime;physicalContext=runtime.context;record.runtime=runtime;return runtime}))
       await record.runtimeCreating;creatingCurrent()
     }catch(error){ownedReady();await this._dispose(record);throw error}finally{ownedReady()}
   }
