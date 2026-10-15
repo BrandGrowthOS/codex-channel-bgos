@@ -3,7 +3,7 @@
   "files": {
     "policy.js": {
       "source": "BGOS: frontend/electron-app/agent-browser/policy.js",
-      "sha256": "7541a0c32fd5dd1b21ee0e67ba5df11ec7a9fc8e5222e422da8620cbf4f3c6bc"
+      "sha256": "8219e9b39276b9ef90fb6288c80872b1b8c4f968fd21bde6fa79a0fe4cbc0048"
     },
     "settings.js": {
       "source": "BGOS: frontend/electron-app/agent-browser/settings.js",
@@ -15,8 +15,9 @@
       "whyThisOneToo": "It owns WHERE a remembered answer is stored (agentGrants per agent key, the legacy alwaysGrants overlay, withAlwaysGrant, withTrustGrant, withoutTrustGrant). Without it the daemon host would have had to re-implement that shape, and 'Always allow' meaning two different things on two machines is the same class of drift the policy copy exists to prevent."
     }
   },
-  "vendoredAt": "2026-09-24, policy.js re vendored 2026-09-24 for the truthful trail (BGOS #1634)",
+  "vendoredAt": "2026-10-15, policy.js re vendored from BGOS d1bcd4e2b for current permission intent wording",
   "whyADirectory": "settings.js and profiles.js both do require(\"./policy\"), so the copies keep their ORIGINAL filenames and sit together. package.json here pins type=commonjs, because the plugin root declares type=module and these files are CommonJS.",
   "howToUpdate": "Re-copy all three from the BGOS paths above, rerun the hashes, update this file, and run: HOAI_BROWSER_HOST_CORE_SOURCE=<BGOS agent-browser dir> npx tsx --test test/browser-host-core.vendor.test.ts",
-  "theHalfThisCannotSee": "Nothing here fires when the BGOS originals change and these copies do not. That check lives on the BGOS side in frontend/electron-app/agent-browser/__tests__/hostCoreVendorPin.test.js, which pins the same two hashes."
+  "theHalfThisCannotSee": "Nothing here fires when the BGOS originals change and these copies do not. That check lives on the BGOS side in frontend/electron-app/agent-browser/__tests__/hostCoreVendorPin.test.js, which pins the same two hashes.",
+  "sourceCommit": "d1bcd4e2b7cfc14df3e37dc367fd6a0184f75cba"
 }

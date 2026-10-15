@@ -23,6 +23,14 @@ describe("the shared managed browser runtime shipped to Codex",()=>{
     const host=await import(pathToFileURL(join(vendor,manifest.entry)).href),companion=await import(pathToFileURL(join(vendor,"lib/browser-profile-companion.mjs")).href);
     expect(typeof host.BrowserHost).toBe("function");expect(typeof host.PairingConnection).toBe("function");expect(typeof host.PlaywrightEngine).toBe("function");expect(typeof companion.AgentBrowserProfileCompanion).toBe("function");expect(host.isRunAsMain(import.meta.filename)).toBe(false);
   });
+  it("admits the installed exact browser bundle and rejects a different runtime version",async()=>{
+    const declared=JSON.parse(readFileSync(join(root,"package.json"),"utf8"));
+    const pin=JSON.parse(readFileSync(join(vendor,"lib/browser-profile-launch.pin.json"),"utf8"));
+    expect(declared.dependencies["playwright-core"]).toBe(pin.playwrightVersion);
+    const {profileLaunchArguments}=await import(pathToFileURL(join(vendor,"lib/browser-profile-launch.mjs")).href);
+    expect(profileLaunchArguments().args).toHaveLength(1);
+    expect(()=>profileLaunchArguments({version:"0.0.0"})).toThrow("profile_browser_version_unqualified");
+  });
   it("checks its declared upstream commit when the source checkout is available",()=>{
     const source=process.env.HOAI_BROWSER_PROFILE_PLUGIN_SOURCE;
     if(!source)return; // Local byte pin above always runs on CI without the private sibling checkout.

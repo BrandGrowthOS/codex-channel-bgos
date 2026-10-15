@@ -15,6 +15,10 @@ import { AgentRuntimePermissionRunner } from './browser-profile-permission-runne
 import { AgentReturnIntentClient } from './browser-profile-return-client.mjs'
 import { AgentReturnHandover } from './browser-profile-return-handover.mjs'
 import { AgentProfileFiles, AGENT_PROFILE_FILE_TOOLS } from './browser-profile-files.mjs'
+import { AgentProfileFieldInput } from './browser-profile-field-input.mjs'
+import { AgentProfileDownloads } from './browser-profile-downloads.mjs'
+import { createRuntimeDownloadBinding } from './browser-profile-downloads-runtime.mjs'
+import { AgentActiveBackup } from './browser-profile-active-backup.mjs'
 const require=createRequire(import.meta.url),codec=require('./browser-profile-core/crypto.js'),shared=require('./browser-profile-core/coordinator-client.js')
 const {EncryptedCheckpointStore}=require('./browser-profile-core/checkpoint-store.js'),{ProfileRuntimeStatusClient}=require('./browser-profile-core/runtime-status-client.js')
 const {createAgentStoppedHeadStageAuthorization,verifyAgentStoppedHeadJournalRecord}=require('./browser-profile-core/stopped-head-stage.js')
@@ -40,7 +44,10 @@ export class AgentBrowserProfileCompanion{
   #activations=new WeakMap()
   #proofs=new WeakMap()
   #fileRunners=new WeakMap()
-  constructor({connection,agentRoot,deviceLabel,environment=process.env,loadBrowser,createEngine,createRelay,assertNoLegacyActive=()=>true,log=/** @type {(line:string)=>void} */(()=>{}),client,keyStore,stateStore,createRuntime=options=>BrowserProfileRuntime.create(options),preloadExtras=options=>BrowserProfilePortableExtrasStore.preload(options),statusClient,permissionClient=/** @type {any} */(null),permissionRunner=/** @type {any} */(null),returnClient=/** @type {any} */(null),returnHandover=/** @type {any} */(null),createFiles=options=>new AgentProfileFiles(options)}){
+  #fieldRunners=new WeakMap()
+  #downloads=new WeakMap()
+  #backups=new WeakMap()
+  constructor({connection,agentRoot,deviceLabel,environment=process.env,loadBrowser,createEngine,createRelay,assertNoLegacyActive=()=>true,log=/** @type {(line:string)=>void} */(()=>{}),client,keyStore,stateStore,createRuntime=options=>BrowserProfileRuntime.create(options),preloadExtras=options=>BrowserProfilePortableExtrasStore.preload(options),statusClient,permissionClient=/** @type {any} */(null),permissionRunner=/** @type {any} */(null),returnClient=/** @type {any} */(null),returnHandover=/** @type {any} */(null),createFiles=options=>new AgentProfileFiles(options),createFields=options=>new AgentProfileFieldInput(options),createDownloads=options=>process.platform==='linux'?AgentProfileDownloads.create(options):null,createBackups=options=>options.runtime instanceof BrowserProfileRuntime?new AgentActiveBackup(options):null}){
     if(!connection||typeof loadBrowser!=='function'||typeof createEngine!=='function'||typeof createRelay!=='function'||!path.isAbsolute(agentRoot))throw fail('profile_companion_configuration_invalid')
     Object.assign(this,{connection,deviceLabel,environment,loadBrowser,createEngine,createRelay,assertNoLegacyActive,log,createRuntime,preloadExtras});this.token=connection.pairing.token;this.bootId=connection.bootId
     const pairingSnapshot={backendUrl:connection.pairing.backendUrl,pairingId:connection.pairing.pairingId,ownerUserId:connection.pairing.ownerUserId,assistantIds:JSON.stringify(connection.pairing.assistantIds)}
@@ -56,7 +63,7 @@ export class AgentBrowserProfileCompanion{
     this.permissionRunner=permissionRunner||new AgentRuntimePermissionRunner({client:this.permissionClient})
     this.returnClient=returnClient||new AgentReturnIntentClient({origin:connection.pairing.backendUrl,authorizePairing})
     this.returnHandover=returnHandover||new AgentReturnHandover({client:this.returnClient})
-    this.createFiles=createFiles;this.fileClientFactory=()=>new ProfileFileClient({origin:connection.pairing.backendUrl,principal:'paired',authorize:authorizePairing})
+    this.createFiles=createFiles;this.createFields=createFields;this.createDownloads=createDownloads;this.createBackups=createBackups;this.authorizeBackups=authorizePairing;this.fileClientFactory=()=>new ProfileFileClient({origin:connection.pairing.backendUrl,principal:'paired',authorize:authorizePairing})
   }
   _status(record,state){const key=record?.scope?.endpointId||'setup';if(this.lastState.get(key)===state)return;this.lastState.set(key,state);this.log(`managed browser ${record?.scope?.assistantId||''}: ${state}`)}
   _trackPhysical(record,kind,work){
@@ -73,6 +80,9 @@ export class AgentBrowserProfileCompanion{
       if(this.#proofs.get(record)?.pending)pendingPhysicalOperations++
       if(record.statusClient?.physical)pendingPhysicalOperations++
       const files=this.#fileRunners.get(record);if(files){try{const value=files.runner.activity();if(!Number.isSafeInteger(value?.pendingPhysicalOperations)||value.pendingPhysicalOperations<0||typeof value.cleanupUnknown!=='boolean')throw fail('profile_file_cleanup_unconfirmed');pendingPhysicalOperations+=value.pendingPhysicalOperations;cleanupUnknown||=value.cleanupUnknown}catch{pendingPhysicalOperations++;cleanupUnknown=true}}
+      const fields=this.#fieldRunners.get(record);if(fields){try{const value=fields.runner.activity();if(!Number.isSafeInteger(value?.pendingPhysicalOperations)||value.pendingPhysicalOperations<0||typeof value.cleanupUnknown!=='boolean')throw fail('profile_field_cleanup_unconfirmed');pendingPhysicalOperations+=value.pendingPhysicalOperations;cleanupUnknown||=value.cleanupUnknown}catch{pendingPhysicalOperations++;cleanupUnknown=true}}
+      const downloads=this.#downloads.get(record);if(downloads){const value=downloads.binding.activity();pendingPhysicalOperations+=value.pendingPhysicalOperations;cleanupUnknown||=value.cleanupUnknown}
+      const backup=this.#backups.get(record);if(backup){try{const value=backup.runner?.activity();if(value){if(!Number.isSafeInteger(value.pendingPhysicalOperations)||value.pendingPhysicalOperations<0||typeof value.cleanupUnknown!=='boolean')throw fail('profile_backup_cleanup_unknown');pendingPhysicalOperations+=value.pendingPhysicalOperations;cleanupUnknown||=value.cleanupUnknown}cleanupUnknown||=backup.cleanupUnknown}catch{pendingPhysicalOperations++;cleanupUnknown=true}}
       if(this.#permissionCleanupUnknown.has(record))cleanupUnknown=true
     }
     if(this.pending)pendingPhysicalOperations++;if(this.statusClient?.physical)pendingPhysicalOperations++
@@ -85,13 +95,46 @@ export class AgentBrowserProfileCompanion{
   hasNamespace(input){return typeof input?.principal==='string'&&[...this.records.values(),...this.candidates.values()].some(record=>record.scope.assistantId===input.assistantId&&`user-${record.scope.actingUserId}`===input.principal)}
   _cached(record){this.check();if(record.revoked||this.records.get(record.scope.endpointId)!==record)throw fail('profile_companion_context_changed');return true}
   _newWork(){this.check();if(this.closing)throw fail('profile_companion_context_changed');return true}
-  _admit(record){this._cached(record);if(this.closing||record.admission!=='active'||record.uncertain||this.#permissionCleanupUnknown.has(record))throw fail('profile_companion_authority_unknown');record.runtime.assertCurrent();return true}
-  async _drainCommands(record){await Promise.allSettled([...record.engineTasks]);await this.#fileRunners.get(record)?.runner.whenDrained();if(record.engineTasks.size||this.#permissionCleanupUnknown.has(record))throw fail('profile_companion_command_drain_unconfirmed')}
+  _backupCurrent(record,binding,capture=false){
+    this._admit(record)
+    if(this.#backups.get(record)!==binding||binding.stopped||record.runtime!==binding.runtime||record.runtime.context!==binding.context||record.engine!==binding.engine||record.endpoint!==binding.endpoint||record.extras!==binding.extras||!shared.sameAuthority(record.runtime.authority,binding.authority)||Object.keys(binding.scope).some(key=>record.scope[key]!==binding.scope[key]))throw fail('profile_backup_context_changed')
+    if(capture){if(binding.pauseWanted||record.engineTasks.size)throw fail('profile_backup_source_busy');this.#downloads.get(record)?.binding.assertIdle();for(const map of [this.#fileRunners,this.#fieldRunners]){const value=map.get(record)?.runner.activity();if(value&&(value.pendingPhysicalOperations||value.cleanupUnknown||value.outcomeUnknown))throw fail('profile_backup_source_busy')}}
+    return true
+  }
+  _startBackups(record){
+    if(this.#backups.has(record))return this.#backups.get(record).creating
+    const binding={runtime:record.runtime,context:record.runtime.context,engine:record.engine,endpoint:record.endpoint,extras:record.extras,authority:shared.exactAuthority(record.runtime.authority),scope:Object.freeze({...record.scope}),runner:null,creating:null,listeners:[],watched:new Set(),stopped:false,pauseWanted:false,pauseWork:null,stopWork:null,cleanupUnknown:false};this.#backups.set(record,binding)
+    const current=()=>this._backupCurrent(record,binding,true),base=()=>this._backupCurrent(record,binding),hint=()=>{try{current();binding.runner?.notify()}catch{}},listen=(target,event,callback)=>{binding.listeners.push({target,event,callback});target.on(event,callback)},watch=page=>{if(binding.watched.has(page)||binding.watched.size>=32)return;binding.watched.add(page);listen(page,'framenavigated',hint)}
+    const task=Promise.resolve().then(async()=>{
+      base();const runner=await this._trackPhysical(record,'backup-create',Promise.resolve().then(()=>this.createBackups({origin:this.connection.pairing.backendUrl,directory:path.join(this.directory,'active-backups',createHash('sha256').update(shared.canonical(pick(binding.scope,['profileId','actingUserId','assistantId','endpointId','keyFingerprint']))).digest('hex')),endpoint:binding.endpoint,authority:binding.authority,ownerUserId:binding.scope.ownerUserId,pairingId:binding.scope.pairingId,runtime:binding.runtime,assertCurrent:current,authorizePairing:this.authorizeBackups,peerIdentities:async check=>{check();current();const peers=await new AgentProfilePeerPins({directory:path.join(this.directory,'peer-pins',binding.scope.endpointId)}).list({scope:binding.scope,ownIdentity:binding.endpoint.identity,assertCurrent:()=>{check();current()}});check();current();return peers},readExtras:()=>{current();return binding.extras.preflightExtras({authority:binding.authority})},currentContentKey:()=>{current();return record.contentKeyEpoch||binding.runtime.contentKeyEpoch}})))
+      binding.runner=runner;base();if(!runner)return
+      listen(binding.context,'requestfinished',hint);listen(binding.context,'page',page=>{try{base();watch(page);hint()}catch{void this._stopBackups(record).catch(()=>{})}});for(const page of binding.context.pages().slice(0,32))watch(page);if(!binding.pauseWanted&&!record.engineTasks.size)runner.start()
+    }).catch(error=>{void this._stopBackups(record).catch(()=>{});throw error});binding.creating=task;void task.catch(()=>{});return task
+  }
+  _pauseBackups(record){
+    const binding=this.#backups.get(record);if(!binding)return Promise.resolve({drained:true});binding.pauseWanted=true;if(binding.pauseWork)return binding.pauseWork
+    let immediate;try{if(binding.runner)immediate=binding.runner.pause()}catch(error){immediate=Promise.reject(error)}if(immediate)void Promise.resolve(immediate).catch(()=>{})
+    const task=Promise.resolve().then(async()=>{await binding.creating.catch(()=>{});if(!immediate&&binding.runner)immediate=binding.runner.pause();const receipt=await immediate;if(binding.cleanupUnknown||binding.runner&&receipt?.drained!==true)throw fail('profile_backup_cleanup_unknown');return{drained:true}}).catch(error=>{binding.cleanupUnknown=true;throw error});binding.pauseWork=this._trackPhysical(record,'backup-pause',task);return binding.pauseWork
+  }
+  _resumeBackups(record){const binding=this.#backups.get(record);if(!binding||!binding.runner||binding.stopped)return;this._backupCurrent(record,binding);if(record.engineTasks.size)return;binding.pauseWanted=false;try{binding.runner.start();binding.pauseWork=null}catch(error){binding.pauseWanted=true;throw error}}
+  _stopBackups(record){
+    const binding=this.#backups.get(record);if(!binding)return Promise.resolve();binding.stopped=true;binding.pauseWanted=true;if(binding.stopWork)return binding.stopWork
+    let stopping;try{if(binding.runner)stopping=binding.runner.dispose()}catch(error){stopping=Promise.reject(error)}if(stopping)void Promise.resolve(stopping).catch(()=>{})
+    const task=Promise.resolve().then(async()=>{await binding.creating.catch(()=>{});const cleanup=[()=>stopping??binding.runner?.dispose(),...binding.listeners.splice(0).map(({target,event,callback})=>()=>target.removeListener(event,callback))];const results=await Promise.allSettled(cleanup.map(callback=>Promise.resolve().then(callback)));if(results.some(result=>result.status==='rejected')||binding.cleanupUnknown){binding.cleanupUnknown=true;throw fail('profile_backup_cleanup_unknown')}});binding.stopWork=this._trackPhysical(record,'backup-stop',task);return binding.stopWork
+  }
+  _admit(record){this._cached(record);const backup=this.#backups.get(record);if(this.closing||record.admission!=='active'||record.uncertain||this.#permissionCleanupUnknown.has(record)||backup?.cleanupUnknown||backup?.runner?.activity().cleanupUnknown)throw fail('profile_companion_authority_unknown');this.#downloads.get(record)?.binding.assertAvailable();record.runtime.assertCurrent();return true}
+  async _drainCommands(record){await Promise.allSettled([...record.engineTasks]);const results=await Promise.allSettled([()=>this.#fileRunners.get(record)?.runner.whenDrained(),()=>this.#fieldRunners.get(record)?.runner.whenDrained(),()=>this.#downloads.get(record)?.binding.whenDrained(),()=>this._pauseBackups(record)].map(callback=>Promise.resolve().then(callback)));if(results.some(result=>result.status==='rejected')||record.engineTasks.size||this.#permissionCleanupUnknown.has(record))throw fail('profile_companion_command_drain_unconfirmed')}
+  _fieldRunner(record){
+    this._admit(record);const runtime=record.runtime,engine=record.engine,endpoint=record.endpoint,authority=shared.exactAuthority(runtime.authority),existing=this.#fieldRunners.get(record)
+    if(existing){if(existing.runtime!==runtime||existing.engine!==engine||existing.endpoint!==endpoint||!shared.sameAuthority(existing.authority,authority))throw fail('profile_companion_context_changed');return existing.runner}
+    const check=()=>{this._admit(record);if(record.runtime!==runtime||record.engine!==engine||record.endpoint!==endpoint||!shared.sameAuthority(runtime.authority,authority)||['profileId','actingUserId','assistantId','endpointId','keyFingerprint'].some(key=>record.scope[key]!==authority[key]))throw fail('profile_companion_context_changed')}
+    const runner=this.createFields({engine,runtime,assertCurrent:check});this.#fieldRunners.set(record,{runtime,engine,endpoint,authority,runner});return runner
+  }
   _fileRunner(record){
     this._admit(record);const runtime=record.runtime,engine=record.engine,endpoint=record.endpoint,authority=shared.exactAuthority(runtime.authority),existing=this.#fileRunners.get(record)
     if(existing){if(existing.runtime!==runtime||existing.engine!==engine||existing.endpoint!==endpoint||!shared.sameAuthority(existing.authority,authority))throw fail('profile_companion_context_changed');return existing.runner}
     const check=()=>{this._admit(record);if(record.runtime!==runtime||record.engine!==engine||record.endpoint!==endpoint||!shared.sameAuthority(runtime.authority,authority)||['profileId','actingUserId','assistantId','endpointId','keyFingerprint'].some(key=>record.scope[key]!==authority[key]))throw fail('profile_companion_context_changed')}
-    const runner=this.createFiles({client:this.fileClientFactory(),authority,endpoint,directory:path.join(this.directory,'artifacts',authority.runtimeId,'file-exchanges',createHash('sha256').update(shared.canonical(authority)).digest('hex')),peerIdentities:async current=>{current();check();const identities=await new AgentProfilePeerPins({directory:path.join(this.directory,'peer-pins',record.scope.endpointId)}).list({scope:record.scope,ownIdentity:record.identity,assertCurrent:()=>{current();check()}});current();check();return identities},assertCurrent:check})
+    const runner=this.createFiles({client:this.fileClientFactory(),authority,endpoint,downloads:this.#downloads.get(record)?.manager,directory:path.join(this.directory,'artifacts',authority.runtimeId,'file-exchanges',createHash('sha256').update(shared.canonical(authority)).digest('hex')),peerIdentities:async current=>{current();check();const identities=await new AgentProfilePeerPins({directory:path.join(this.directory,'peer-pins',record.scope.endpointId)}).list({scope:record.scope,ownIdentity:record.identity,assertCurrent:()=>{current();check()}});current();check();return identities},assertCurrent:check})
     this.#fileRunners.set(record,{runtime,engine,endpoint,authority,runner});return runner
   }
   _binding(record,entry){return{profileId:record.scope.profileId,actingUserId:record.scope.actingUserId,assistantId:record.scope.assistantId,endpointId:record.scope.endpointId,keyFingerprint:record.scope.keyFingerprint,grantVersion:entry.grant.generation,keyEpoch:entry.profile.contentKeyEpoch,backgroundUse:true}}
@@ -103,7 +146,7 @@ export class AgentBrowserProfileCompanion{
     if(this.stopped||this.closing)return Promise.resolve()
     const tasks=[]
     for(const record of this.records.values())if(record.runtime?.state==='active'&&!this.#activations.has(record)){
-      if(!record.monitorTask){const task=this._active(record).catch(error=>{if(!record.revoked)record.admission='unknown';this._status(record,genericError(error))});record.monitorTask=task;void task.finally(()=>{if(record.monitorTask===task)record.monitorTask=null}).catch(()=>{})}
+      if(!record.monitorTask){const task=this._active(record).catch(error=>{if(!record.revoked){void this._pauseBackups(record).catch(()=>{});record.admission='unknown'};this._status(record,genericError(error))});record.monitorTask=task;void task.finally(()=>{if(record.monitorTask===task)record.monitorTask=null}).catch(()=>{})}
       tasks.push(record.monitorTask)
     }
     return Promise.allSettled(tasks)
@@ -171,10 +214,10 @@ export class AgentBrowserProfileCompanion{
       try{
         const result=await this.returnHandover.start({scope:record.scope,endpoint,authority,runtime,status,expectedHeadManifestHash:record.entry.profile.headManifestHash,peerPins:record.peerPins,contentKeyEpoch:record.contentKeyEpoch||runtime.contentKeyEpoch,assertCurrent:check,
           verifyCurrentAuthority:async()=>{check();const entry=await this._discover(record);check();if(!this._activeMatches(record,entry,authority)||entry.profile.headManifestHash!==status.request.expectedHeadManifestHash)throw fail('profile_return_source_changed');return true},
-          closeAdmission:()=>{check();record.admission='stopping';record.permissionAbort?.abort();record.rpc?.disconnect();return{admissionClosed:true}},
-          drain:async()=>{await Promise.all([record.rpc.whenDrained(),this.permissionClient.whenDrained()]);await this._drainCommands(record);this.permissionRunner.assertCleanupConfirmed();check();return{drained:true}},
+          closeAdmission:()=>{check();void this._pauseBackups(record).catch(()=>{});record.admission='stopping';record.permissionAbort?.abort();record.rpc?.disconnect();return{admissionClosed:true}},
+          drain:async()=>{await this._pauseBackups(record);await Promise.all([record.rpc.whenDrained(),this.permissionClient.whenDrained()]);await this._drainCommands(record);this.permissionRunner.assertCleanupConfirmed();check();return{drained:true}},
           readJournal:expectedHead=>record.journal.read({scope:record.journalScope,expectedHead,assertCurrent:check}),
-          resumeAdmission:()=>{check();if(runtime.state!=='active'||runtime.network!=='active')throw fail('profile_return_source_changed');record.admission='active';return true}})
+          resumeAdmission:()=>{check();if(runtime.state!=='active'||runtime.network!=='active')throw fail('profile_return_source_changed');record.admission='active';this._resumeBackups(record);return true}})
         check();record.state='returned';await this._dispose(record);this._status(record,'return_'+result.state)
       }catch(error){
         const state=this.returnHandover.state(record.returnRequestId)
@@ -214,7 +257,7 @@ export class AgentBrowserProfileCompanion{
     this._cached(record);if(this.closing)throw fail('profile_companion_context_changed');if([...this.records.values()].filter(value=>value.runtime).length>=4)throw fail('profile_companion_runtime_capacity')
     const legacy=this.assertNoLegacyActive(record.scope);if(legacy?.then){void Promise.resolve(legacy).catch(()=>{});throw fail('profile_companion_legacy_runtime_active')}if(legacy!==true)throw fail('profile_companion_legacy_runtime_active')
     if(record.stopTask){await record.stopTask;this._cached(record);record.stopTask=null}
-    record.processStop=null;record.runtimeCreating=null;record.engineCreating=null;record.extrasCreating=null
+    record.processStop=null;record.runtimeCreating=null;record.engineCreating=null;record.extrasCreating=null;record.downloadsCreating=null
     let ownedReady;record.processOwned=new Promise(resolve=>{ownedReady=resolve})
     const preparation={};this.#preparations.set(record,preparation);let physicalRuntime
     const creatingCurrent=()=>{this._cached(record);if(this.closing||this.#preparations.get(record)!==preparation)throw fail('profile_companion_context_changed')}
@@ -224,13 +267,16 @@ export class AgentBrowserProfileCompanion{
     try{
       record.extrasCreating=this._trackPhysical(record,'extras-load',Promise.resolve().then(()=>{creatingCurrent();return this.preloadExtras({directory:path.join(this.directory,'runtime-extras',authority.runtimeId,authority.sessionId),binding,pinnedIdentity:record.identity,keyStore:this.keyStore,assertCurrent:extrasCurrent,createNew:true})}).then(extras=>{record.extras=extras;return extras}))
       await record.extrasCreating;creatingCurrent()
+      record.downloadsCreating=this._trackPhysical(record,'downloads-create',Promise.resolve().then(()=>{creatingCurrent();return this.createDownloads({directory:path.join(this.directory,'quarantine',createHash('sha256').update(shared.canonical(authority)).digest('hex')),authority,assertCurrent:extrasCurrent,isActive:()=>!this.closing&&!record.revoked&&!record.uncertain&&this.connection.socket?.connected===true&&record.admission==='active'&&physicalRuntime?.state==='active'&&physicalRuntime.network==='active'})}).then(manager=>{if(manager!==null){const binding=createRuntimeDownloadBinding(manager,authority);this.#downloads.set(record,{manager,binding,authority,preparation})}else this._status(record,'managed_downloads_unavailable: agent platform has no qualified private download folder');return manager}))
+      await record.downloadsCreating;creatingCurrent()
       const {chromium,executable}=await this.loadBrowser();creatingCurrent()
       record.runtimeCreating=this._trackPhysical(record,'runtime-create',Promise.resolve().then(()=>{creatingCurrent();return this.createRuntime({chromium,executable,environment:this.environment,authority,transferQualificationFactory:createChromiumRtcActivity,
+        ...(this.#downloads.has(record)?{downloads:this.#downloads.get(record).manager}:{}),
         selectedPage:()=>{extrasCurrent();return record.engine?.selectedPage?.()??null},
         authorizeReviewedResume:input=>this._authorizeReviewedResume(record,physicalRuntime,input),
         onOwnedProcess:capability=>{if(record.processStop&&record.processStop!==capability)throw fail('profile_companion_process_replaced');record.processStop=capability;ownedReady();creatingCurrent()},
         preflightExtras:input=>record.extras.preflightExtras(input),captureExtras:input=>record.extras.captureExtras(input),commitExtras:input=>record.extras.commitExtras(input),
-        closeAndDrain:async()=>{record.admission='stopping';record.permissionAbort?.abort();await this._drainCommands(record);this._cached(record);return{admissionClosed:true,drained:true}},
+        closeAndDrain:async()=>{this.#downloads.get(record)?.binding.assertIdle();record.admission='stopping';record.permissionAbort?.abort();await this._drainCommands(record);this._cached(record);return{admissionClosed:true,drained:true}},
         checkpoint:async stopped=>{this._cached(record);const hash=codec.manifestHash(stopped.checkpoint.manifest),saved=await record.journal.write({scope:record.journalScope,checkpoint:stopped.checkpoint,manifestHash:hash,receipt:stopped.receipt,receiptSignature:stopped.signature,assertCurrent:()=>this._cached(record)});if(!saved.durability.fileSynced||!saved.durability.directorySynced)throw fail('profile_companion_journal_unproved');const read=await record.journal.read({scope:record.journalScope,expectedHead:{manifestHash:hash,revision:stopped.checkpoint.manifest.revision,keyEpoch:stopped.checkpoint.manifest.keyEpoch},assertCurrent:()=>this._cached(record)});if(!read||!same(read.checkpoint,stopped.checkpoint))throw fail('profile_companion_journal_unproved');return{durable:true,manifestHash:hash}},
         authorizeActivation:async()=>{const entry=await this._discover(record);if(!this._activeMatches(record,entry,authority))throw fail('profile_companion_authority_changed');return{authority,assertCurrent:()=>this._cached(record)}}})}).then(runtime=>{physicalRuntime=runtime;record.runtime=runtime;return runtime}))
       await record.runtimeCreating;creatingCurrent()
@@ -288,7 +334,8 @@ export class AgentBrowserProfileCompanion{
     const runtime=record.runtime,check=()=>{this._cached(record);if(this.closing||token.cancelled||this.#activations.get(record)!==token||record.runtime!==runtime||runtime!==token.runtime||!shared.sameAuthority(runtime.authority,authority))throw fail('profile_companion_context_changed')}
     check();const entry=await this._discover(record);check();if(!this._activeMatches(record,entry,authority))throw fail('profile_companion_authority_changed')
     await runtime.activate(authority);check();const selected=runtime.restoredSelectedPage?.();if(!selected)await runtime.newPage();check()
-    record.engineCreating=this._trackPhysical(record,'engine-create',Promise.resolve().then(()=>this.createEngine({runtime,directory:path.join(this.directory,'artifacts',authority.runtimeId)})).then(engine=>{record.engine=engine;return engine}));await record.engineCreating;check()
+    const downloads=this.#downloads.get(record),onDownload=downloads?download=>{if(this.#downloads.get(record)!==downloads||record.runtime!==runtime)throw fail('profile_companion_context_changed');downloads.binding.onDownload(download)}:undefined
+    record.engineCreating=this._trackPhysical(record,'engine-create',Promise.resolve().then(()=>this.createEngine({runtime,directory:path.join(this.directory,'artifacts',authority.runtimeId),...(onDownload?{onDownload}:{})})).then(engine=>{record.engine=engine;return engine}));await record.engineCreating;check()
     if(selected){if(typeof record.engine.selectPage!=='function')throw fail('profile_resume_selection_unproved');await record.engine.selectPage(selected);check();if(record.engine.selectedPage()!==selected)throw fail('profile_resume_selection_unproved')}
     const currentExecution=()=>{const execution=this.#executions.getStore();if(!execution||execution.record!==record)throw fail('profile_companion_context_changed');execution.check();return execution}
     record.relay=this.createRelay({roster:()=>{currentExecution();return [...managedFileRoster(record.engine.roster()),...AGENT_PROFILE_FILE_TOOLS]},callTool:(_context,name,args,signal)=>{currentExecution();return this._tool(record,name,args,signal)}})
@@ -303,7 +350,7 @@ export class AgentBrowserProfileCompanion{
       try{return await this.#executions.run(execution,()=>relay.relay({...snapshot,principal:`user-${authority.actingUserId}`}))}
       finally{try{await Promise.all([...record.engineTasks]);execution.check()}finally{if(record.execution===execution)record.execution=null}}
     }});record.rpc=rpc
-    record.admission='active';record.state='active';await this._prove(record);this._status(record,'active')
+    record.admission='active';record.state='active';await this._prove(record);check();await this._startBackups(record);check();this._status(record,'active')
   }
   _prove(record){
     try{
@@ -320,22 +367,22 @@ export class AgentBrowserProfileCompanion{
   async _active(record){
     if(record.returnTask||record.returnRequestId||this.#activations.has(record))return
     const runtime=record.runtime,rpc=record.rpc,binding=rpc?.binding,unchanged=()=>!this.closing&&!record.returnTask&&!record.returnRequestId&&record.runtime===runtime&&record.rpc===rpc&&rpc?.binding===binding
-    if(!binding||binding.socketId!==this.connection.socketId){const entry=await this._discover(record);if(!unchanged())return;if(!this._activeMatches(record,entry,record.runtime.authority))throw fail('profile_companion_authority_changed');record.admission='active';await this._prove(record);return}
+    if(!binding||binding.socketId!==this.connection.socketId){const entry=await this._discover(record);if(!unchanged())return;if(!this._activeMatches(record,entry,record.runtime.authority))throw fail('profile_companion_authority_changed');record.admission='active';await this._prove(record);if(this.#backups.get(record)?.pauseWanted){await this._pauseBackups(record);if(unchanged())this._resumeBackups(record)};return}
     const statusClient=this.statusClient||(record.statusClient??=this.statusClientFactory())
-    let result;try{result=await statusClient.status({authority:runtime.authority,endpoint:record.endpoint,bindingId:binding.bindingId,socketId:binding.socketId,assertCurrent:()=>{this._cached(record);if(!unchanged())throw fail('profile_companion_context_changed')}})}catch{if(!unchanged())return;record.admission='unknown';this._status(record,'authority_unknown: new agent actions paused; live page retained');return}
-    this._cached(record);if(!unchanged())return;if(result.current===false){record.revoked=true;record.admission='revoked';await this._dispose(record);this._status(record,'revoked');return}record.admission='active';this._status(record,'active')
+    let result;try{result=await statusClient.status({authority:runtime.authority,endpoint:record.endpoint,bindingId:binding.bindingId,socketId:binding.socketId,assertCurrent:()=>{this._cached(record);if(!unchanged())throw fail('profile_companion_context_changed')}})}catch{if(!unchanged())return;void this._pauseBackups(record).catch(()=>{});record.admission='unknown';this._status(record,'authority_unknown: new agent actions paused; live page retained');return}
+    this._cached(record);if(!unchanged())return;if(result.current===false){record.revoked=true;record.admission='revoked';await this._dispose(record);this._status(record,'revoked');return}record.admission='active';if(this.#backups.get(record)?.pauseWanted){await this._pauseBackups(record);if(unchanged())this._resumeBackups(record)};this._status(record,'active')
   }
   async _tool(record,name,args,signal){
     this._admit(record);signal?.throwIfAborted();const execution=this.#executions.getStore()
     if(execution){execution.check();if(execution.record!==record||execution.claimed||execution.frame.message.method!=='tools/call'||execution.frame.message.params?.name!==name||!same(execution.frame.message.params.arguments??{},args))throw fail('profile_companion_command_changed');execution.claimed=true;args=JSON.parse(JSON.stringify(execution.frame.message.params.arguments??{}))}
     if(name==='hoai_browser_close_session'||name==='browser_close'){await this.retire(record);return{content:[{type:'text',text:'The browser stopped and its encrypted checkpoint was committed through HOAI.'}]}}
-    if(name==='hoai_browser_open_session'||name==='hoai_browser_status')return{content:[{type:'text',text:'Managed browser is active on the agent machine. Saved state is encrypted locally. Owner control uses HOAI.'}]}
+    if(name==='hoai_browser_open_session'||name==='hoai_browser_status'){const original=this.#backups.get(record),backup=original?.runner;let state=backup?.status();if(state?.state==='unknown'){await backup.reconcile();this._backupCurrent(record,original,true);execution?.check();state=backup.status()}return{content:[{type:'text',text:JSON.stringify({state:'active',backup:state?pick(state,['state','busy','captureKind','uploadOutcome','reason','paused','cleanupUnknown','localDurable','lastConfirmed']):null})}]}}
     const controller=new AbortController(),signals=[signal,execution?.signal].filter(Boolean),abort=()=>controller.abort()
     for(const source of signals){source.addEventListener('abort',abort,{once:true});if(source.aborted)abort()}
     const engine=record.engine,check=()=>{this._admit(record);controller.signal.throwIfAborted();if(record.engine!==engine)throw fail('profile_companion_context_changed');execution?.check()}
     let physicalClean=true
     const work=Promise.resolve().then(async()=>{
-      check()
+      await this._pauseBackups(record);check()
       if(AGENT_PROFILE_FILE_TOOLS.some(tool=>tool.name===name)){
         if(!execution)return toolError('recipient_permission_required','This file action requires its original recipient-scoped request. It did not run.')
         record.permissionAbort=controller;const files=this._fileRunner(record)
@@ -343,8 +390,14 @@ export class AgentBrowserProfileCompanion{
         finally{if(record.permissionAbort===controller)record.permissionAbort=null}
       }
       const classification=policy.classifyToolCall(name,args,{currentOrigin:policy.originOf(engine.selectedPage()?.url())}),decision=policy.decide({profile:'signed-in',classification,grants:{},settings:settings.defaultSettings(),preapproved:[]})
-      if(classification.kind==='credential'||['browser_type','browser_press_key','browser_press_sequentially','browser_keydown','browser_keyup','browser_fill_form','browser_evaluate'].includes(name)||classification.kind==='vision')return toolError('recipient_handover_required','This action requires the person to use the browser directly. It did not run.')
+      if(classification.kind==='credential'||['browser_press_key','browser_press_sequentially','browser_keydown','browser_keyup','browser_evaluate'].includes(name)||classification.kind==='vision')return toolError('recipient_handover_required','This action requires the person to use the browser directly. It did not run.')
       if(decision.verdict==='deny')return toolError('recipient_policy_denied','This action is blocked by the browser policy. It did not run.')
+      if(['browser_type','browser_fill_form'].includes(name)){
+        if(!execution||decision.verdict!=='ask')return toolError('recipient_handover_required','This field action requires its original request and a fresh approval. It did not run.')
+        const fields=this._fieldRunner(record);let capability;record.permissionAbort=controller
+        try{capability=await fields.prepare({name,args,signal:controller.signal,deadlineAt:execution.frame.deadlineAt});check();return await this.permissionRunner.run({frame:execution.frame,binding:execution.binding,endpoint:record.endpoint,engine,assertCurrent:check,signal:controller.signal,execute:(tool,originalArgs,originalSignal)=>fields.execute({capability,name:tool,args:originalArgs,signal:originalSignal})})}
+        finally{const results=await Promise.allSettled([()=>capability&&fields.cancel(capability),()=>this.permissionClient.whenDrained(),()=>this.permissionRunner.assertCleanupConfirmed()].map(callback=>Promise.resolve().then(callback)));if(record.permissionAbort===controller)record.permissionAbort=null;const activity=fields.activity();if(activity?.outcomeUnknown===true){record.uncertain=true;record.admission='blocked';record.state='field_outcome_unknown';this._status(record,'field_outcome_unknown: explicit recovery required; the action is not retried')}if(results.some(result=>result.status==='rejected')){physicalClean=false;this.#permissionCleanupUnknown.add(record);throw fail('profile_field_cleanup_unconfirmed')}}
+      }
       if(classification.kind!=='read'&&(!permissionTools.has(name)||decision.verdict!=='ask'))return toolError('recipient_handover_required','This action has no supported recipient permission. It did not run.')
       if(decision.verdict==='allow'){check();if(execution&&['browser_take_screenshot','browser_pdf_save'].includes(name)){record.permissionAbort=controller;try{return await this._fileRunner(record).capture({name,args,assertCurrent:check,signal:controller.signal,execute:(tool,input)=>{check();return engine.callTool(tool,input,controller.signal)}})}finally{if(record.permissionAbort===controller)record.permissionAbort=null}}return engine.callTool(name,args,controller.signal)}
       if(!execution)return toolError('recipient_permission_required','This action requires its original recipient-scoped request. It did not run.')
@@ -352,10 +405,10 @@ export class AgentBrowserProfileCompanion{
       try{const authorize=execute=>this.permissionRunner.run({frame:execution.frame,binding:execution.binding,endpoint:record.endpoint,engine,assertCurrent:check,signal:controller.signal,execute});if(name==='browser_file_upload')return await this._fileRunner(record).upload({args,engine,assertCurrent:check,signal:controller.signal,authorize});return await authorize((tool,originalArgs,originalSignal)=>{check();return engine.callTool(tool,originalArgs,originalSignal)})}
       finally{try{await this.permissionClient.whenDrained();this.permissionRunner.assertCleanupConfirmed()}catch(error){physicalClean=false;this.#permissionCleanupUnknown.add(record);throw error}finally{if(record.permissionAbort===controller)record.permissionAbort=null}}
     });record.engineTasks.add(work)
-    try{return await work}finally{try{await this.#fileRunners.get(record)?.runner.whenDrained()}catch(error){physicalClean=false;this.#permissionCleanupUnknown.add(record);throw error}finally{for(const source of signals)source.removeEventListener('abort',abort);if(physicalClean)record.engineTasks.delete(work)}}
+    try{return await work}finally{try{const results=await Promise.allSettled([()=>this.#fileRunners.get(record)?.runner.whenDrained(),()=>this.#fieldRunners.get(record)?.runner.whenDrained()].map(callback=>Promise.resolve().then(callback)));if(results.some(result=>result.status==='rejected'))throw fail('profile_companion_command_drain_unconfirmed')}catch(error){physicalClean=false;this.#permissionCleanupUnknown.add(record);throw error}finally{for(const source of signals)source.removeEventListener('abort',abort);if(physicalClean){record.engineTasks.delete(work);try{this._resumeBackups(record)}catch{}}}}
   }
   receive(frame,socketId){const record=[...this.records.values()].find(value=>value.rpc&&shared.sameAuthority(value.runtime?.authority,frame.authority));if(!record)return Promise.reject(fail('profile_companion_runtime_unavailable'));const hint={rpcId:frame.rpcId,rpcNonce:frame.rpcNonce,bindingId:frame.bindingId,socketId,authority:frame.authority};return frame.event_type==='browser_profile_rpc_cancel'?record.rpc.cancel(hint):record.rpc.receive(hint)}
-  disconnected(){for(const record of this.records.values()){record.admission='unknown';record.permissionAbort?.abort();record.rpc?.disconnect();this._status(record,'connection_unknown: new agent actions paused; live page retained')}}
+  disconnected(){for(const record of this.records.values()){void this._pauseBackups(record).catch(()=>{});record.admission='unknown';record.permissionAbort?.abort();record.rpc?.disconnect();this._status(record,'connection_unknown: new agent actions paused; live page retained')}}
   async retire(record,shutdown=false){
     if(this.#retirements.has(record))return this.#retirements.get(record).task
     if(shutdown){this._cached(record);record.runtime.assertCurrent()}else this._admit(record)
@@ -364,8 +417,8 @@ export class AgentBrowserProfileCompanion{
   }
   async _retire(record,shutdown=false){
     this._cached(record);const permit=this.#retirements.get(record);if(!permit||record.runtime!==permit.runtime||record.endpoint!==permit.endpoint||!shared.sameAuthority(record.runtime.authority,permit.authority))throw fail('profile_companion_context_changed');record.runtime.assertCurrent();const authority=record.runtime.authority,entry=record.entry,context={version:1,schemaVersion:1,profileId:authority.profileId,actingUserId:authority.actingUserId,assistantId:authority.assistantId,transitionId:randomUUID(),revision:authority.revision+1,previousManifestHash:entry.profile.headManifestHash,keyEpoch:authority.contentKeyEpoch,source:source(authority),destination:{...destination(authority),bootId:randomUUID(),runtimeId:randomUUID(),sessionId:randomUUID()}}
-    let stopped;try{stopped=await record.runtime.finalize({context,source:record.endpoint,destinationIdentity:record.identity,contentKeyEpoch:record.contentKeyEpoch||record.runtime.contentKeyEpoch});this._cached(record);record.state='local_stopped';const result=await this.client.retire(authority,record.endpoint,stopped);this._cached(record);if(result.profile?.writerState!=='stopped'||result.profile.headManifestHash!==codec.manifestHash(stopped.checkpoint.manifest)||result.transition?.id!==context.transitionId||result.transition.phase!=='checkpoint_committed')throw fail('profile_companion_retirement_unconfirmed');record.state='closed';await this._dispose(record);this._status(record,'server_committed_stopped')}
-    catch(error){if(stopped||record.runtime?.state!=='active')record.uncertain=true;else record.admission='active';this._status(record,genericError(error));throw error}
+    let stopped;try{await this._pauseBackups(record);stopped=await record.runtime.finalize({context,source:record.endpoint,destinationIdentity:record.identity,contentKeyEpoch:record.contentKeyEpoch||record.runtime.contentKeyEpoch});this._cached(record);record.state='local_stopped';const result=await this.client.retire(authority,record.endpoint,stopped);this._cached(record);if(result.profile?.writerState!=='stopped'||result.profile.headManifestHash!==codec.manifestHash(stopped.checkpoint.manifest)||result.transition?.id!==context.transitionId||result.transition.phase!=='checkpoint_committed')throw fail('profile_companion_retirement_unconfirmed');record.state='closed';await this._dispose(record);this._status(record,'server_committed_stopped')}
+    catch(error){if(stopped||record.runtime?.state!=='active')record.uncertain=true;else{record.admission='active';if(!this.closing)this._resumeBackups(record)};this._status(record,genericError(error));throw error}
   }
   async _restoreOwnStopped(record,entry){
     if(record.restoreAttempted)return;record.restoreAttempted=true;record.journal=this._journal(record);record.journalScope={...pick(record.scope,['actingUserId','assistantId','profileId','endpointId','keyFingerprint']),grantVersion:entry.grant.generation}
@@ -382,13 +435,13 @@ export class AgentBrowserProfileCompanion{
   _dispose(record){
     const activation=this.#activations.get(record),proof=this.#proofs.get(record);if(activation)activation.cancelled=true
     if(record.runtime)this.#resumePermits.delete(record.runtime)
-    record.admission='blocked';this.#preparations.delete(record);record.permissionAbort?.abort();record.rpc?.disconnect?.();if(record.stopTask)return record.stopTask
-    const task=Promise.resolve().then(async()=>{const failures=[];await record.runtimeCreating?.catch(()=>{});const native=Promise.resolve().then(()=>record.runtime?.dispose()),commands=Promise.resolve().then(()=>this._drainCommands(record)),files=Promise.resolve().then(()=>this.#fileRunners.get(record)?.runner.dispose());for(const result of await Promise.allSettled([native,commands,files]))if(result.status==='rejected')failures.push(result.reason);for(const cleanup of [async()=>{await record.engineCreating?.catch(()=>{});await record.engine?.stop()},async()=>{await record.extrasCreating?.catch(()=>{});record.extras?.dispose()}])try{await cleanup()}catch(error){failures.push(error)}await Promise.allSettled([activation?.task,proof?.task].filter(Boolean));if(this.#activations.get(record)===activation)this.#activations.delete(record);record.contentKeyEpoch?.key.fill(0);record.contentKeyEpoch=null;if(failures.length)throw fail('profile_companion_stop_unconfirmed');record.relay?.close();this.#fileRunners.delete(record);record.runtime=null;record.engine=null;record.extras=null;if(record.rpc){const rpc=record.rpc;this._trackPhysical(record,'rpc-close',Promise.resolve().then(()=>rpc.close()));record.rpc=null}})
+    void this._stopBackups(record).catch(()=>{});record.admission='blocked';this.#preparations.delete(record);record.permissionAbort?.abort();record.rpc?.disconnect?.();if(record.stopTask)return record.stopTask
+    const task=Promise.resolve().then(async()=>{const failures=[];await record.downloadsCreating?.catch(()=>{});await record.runtimeCreating?.catch(()=>{});const native=Promise.resolve().then(()=>record.runtime?.dispose()),commands=Promise.resolve().then(()=>this._drainCommands(record)),files=Promise.resolve().then(()=>this.#fileRunners.get(record)?.runner.dispose()),fields=Promise.resolve().then(()=>this.#fieldRunners.get(record)?.runner.dispose()),downloads=Promise.resolve().then(()=>this.#downloads.get(record)?.binding.dispose());for(const result of await Promise.allSettled([native,commands,files,fields,downloads,this._stopBackups(record)]))if(result.status==='rejected')failures.push(result.reason);for(const cleanup of [async()=>{await record.engineCreating?.catch(()=>{});await record.engine?.stop()},async()=>{await record.extrasCreating?.catch(()=>{});record.extras?.dispose()}])try{await cleanup()}catch(error){failures.push(error)}await Promise.allSettled([activation?.task,proof?.task].filter(Boolean));if(this.#activations.get(record)===activation)this.#activations.delete(record);record.contentKeyEpoch?.key.fill(0);record.contentKeyEpoch=null;if(failures.length)throw fail('profile_companion_stop_unconfirmed');record.relay?.close();this.#fileRunners.delete(record);this.#fieldRunners.delete(record);this.#downloads.delete(record);this.#backups.delete(record);record.runtime=null;record.engine=null;record.extras=null;if(record.rpc){const rpc=record.rpc;this._trackPhysical(record,'rpc-close',Promise.resolve().then(()=>rpc.close()));record.rpc=null}})
     record.stopTask=this._trackPhysical(record,'stop',task);return record.stopTask
   }
   stop(){
     if(this.stopped)return Promise.resolve();if(this.stopTask)return this.stopTask;this.closing=true
-    const activating=[...this.records.values()].filter(record=>this.#activations.get(record)?.pending),activationStops=activating.map(record=>this._dispose(record))
+    for(const record of this.records.values())void this._pauseBackups(record).catch(()=>{});const activating=[...this.records.values()].filter(record=>this.#activations.get(record)?.pending),activationStops=activating.map(record=>this._dispose(record))
     const task=Promise.resolve().then(async()=>{
       await Promise.allSettled([this.pending,...activationStops,...activating.map(record=>this.#activations.get(record)?.task),...[...this.records.values()].flatMap(record=>[record.monitorTask,record.returnTask]),...[...this.#retirements.values()].map(permit=>permit.task)].filter(Boolean))
       for(const record of this.records.values())if(record.runtime?.state==='active'){if(record.returnRequestId||record.uncertain)throw fail('profile_return_stop_unconfirmed');await this.retire(record,true)}
@@ -402,11 +455,11 @@ export class AgentBrowserProfileCompanion{
   }
   async emergencyTerminate(){
     this.closing=true;this.stopped=true
-    const results=await Promise.allSettled([...this.records.values()].map(async record=>{
+    for(const record of this.records.values())void this._stopBackups(record).catch(()=>{});const results=await Promise.allSettled([...this.records.values()].map(async record=>{
       record.revoked=true;record.uncertain=true;record.admission='revoked';record.permissionAbort?.abort();record.rpc?.disconnect();record.contentKeyEpoch?.key.fill(0);record.contentKeyEpoch=null
-      const files=Promise.resolve().then(()=>this.#fileRunners.get(record)?.runner.dispose());void files.catch(()=>{});let physicalFailure
+      const files=Promise.resolve().then(()=>this.#fileRunners.get(record)?.runner.dispose()),fields=Promise.resolve().then(()=>this.#fieldRunners.get(record)?.runner.dispose()),downloads=Promise.resolve().then(async()=>{await record.downloadsCreating?.catch(()=>{});return this.#downloads.get(record)?.binding.dispose()});void files.catch(()=>{});void fields.catch(()=>{});void downloads.catch(()=>{});let physicalFailure
       try{if(record.runtime||record.runtimeCreating){await record.processOwned;if(!record.processStop||typeof record.processStop.stop!=='function')throw fail('profile_companion_stop_unconfirmed');const result=await record.processStop.stop();if(result?.stopped!==true)throw fail('profile_companion_stop_unconfirmed');await record.runtime?.emergencyStopOwnedProcess()}}catch(error){physicalFailure=error}
-      const cleanup=await Promise.allSettled([files,Promise.resolve().then(()=>this._drainCommands(record))]);if(physicalFailure||cleanup.some(value=>value.status==='rejected'))throw fail('profile_companion_stop_unconfirmed');record.extras?.dispose();this._status(record,'recovery_required: explicit daemon termination; no new stopped checkpoint is confirmed')
+      const cleanup=await Promise.allSettled([files,fields,downloads,this._stopBackups(record),Promise.resolve().then(()=>this._drainCommands(record))]);if(physicalFailure||cleanup.some(value=>value.status==='rejected'))throw fail('profile_companion_stop_unconfirmed');record.extras?.dispose();this._status(record,'recovery_required: explicit daemon termination; no new stopped checkpoint is confirmed')
     }))
     this.candidates.clear();if(results.some(result=>result.status==='rejected'))throw fail('profile_companion_stop_unconfirmed');return{stopped:true,recoveryRequired:true}
   }

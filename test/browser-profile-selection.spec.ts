@@ -1,13 +1,13 @@
 import {it as test} from 'vitest'
 import assert from 'node:assert/strict'
 import {EventEmitter} from 'node:events'
-import {PlaywrightEngine,loadPlaywright} from '../vendor/browser-profile/bin/hoai-browser-host.mjs'
+import {PlaywrightEngine,loadPlaywright,resolveConfig} from '../vendor/browser-profile/bin/hoai-browser-host.mjs'
 
 async function fixture(){
   const selected:unknown[]=[],browser=new EventEmitter(),first:any=new EventEmitter(),second:any=new EventEmitter(),native:any=new EventEmitter()
   for(const page of [first,second])Object.assign(page,{consoleMessages:async()=>[],pageErrors:async()=>[],requests:async()=>[],bringToFront:async()=>{selected.push(page)}})
   native.pages=()=>[first,second];native.browser=()=>browser;native.newPage=()=>{throw Error('must not create a replacement page')}
-  const {tools}=loadPlaywright(),backend=new tools.BrowserBackend({},native,[]);await backend.initialize({cwd:process.cwd(),name:'fixture',version:'1'})
+  const {tools}=loadPlaywright(),config=await resolveConfig({caps:[],outputDir:process.cwd()}),backend=new tools.BrowserBackend(config,native,[]);await backend.initialize({cwd:process.cwd(),name:'fixture',version:'1'})
   let current=true;const engine:any=new PlaywrightEngine({endpoint:null,caps:[],outputDir:process.cwd(),clientName:'fixture',clientVersion:'1',managedRuntime:{assertCurrent(){if(!current)throw Error('fixture_authority_revoked')}}})
   engine._backend=backend;engine._context=native
   return{engine,backend,first,second,selected,revoke:()=>{current=false},dispose:()=>backend.dispose()}

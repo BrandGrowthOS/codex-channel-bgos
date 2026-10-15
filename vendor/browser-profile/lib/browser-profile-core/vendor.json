@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "sourceCommit": "f6b5f0c0bde1c7f1c28dc664985c2a7e9a330715",
-  "why": "Byte-identical encrypted checkpoint, lossless storage, portable state and resume readiness, cookie codecs, typed runtime endpoint, signed stopped-head lineage, separate permissioned file crypto/client/private materialization and encrypted local journal shared with HOAI. NativeRuntime exports are pure until its injected Electron constructor runs. The pairing adapter shares pure endpoint and document validation and never instantiates or inherits the desktop Bearer client. ProfileFileClient fixes its principal explicitly; paired use obtains only fresh pairing proof. Electron OS folder policy and native dialogs are intentionally excluded.",
+  "sourceCommit": "7b769071503748def458591d8596f30420bbe3d9",
+  "why": "Byte-identical encrypted checkpoint, lossless storage, portable state and resume readiness, cookie codecs, typed runtime endpoint, signed stopped-head lineage, separate permissioned file crypto/client/private materialization and encrypted local journal shared with HOAI. Explicit fixed-principal active backup transport, scheduler, readonly capture and seal/journal workers are included as pure main-only dependencies; they provide no activation authority. NativeRuntime exports are pure until its injected Electron constructor runs. The pairing adapter shares pure endpoint and document validation and never instantiates or inherits the desktop Bearer client. ProfileFileClient fixes its principal explicitly; paired use obtains only fresh pairing proof. Electron OS folder policy and native dialogs are intentionally excluded.",
   "files": {
     "crypto.js": {
       "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/crypto.js",
-      "sha256": "634bd2f26d54f21107b1fb5b669efd38330c225e1f685f4ddd95d3aba8bfe99d"
+      "sha256": "5c11e3361bbb62be9a8aca69f92e88d38b343a1e642ea604b46fa6f2a6d5945e"
     },
     "storage.js": {
       "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/storage.js",
@@ -53,7 +53,7 @@
     },
     "profile-file-crypto.js": {
       "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/profile-file-crypto.js",
-      "sha256": "5874c0b81e8f7a265af5db5ab7988635621fd28003ab901b5795c1a92d2700f1"
+      "sha256": "7e9203c4b9c10a2266fc5a1b554df6eb27d9d224e98b7db494be4cd503ce4139"
     },
     "profile-file-wire.js": {
       "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/profile-file-wire.js",
@@ -66,6 +66,50 @@
     "profile-file-staging.js": {
       "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/profile-file-staging.js",
       "sha256": "63e7a86d9d1cc5e34a857ad217edbc80f20c9ff3c04ecc1cec4a9edce0cbd22a"
+    },
+    "active-backup-client.js": {
+      "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/active-backup-client.js",
+      "sha256": "f6ef0a300dd39ccb929621150c8411381c2fe2ce2d3ed38c036f37e0aaa97f61"
+    },
+    "active-backup-scheduler.js": {
+      "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/active-backup-scheduler.js",
+      "sha256": "d50d4932e109f4357cdb7bc6048c9006c9b586140d7e3565e7186bb0ffcdddd9"
+    },
+    "active-backup-wire.js": {
+      "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/active-backup-wire.js",
+      "sha256": "8ddde4d3e4bf58d6a4dbdf25dbfd32f2c4238dfaaf5c958a46d8240a53f42ce0"
+    },
+    "active-backup-crypto.js": {
+      "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/active-backup-crypto.js",
+      "sha256": "f5f1d965d5b18f6ca26304b7aecb236c604a857052f24b835a5d08b158857a45"
+    },
+    "live-backup-input.js": {
+      "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/live-backup-input.js",
+      "sha256": "aa3c3459293cc866066e1938c6f0b101e507ab822266905fb45d448b69e02284"
+    },
+    "live-backup-capture.js": {
+      "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/live-backup-capture.js",
+      "sha256": "99ff4c438672946f6718e56624377767d89a89a4a59dd6cee7515f4bd4a25ff5"
+    },
+    "live-storage-reader.js": {
+      "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/live-storage-reader.js",
+      "sha256": "f441681fc068ea567669f92ab1fcdd2821cb96e0c1685ef9811664db6266e0f2"
+    },
+    "backup-seal-client.js": {
+      "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/backup-seal-client.js",
+      "sha256": "04eb8a2f021c14ed8653be808ad86941b44765a973b9a54a75b65a13d736360e"
+    },
+    "backup-seal-worker.js": {
+      "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/backup-seal-worker.js",
+      "sha256": "d3d4365353d2ab39ef715e0dc2281c1e2b0e0aac052a41b5d14de3c9cf09ecc4"
+    },
+    "backup-journal.js": {
+      "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/backup-journal.js",
+      "sha256": "43075421e966b46d443e0294e09d98fe3adab6d5ca9aa24e44932d0ab59fb199"
+    },
+    "backup-journal-worker.js": {
+      "source": "BGOS: frontend/electron-app/agent-browser/profile-sync/backup-journal-worker.js",
+      "sha256": "a87bd08969dc2f78610937bfb55de70a6c5412f7e2a9747f7886849b87c804a5"
     }
   }
 }

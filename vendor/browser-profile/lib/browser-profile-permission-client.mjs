@@ -6,8 +6,8 @@ const shared = require('./browser-profile-core/coordinator-client.js')
 const codec = require('./browser-profile-core/crypto.js')
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/, NONCE = /^[A-Za-z0-9_-]{43}$/
-const LABELS = Object.freeze({ navigate: 'Open a website', write: 'Change a page selection', sensitive: 'Perform a page action', upload: 'Upload a file', download: 'Save a page as PDF' })
-const METHODS = Object.freeze({ browser_navigate: 'navigate', browser_click: 'sensitive', browser_handle_dialog: 'sensitive', browser_select_option: 'write', browser_file_upload: 'upload', browser_pdf_save: 'download' })
+const LABELS = Object.freeze({ navigate: 'Open a website', write: 'Change a page selection', text: 'Enter page text', sensitive: 'Perform a page action', upload: 'Upload a file', download: 'Save a page as PDF' })
+const METHODS = Object.freeze({ browser_navigate: 'navigate', browser_click: 'sensitive', browser_handle_dialog: 'sensitive', browser_select_option: 'write', browser_type: 'text', browser_fill_form: 'text', browser_file_upload: 'upload', browser_pdf_save: 'download' })
 const SCOPE = ['gateId', 'requestNonce', 'authority', 'bindingId', 'socketId', 'rpcId', 'rpcNonce', 'actionHash']
 const REQUEST = [...SCOPE, 'kind', 'origin', 'expiresAt']
 const PUBLIC = [...REQUEST, 'originSource', 'label', 'state', 'choice']

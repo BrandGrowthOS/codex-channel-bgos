@@ -830,6 +830,7 @@ function imperativeOf(name, args = {}) {
     case "browser_type":
       return `type in ${el || "a field"}`;
     case "browser_fill_form":
+      if (Array.isArray(a.fields) && a.fields.length === 1) return "fill 1 form field";
       return `fill ${Array.isArray(a.fields) ? a.fields.length : "some"} form fields`;
     case "browser_select_option":
       return `select ${Array.isArray(a.values) ? a.values.join(", ") : ""} in ${el || "a dropdown"}`;
@@ -837,6 +838,36 @@ function imperativeOf(name, args = {}) {
       return `press ${a.key || "a key"}`;
     case "browser_hover":
       return `hover ${el || "an element"}`;
+    case "browser_drag": {
+      const from = typeof a.startElement === "string" ? a.startElement : "";
+      const to = typeof a.endElement === "string" ? a.endElement : "";
+      return from && to ? `drag ${from} to ${to}` : "drag an element";
+    }
+    case "browser_drop": {
+      const n = Array.isArray(a.paths) ? a.paths.length : 0;
+      const what = n === 1 ? "a file" : n > 1 ? `${n} files` : "data";
+      return `drop ${what} onto ${el || "an element"}`;
+    }
+    case "browser_close":
+      return "close the page";
+    case "browser_highlight":
+      return `highlight ${el || "an element"}`;
+    case "browser_hide_highlight":
+      return "hide the highlight";
+    case "browser_annotate":
+      return "annotate the page";
+    case "browser_mouse_move_xy":
+      return `move the mouse to ${a.x}, ${a.y}`;
+    case "browser_mouse_click_xy":
+      return `click at ${a.x}, ${a.y}`;
+    case "browser_mouse_drag_xy":
+      return `drag from ${a.startX}, ${a.startY} to ${a.endX}, ${a.endY}`;
+    case "browser_mouse_down":
+      return "press the mouse button";
+    case "browser_mouse_up":
+      return "release the mouse button";
+    case "browser_mouse_wheel":
+      return "scroll the page";
     case "browser_snapshot":
       return "read the page";
     case "browser_find":

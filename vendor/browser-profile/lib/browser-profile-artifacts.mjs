@@ -2,6 +2,8 @@ import * as fs from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
+import { artifactInventoryScope, reserveArtifactInventory, releaseArtifactInventory } from './browser-profile-artifact-inventory.mjs'
+import { completedDownloadMetadata, retainCompletedDownloadInventory, writeCompletedDownload } from './browser-profile-downloads.mjs'
 const require = createRequire(import.meta.url), files = require('./browser-profile-core/profile-file-crypto.js')
 const fail = code => Object.assign(new Error(code), { code }), globalRecords = new Set(), physical = new Set()
 const same = (a, b) => a?.dev === b?.dev && a?.ino === b?.ino
@@ -11,9 +13,9 @@ const current = callback => { const value = callback(); if (value?.then) { void 
  * mint an artifact token. Tool text and caller paths are never inventory. */
 export class AgentProfileArtifacts {
   #records = new Map(); #work = new Set(); #closed = false; #unknown = false
-  constructor({ area, staging, now = Date.now, filesystem = fs }) {
+  constructor({ area, staging, authority = undefined, now = Date.now, filesystem = fs }) {
     if (!area || typeof area.assertPrivateDirectory !== 'function' || typeof staging?.readSelected !== 'function' || typeof now !== 'function') throw fail('profile_file_configuration_invalid')
-    Object.assign(this, { area, staging, now, fs: filesystem })
+    Object.assign(this, { area, staging, now, fs: filesystem }); this.inventoryScope = artifactInventoryScope(authority)
   }
   #check(check) { if (this.#closed || this.#unknown) throw fail('profile_file_artifact_unavailable'); current(check) }
   #run(check, work) {
@@ -30,32 +32,41 @@ export class AgentProfileArtifacts {
     } catch { failed = true }
     try { const parent = await this.fs.lstat(record.directory); if (!same(parent, record.directoryStat) || !parent.isDirectory() || parent.isSymbolicLink()) throw fail('profile_file_path_changed'); await this.fs.rmdir(record.directory) } catch { failed = true }
     if (failed) { this.#unknown = true; throw fail('profile_file_cleanup_unconfirmed') }
-    this.#records.delete(record.token); globalRecords.delete(record)
+    if (!this.#unknown) { this.#records.delete(record.token); globalRecords.delete(record); releaseArtifactInventory(record.inventory) }
   }
   async capture({ name, args, assertCurrent, execute }) {
     if (!['browser_take_screenshot', 'browser_pdf_save'].includes(name) || typeof execute !== 'function') throw fail('profile_file_artifact_required')
     const input = structuredClone(args), extension = name === 'browser_pdf_save' ? 'pdf' : input.type === 'jpeg' || input.type === undefined && /\.jpe?g$/i.test(input.filename || '') ? 'jpeg' : 'png', fileName = input.filename === undefined ? 'browser.' + extension : files.validateFileName(input.filename)
+    return this.#produce({ fileName, contentType: extension === 'pdf' ? 'application/pdf' : 'image/' + extension, kind: 'capture' }, assertCurrent, file => execute(name, { ...input, filename: file }))
+  }
+  captureDownload({ receipt, assertCurrent }) {
+    const metadata = completedDownloadMetadata(receipt)
+    return this.#produce({ ...metadata, kind: 'download' }, assertCurrent, file => writeCompletedDownload(receipt, { destination: file, assertCurrent }), () => retainCompletedDownloadInventory(receipt, this.inventoryScope))
+  }
+  #produce(metadata, assertCurrent, execute, reserve = () => reserveArtifactInventory(this.inventoryScope)) {
     return this.#run(assertCurrent, async () => {
       this.#check(assertCurrent)
       for (const row of [...this.#records.values()]) if (row.state === 'ready' && row.expiresAt <= this.now()) await this.#remove(row)
       this.#check(assertCurrent); if (this.#records.size >= 4 || globalRecords.size >= 16) throw fail('profile_file_artifact_capacity')
-      await this.area.assertPrivateDirectory(this.area.directory); this.#check(assertCurrent)
-      const directory = path.join(this.area.directory, randomUUID()); await this.fs.mkdir(directory, { mode: 0o700 })
-      let directoryStat
-      try { directoryStat = await this.fs.lstat(directory) } catch (error) { this.#unknown = true; throw error }
-      const record = { token: 'hoai-artifact:' + randomUUID(), directory, directoryStat, file: path.join(directory, fileName), fileName, contentType: extension === 'pdf' ? 'application/pdf' : 'image/' + extension, stat: null, state: 'creating', expiresAt: this.now() + files.FILE_TTL_MS }
+      const inventory = reserve(), directory = path.join(this.area.directory, randomUUID()); let directoryStat, created = false
+      try {
+        await this.area.assertPrivateDirectory(this.area.directory); this.#check(assertCurrent); await this.fs.mkdir(directory, { mode: 0o700 }); created = true
+        directoryStat = await this.fs.lstat(directory)
+      } catch (error) { if (created) this.#unknown = true; else releaseArtifactInventory(inventory); throw error }
+      const record = { token: 'hoai-artifact:' + randomUUID(), directory, directoryStat, file: path.join(directory, metadata.fileName), fileName: metadata.fileName, contentType: metadata.contentType, kind: metadata.kind, inventory, stat: null, state: 'creating', expiresAt: Math.min(this.now() + files.FILE_TTL_MS, metadata.expiresAt ?? Infinity) }
       this.#records.set(record.token, record); globalRecords.add(record)
       try {
         this.#check(assertCurrent); await this.area.assertPrivateDirectory(directory); this.#check(assertCurrent)
-        const result = await execute(name, { ...input, filename: record.file }); this.#check(assertCurrent)
+        const result = await execute(record.file); this.#check(assertCurrent)
         if (!result || result.isError || !Array.isArray(result.content)) throw fail('profile_file_artifact_unconfirmed')
         const stat = await this.fs.lstat(record.file); this.#check(assertCurrent); await this.area.assertPrivateDirectory(directory); this.#check(assertCurrent)
         record.stat = stat; if (!regular(stat) || globalRecords.size > 16 || [...globalRecords].reduce((sum, row) => sum + (row.stat?.size || 0), 0) > 400 * 1024 * 1024) throw fail('profile_file_artifact_refused')
         record.stat = stat; record.state = 'ready'
-        return { ...result, content: [...result.content.filter(item => item.type === 'image'), { type: 'text', text: JSON.stringify({ artifactToken: record.token, fileName, bytes: stat.size, expiresAt: record.expiresAt }) }] }
+        return { ...result, content: [...result.content.filter(item => item.type === 'image'), { type: 'text', text: JSON.stringify({ artifactToken: record.token, fileName: record.fileName, bytes: stat.size, expiresAt: record.expiresAt }) }] }
       } catch (error) { await this.#remove(record); throw error }
     })
   }
+  downloads({ assertCurrent }) { this.#check(assertCurrent); return [...this.#records.values()].filter(row => row.kind === 'download' && row.state === 'ready' && row.expiresAt > this.now()).map(row => Object.freeze({ artifactToken: row.token, fileName: row.fileName, bytes: row.stat.size, expiresAt: row.expiresAt })) }
   consume(token, { assertCurrent, use }) {
     this.#check(assertCurrent); const record = this.#records.get(token)
     if (!record || record.state !== 'ready' || record.expiresAt <= this.now() || typeof use !== 'function') return Promise.reject(fail('profile_file_artifact_required'))

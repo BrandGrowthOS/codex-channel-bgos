@@ -75,7 +75,7 @@ function metadata(raw) {
 const associated = (base, purpose, extra) => Buffer.concat([Buffer.from("HOAI-BROWSER-FILE-v1\0" + purpose + "\0"), canonical(extra ? { base, metadata: extra } : base)]);
 function keyOf(privateKey, peer, salt, base) {
   const shared = crypto.diffieHellman({ privateKey, publicKey: publicKey(peer, "x25519") });
-  try { return Buffer.from(crypto.hkdfSync("sha256", shared, salt, associated(base, "key-derivation"), 32)); } finally { shared.fill(0); }
+  try { return Buffer.from(crypto.hkdfSync("sha256", shared, salt, crypto.createHash("sha256").update(associated(base, "key-derivation")).digest(), 32)); } finally { shared.fill(0); }
 }
 function encrypt(key, bytes, aad) {
   const iv = crypto.randomBytes(12), cipher = crypto.createCipheriv("aes-256-gcm", key, iv); cipher.setAAD(aad);

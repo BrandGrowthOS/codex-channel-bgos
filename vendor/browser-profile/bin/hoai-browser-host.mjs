@@ -76,6 +76,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { io as socketIoClient } from 'socket.io-client'
 
 import { chromeEnv } from '../lib/browser-env.mjs'
+import { assertBrowserNodeVersion } from '../lib/browser-profile-node-runtime.mjs'
 import { GateKeeper, deniedMessage, waitSecondsFrom, GATE_ATTACH_MS, GATE_WAIT_MAX_S } from '../lib/browser-gate.mjs'
 import { RemoteBrowserViews, REMOTE_BROWSER_TAB_MAX } from '../lib/remote-view.mjs'
 import { OWNER_CONTROL_MESSAGE, runAgentBrowserWork } from '../lib/remote-input.mjs'
@@ -918,6 +919,7 @@ let playwrightModules = null
 
 /** playwright-core, loaded on first use (it is large and CommonJS). */
 export function loadPlaywright() {
+  assertBrowserNodeVersion()
   if (!playwrightModules) {
     const require = createRequire(import.meta.url)
     const { chromium } = require('playwright-core')
@@ -958,7 +960,7 @@ export function toMcpTool(tool, z) {
 /** engine.js resolveConfig. */
 export async function resolveConfig({ caps, outputDir }) {
   const { tools } = loadPlaywright()
-  const config = await tools.resolveCLIConfigForMCP({ caps: caps.join(','), imageResponses: 'allow', outputDir }, {})
+  const config = await tools.resolveCLIConfigForMCP({ webmcp: false, caps: caps.join(','), imageResponses: 'allow', outputDir }, {})
   config.outputDir = outputDir
   config.saveSession = false
   return config
@@ -1113,6 +1115,12 @@ export class PlaywrightEngine {
     } catch {}
     this._secrets.clear()
   }
+}
+
+/** Shared by the daemon factory and the bounded native download probe. */
+export async function createManagedProfileEngine({ runtime, directory, onDownload, log = /** @type {(line:string)=>void} */ (() => {}) }) {
+  ensurePrivateDir(directory)
+  return new PlaywrightEngine({ endpoint: null, managedRuntime: runtime, caps: DEFAULT_CAPS, outputDir: directory, onDownload, clientName: 'hoai-profile-companion', clientVersion: readPackageVersion(), log }).start()
 }
 
 function waitForExit(child, ms) {
@@ -2655,7 +2663,7 @@ export async function main({
   const createProfileCompanion = (connection, legacyHost) => new AgentBrowserProfileCompanion({ connection, agentRoot, environment: env, deviceLabel, log,
     assertNoLegacyActive: scope => !legacyHost.pool.peek({ assistantId: scope.assistantId, principal: `user-${scope.actingUserId}` }),
     loadBrowser: async () => ({ chromium: loadPlaywright().chromium, executable: await ensureBrowser({ findInstalled: () => env.HOAI_BROWSER_EXECUTABLE ? resolveChromeExecutable({ env }) : { path: null }, env, log }) }),
-    createEngine: async ({ runtime, directory }) => { ensurePrivateDir(directory); return new PlaywrightEngine({ endpoint: null, managedRuntime: runtime, caps: DEFAULT_CAPS, outputDir: directory, clientName: 'hoai-profile-companion', clientVersion: readPackageVersion(), log }).start() },
+    createEngine: input => createManagedProfileEngine({ ...input, log }),
     createRelay: core => new RelaySessions({ core, serverInfo: { name: 'hoai-profile-companion', version: readPackageVersion() }, instructions: hostInstructions(deviceLabel), log }),
   })
   const host = new BrowserHost({ agentRoot, env, deviceLabel, browserTools: loadBrowserTools, createEngine, createProfileCompanion, log, scope }).start()

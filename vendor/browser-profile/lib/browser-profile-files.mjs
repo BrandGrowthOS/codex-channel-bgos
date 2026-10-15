@@ -11,17 +11,18 @@ const token = prefix => prefix + ':' + randomUUID()
 const scopeOf = authority => Object.fromEntries(['profileId', 'actingUserId', 'assistantId'].map(key => [key, authority[key]]))
 const result = value => ({ content: [{ type: 'text', text: JSON.stringify(value) }] })
 export const AGENT_PROFILE_FILE_TOOLS = Object.freeze([
-  { name: 'hoai_browser_files', description: 'List only files explicitly offered through HOAI and already reviewed recipient devices. File tokens are valid only in this browser runtime.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'hoai_browser_files', description: 'List files explicitly offered through HOAI, quarantined completed browser downloads and reviewed recipient devices. Opaque file and artifact tokens are valid only in this browser runtime; sending bytes still requires explicit recipient consent.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
   { name: 'hoai_browser_send_file', description: 'Offer one opaque browser artifact token to an explicitly reviewed recipient device. The recipient must approve this file in HOAI before any bytes are sent. Repeat explicitly to check consent; unknown writes are read-only.', inputSchema: { type: 'object', properties: { artifactToken: { type: 'string' }, recipientToken: { type: 'string' } }, required: ['artifactToken'], additionalProperties: false } }
 ])
 /** One exact runtime. Separate file consent never authorizes a website upload.
  * No public method accepts a source path or uses returned text as a path. */
 export class AgentProfileFiles {
   #incoming = new Map(); #recipients = new Map(); #outgoing = new Map(); #work = new Set(); #controllers = new Set(); #closed = false; #unknown = false; #area = null
-  constructor({ client, authority, endpoint, directory, peerIdentities, assertCurrent, now = Date.now, createArea = createAgentProfileFileArea, createStaging = options => new ProfileFileStaging(options), createArtifacts = options => new AgentProfileArtifacts(options) }) {
+  constructor({ client, authority, endpoint, directory, peerIdentities, assertCurrent, downloads, now = Date.now, createArea = createAgentProfileFileArea, createStaging = options => new ProfileFileStaging(options), createArtifacts = options => new AgentProfileArtifacts(options) }) {
     this.authority = wire.authorityOf(authority); this.scope = scopeOf(this.authority); this.endpoint = wire.endpointOf(endpoint, this.authority)
     if (!client || ['pendingReviewed', 'prepareOffer', 'offer', 'read', 'upload', 'claim', 'whenDrained', 'dispose', 'activity'].some(name => typeof client[name] !== 'function') || !path.isAbsolute(directory) || typeof peerIdentities !== 'function' || typeof assertCurrent !== 'function') throw fail('profile_file_configuration_invalid')
-    Object.assign(this, { client, directory, peerIdentities, assertCurrent, now, createArea, createStaging, createArtifacts })
+    if (downloads !== undefined && (!wire.same(downloads.authority, this.authority) || typeof downloads.completed !== 'function')) throw fail('profile_file_configuration_invalid')
+    Object.assign(this, { client, directory, peerIdentities, assertCurrent, downloads, now, createArea, createStaging, createArtifacts })
   }
   #check(check, signal) { if (this.#closed || this.#unknown || signal?.aborted) throw fail('profile_file_context_changed'); current(this.assertCurrent); current(check) }
   #run(check, signal, action) {
@@ -44,7 +45,7 @@ export class AgentProfileFiles {
     if (!this.#area) {
       const area = await this.createArea({ directory: this.directory, assertCurrent: check }); check()
       this.staging = this.createStaging({ directory: area.directory, scope: createHash('sha256').update(wire.canonical(this.authority)).digest('hex'), assertPrivateDirectory: area.assertPrivateDirectory, now: this.now })
-      this.artifacts = this.createArtifacts({ area, staging: this.staging, now: this.now }); this.#area = area
+      this.artifacts = this.createArtifacts({ area, staging: this.staging, authority: this.authority, now: this.now }); this.#area = area
     }
     await this.#area.assertPrivateDirectory(this.directory); check()
   }
@@ -72,13 +73,20 @@ export class AgentProfileFiles {
   }
   list({ assertCurrent, signal }) { return this.#run(assertCurrent, signal, async (check, abort) => {
     const { recipients, value } = await this.#discover(check, abort), output = []
+    let downloads
+    if (this.downloads) {
+      if (!wire.same(this.downloads.authority, this.authority)) throw fail('profile_file_context_changed')
+      await this.#prepare(check)
+      for (const row of this.downloads.completed()) { check(); await this.artifacts.captureDownload({ receipt: row.receipt, assertCurrent: check }); check() }
+      downloads = this.artifacts.downloads({ assertCurrent: check })
+    }
     for (const candidate of value.files) {
       const row = this.#incoming.get(candidate.status.offer.fileId); if (!row || row.spent) continue
       const source = row.pins.find(pin => pin.identity.endpointId === row.offer.source.endpointId)
       const metadata = files.openFileMetadata({ offer: row.offer, signature: row.signature, expectedContext: files.offerContext(row.offer), sourceIdentity: source.identity, destination: this.endpoint })
       output.push({ fileToken: row.token, fileName: metadata.fileName, bytes: row.offer.plaintextBytes, state: row.status.state, expiresAt: row.offer.expiresAt })
     }
-    return result({ files: output, recipients: recipients.map(row => ({ recipientToken: row.token, fingerprint: require('./browser-profile-core/crypto.js').identityFingerprint(row.pin.identity) })) })
+    return result({ files: output, recipients: recipients.map(row => ({ recipientToken: row.token, fingerprint: require('./browser-profile-core/crypto.js').identityFingerprint(row.pin.identity) })), ...(downloads ? { downloads } : {}) })
   }) }
   capture({ name, args, assertCurrent, signal, execute }) { return this.#run(assertCurrent, signal, async check => { await this.#prepare(check); return this.artifacts.capture({ name, args, assertCurrent: check, execute }) }) }
   send({ args, assertCurrent, signal }) {

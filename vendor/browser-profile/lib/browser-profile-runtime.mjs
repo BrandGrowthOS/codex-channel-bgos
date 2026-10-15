@@ -3,8 +3,10 @@ import { randomUUID, sign, KeyObject, createPublicKey } from 'node:crypto'
 import { readFileSync, readdirSync } from 'node:fs'
 import { chromeEnv } from './browser-env.mjs'
 import { profileLaunchArguments } from './browser-profile-launch.mjs'
+import { createPinnedProfileTargetSessions } from './browser-profile-cdp-targets.mjs'
 import { RTC_BROWSER_VERSIONS } from './browser-profile-rtc-activity.mjs'
 import { DOCUMENT_SAFETY_EXPRESSION } from './browser-profile-document-safety.mjs'
+import { createRuntimeDownloadBinding, assertRuntimeDownloadBinding } from './browser-profile-downloads-runtime.mjs'
 
 const require = createRequire(import.meta.url)
 export const profileCrypto = require('./browser-profile-core/crypto.js')
@@ -51,11 +53,15 @@ const until = async (check, ms, reason) => {
 
 /** Private browser CDP session. Every target is observed before its first run. */
 export class ProfileTargetLedger {
-  constructor(session, { timeoutMs = 5000 } = {}) {
+  #targetSessions
+  /** @param {any} session @param {{timeoutMs?:number,targetSessions?:ReturnType<typeof createPinnedProfileTargetSessions>|null}} [options] */
+  constructor(session, { timeoutMs = 5000, targetSessions = null } = {}) {
     this.session = session; this.timeoutMs = Number.isFinite(timeoutMs) ? Math.max(1, Math.min(10000, timeoutMs)) : 5000; this.sequence = 0; this.commands = new Map(); this.targets = new Map(); this.parentRoutes = new Map(); this.history = new Map(); this.active = new Map(); this.generation = 0; this.frozen = false; this.failure = null; this.disposed = false
-    this.listeners = [['Target.attachedToTarget', value => this._attached(value)], ['Target.receivedMessageFromTarget', value => this._message(value)],
+    this.#targetSessions = targetSessions
+    this.listeners = [...(targetSessions ? [] : [['Target.attachedToTarget', value => this._attached(value)], ['Target.receivedMessageFromTarget', value => this._message(value)]]),
       ['Target.targetCreated', ({ targetInfo }) => { if (this.history.size >= limits.history && !this.history.has(targetInfo.targetId)) this.failure = 'profile_inventory_limit'; else this.history.set(targetInfo.targetId, { ...targetInfo }); this.generation++ }],
-      ['Target.detachedFromTarget', ({ sessionId }) => { const target = this.targets.get(sessionId); if (target && [...this.active.values()].some(value => value.sessionId === sessionId)) target.interrupted = true; if (target) target.detached = true }]]
+      ...(targetSessions ? [] : [['Target.detachedFromTarget', value => this._detached(value)]])]
+    if (targetSessions) this.unsubscribeNative = targetSessions.subscribe({attached: receipt => this._attached(receipt,receipt.parentSessionId,receipt),detached: value => this._detached(value),event: ({sessionId,method,params}) => this._message({sessionId,message:JSON.stringify({method,params})}),failure: code => {this.failure ||= code}})
     for (const [name, listener] of this.listeners) session.on(name, listener)
   }
   async start() {
@@ -64,6 +70,7 @@ export class ProfileTargetLedger {
   }
   send(sessionId, method, params = {}) {
     if (this.disposed) return Promise.reject(fail('profile_runtime_disposed'))
+    if (this.#targetSessions) { const target = this.targets.get(sessionId); if (!target?.route) return Promise.reject(fail('profile_target_untracked')); return this.#targetSessions.send(target.route,method,params) }
     if (this.commands.size >= limits.commands) { this.failure = 'profile_inventory_limit'; return Promise.reject(fail(this.failure)) }
     const id = ++this.sequence
     const answer = new Promise((resolve, reject) => {
@@ -75,21 +82,31 @@ export class ProfileTargetLedger {
     const delivery = parent ? this.send(parent, 'Target.sendMessageToTarget', packet) : this.session.send('Target.sendMessageToTarget', packet)
     return delivery.then(() => answer, error => { const command = this.commands.get(id); if (command) { clearTimeout(command.timer); this.commands.delete(id); command.reject(error) } return answer })
   }
-  _attached({ sessionId, targetInfo, waitingForDebugger }, parent = null) {
+  _detached({sessionId}) { const target = this.targets.get(sessionId); if (target && [...this.active.values()].some(value => value.sessionId === sessionId)) target.interrupted = true; if (target) target.detached = true }
+  _attached({ sessionId, targetInfo, waitingForDebugger }, parent = null, receipt = null) {
     if (this.disposed) return
     const existing = [...this.targets.values()].find(value => value.targetId === targetInfo.targetId)
     if (existing) {
-      if (waitingForDebugger && existing.sessionId !== sessionId) void existing.initialization?.then(() => parent ? this.send(parent, 'Target.detachFromTarget', { sessionId }) : this.session.send('Target.detachFromTarget', { sessionId })).catch(() => {})
+      if (existing.sessionId !== sessionId) void Promise.resolve().then(() => existing.initialization).then(() => {if(this.disposed||existing.sessionId===sessionId)return;return this.#targetSessions?this.#targetSessions.releaseDuplicate(receipt):parent?this.send(parent,'Target.detachFromTarget',{sessionId}):this.session.send('Target.detachFromTarget',{sessionId})}).catch(() => {this.failure ||= 'profile_target_tracking_unavailable'})
       return
     }
     if (this.targets.size >= limits.targets || this.history.size >= limits.history) {
       this.failure = 'profile_inventory_limit'
-      void (parent ? this.send(parent, 'Target.detachFromTarget', { sessionId }) : this.session.send('Target.detachFromTarget', { sessionId })).catch(() => {})
+      if (!this.#targetSessions) void (parent ? this.send(parent, 'Target.detachFromTarget', { sessionId }) : this.session.send('Target.detachFromTarget', { sessionId })).catch(() => {})
       return
     }
     const target = { ...targetInfo, browserContextId: targetInfo.browserContextId || this.targets.get(parent)?.browserContextId, sessionId, ready: false, paused: !!waitingForDebugger, detached: false, interrupted: false }
+    if (waitingForDebugger !== true) target.unqualified = true
     this.targets.set(sessionId, target); this.history.set(target.targetId, { ...targetInfo, browserContextId: target.browserContextId }); this.generation++
     target.initialization = (async () => {
+      if (this.#targetSessions) {
+        target.route = this.#targetSessions.claim(receipt)
+        const observers = [this.send(sessionId,'Network.enable'),this.send(sessionId,'Debugger.enable'),this.send(sessionId,'Target.setAutoAttach',{autoAttach:true,waitForDebuggerOnStart:true,flatten:true})]
+        if (!this.frozen) observers.push(this.send(sessionId,'Runtime.runIfWaitingForDebugger'))
+        await Promise.all(observers)
+        if (this.disposed) throw fail('profile_runtime_disposed')
+        target.ready = true;target.paused = this.frozen;return
+      }
       // Browser auto-attach requires flatten, while Playwright's public CDP
       // API has no sessionId routing parameter. A second supported legacy
       // attachment routes this target's commands without private PW fields.
@@ -105,7 +122,7 @@ export class ProfileTargetLedger {
       if (!this.frozen) { await this.send(target.sessionId, 'Runtime.runIfWaitingForDebugger'); target.paused = false }
     })().catch(async () => {
       target.unqualified = true; this.failure = 'profile_target_tracking_unavailable'
-      if (!this.frozen && !this.disposed) {
+      if (!this.#targetSessions && !this.frozen && !this.disposed) {
         await this.send(target.sessionId, 'Runtime.runIfWaitingForDebugger').catch(() => {})
         if (!parent) { this.targets.delete(sessionId); await this.session.send('Target.detachFromTarget', { sessionId }).catch(() => {}) }
       }
@@ -159,6 +176,7 @@ export class ProfileTargetLedger {
     return true
   }
   async inventory(contextId) {
+    this.#targetSessions?.assertQualified()
     if (!contextId) throw fail('profile_context_unqualified')
     await Promise.all([...this.targets.values()].filter(value => value.browserContextId === contextId).map(value => value.initialization))
     const current = (await this.session.send('Target.getTargets')).targetInfos.filter(value => value.browserContextId === contextId)
@@ -170,6 +188,8 @@ export class ProfileTargetLedger {
       if (record.missedRequest) throw fail('profile_network_untracked')
       if (record.persistentTransport) throw fail('profile_persistent_transport_unsupported')
     }
+    if (current.some(info=>[...this.targets.values()].find(value=>value.targetId===info.targetId)?.detached)) throw fail('profile_target_unqualified')
+    this.#targetSessions?.assertQualified()
     if (this.failure) throw fail(this.failure)
     return current
   }
@@ -200,7 +220,7 @@ export class ProfileTargetLedger {
       await this.send(target.sessionId, 'Runtime.runIfWaitingForDebugger').catch(() => {})
     }
   }
-  dispose() { this.disposed = true; for (const [name, listener] of this.listeners) this.session.removeListener(name, listener); for (const command of this.commands.values()) { clearTimeout(command.timer); command.reject(fail('profile_runtime_disposed')) } this.commands.clear() }
+  dispose() { this.disposed = true; this.unsubscribeNative?.();this.#targetSessions?.dispose(); for (const [name, listener] of this.listeners) this.session.removeListener(name, listener); for (const command of this.commands.values()) { clearTimeout(command.timer); command.reject(fail('profile_runtime_disposed')) } this.commands.clear() }
 }
 
 export async function restoreProfileEndpoint({ keyStore, record, authority, pinnedIdentity, assertCurrent, signal, backgroundUse }) {
@@ -288,22 +308,23 @@ function ownProcessStop(identity,timeoutMs) {
   })())})
 }
 
-/** Main/agent-only adapter. Not yet connected to host RPC or MCP commands. */
+/** Agent-owned native runtime, composed by the managed profile Companion. */
 export class BrowserProfileRuntime {
-  static async create({ chromium, executable, environment = process.env, authority, closeAndDrain, checkpoint, authorizeActivation, assertTransferAllowed, transferQualification, transferQualificationFactory, preflightExtras, captureExtras, commitExtras, onOwnedProcess, selectedPage, authorizeReviewedResume, timeoutMs = 5000, captureProcessIdentity = processIdentity, assertProcessExited = processExited }) {
+  static async create({ chromium, executable, environment = process.env, authority, closeAndDrain, checkpoint, authorizeActivation, assertTransferAllowed, transferQualification, transferQualificationFactory, preflightExtras, captureExtras, commitExtras, onOwnedProcess, selectedPage, authorizeReviewedResume, downloads, timeoutMs = 5000, captureProcessIdentity = processIdentity, assertProcessExited = processExited }) {
     const binding = authorityOf(authority)
     if (!chromium?.launch || typeof closeAndDrain !== 'function' || typeof checkpoint !== 'function' || typeof authorizeActivation !== 'function') throw fail('profile_runtime_dependencies_required')
     if ([preflightExtras, captureExtras, commitExtras].some(callback => typeof callback !== 'function')) throw fail('profile_runtime_extras_dependencies_required')
     if(transferQualificationFactory!==undefined&&(typeof transferQualificationFactory!=='function'||transferQualification!==undefined))throw fail('profile_transport_qualification_required')
     const browserEnvironment = chromeEnv(environment, { platform: process.platform, headed: false })
     for (const name of Object.keys(browserEnvironment)) if (['DBUS_SESSION_BUS_ADDRESS', 'SSH_AUTH_SOCK', 'SSH_AGENT_PID', 'NODE_OPTIONS', 'LD_PRELOAD', 'DYLD_INSERT_LIBRARIES'].includes(name.toUpperCase())) delete browserEnvironment[name]
+    const downloadBinding = downloads === undefined ? null : createRuntimeDownloadBinding(downloads, binding), downloadOptions = downloadBinding ? await downloadBinding.launchOptions() : {}
     let browser
     const launchArguments = profileLaunchArguments()
-    try { browser = await chromium.launch({ headless: true, chromiumSandbox: true, ...launchArguments, ...(executable ? { executablePath: executable } : {}), env: browserEnvironment }) }
+    try { browser = await chromium.launch({ headless: true, chromiumSandbox: true, ...launchArguments, ...downloadOptions, ...(executable ? { executablePath: executable } : {}), env: browserEnvironment }) }
     catch (error) { if (/sandbox|user namespace/i.test(error?.message || '')) throw fail('profile_browser_sandbox_setup_required'); throw fail('profile_browser_start_failed') }
     let runtime, ledger, transportObserver
     try {
-      const root = await browser.newBrowserCDPSession(); ledger = new ProfileTargetLedger(root, { timeoutMs }); await ledger.start()
+      const root = await browser.newBrowserCDPSession(); ledger = new ProfileTargetLedger(root, { timeoutMs, targetSessions:createPinnedProfileTargetSessions({browser,root,timeoutMs}) }); await ledger.start()
       const browserVersion=await browser.version(),processes=await root.send('SystemInfo.getProcessInfo'),pid=processes.processInfo.find(value=>value.type==='browser')?.id,nativeProcess=captureProcessIdentity(pid)
       const ownedStop=captureProcessIdentity===processIdentity&&assertProcessExited===processExited?ownProcessStop(nativeProcess,timeoutMs):null
       if(onOwnedProcess!==undefined){if(typeof onOwnedProcess!=='function'||!ownedStop)throw fail('profile_owned_process_proof_required');syncCall(onOwnedProcess,undefined,ownedStop)}
@@ -314,9 +335,10 @@ export class BrowserProfileRuntime {
         if(!transportObserver||transportObserver.kind!=='qualified-chromium-native-observer-v1'||transportObserver.browserVersion!==browserVersion||['assertQualified','confirmStopped','bindContext','dispose'].some(name=>typeof transportObserver[name]!=='function'))throw fail('profile_transport_qualification_required')
         before=await contexts();if(before.length!==1||before[0]!==transportObserver.privateContextId)throw fail('profile_context_unqualified')
       }
-      const context = await browser.newContext({ serviceWorkers: 'block', acceptDownloads: false })
+      const context = await browser.newContext({ serviceWorkers: 'block', acceptDownloads: downloadBinding !== null })
+      if (downloadBinding) await downloadBinding.bind(context, ownedStop)
       if(transportObserver){const after=await contexts(),added=after.filter(value=>!before.includes(value));if(after.length!==before.length+1||before.some(value=>!after.includes(value))||added.length!==1||context.pages().length)throw fail('profile_context_unqualified');contextId=added[0];await transportObserver.bindContext({context,contextId});if(context.pages().length)throw fail('profile_context_unqualified');transferQualification=transportObserver}
-      runtime = new BrowserProfileRuntime({ browser, browserVersion, root, ledger, context, authority: binding, closeAndDrain, checkpoint, authorizeActivation, assertTransferAllowed, transferQualification, transportObserver,preflightExtras, captureExtras, commitExtras, selectedPage, authorizeReviewedResume, timeoutMs, assertProcessExited })
+      runtime = new BrowserProfileRuntime({ browser, browserVersion, root, ledger, context, authority: binding, closeAndDrain, checkpoint, authorizeActivation, assertTransferAllowed, transferQualification, transportObserver,preflightExtras, captureExtras, commitExtras, selectedPage, authorizeReviewedResume, downloadBinding, timeoutMs, assertProcessExited })
       runtime.processIdentity = nativeProcess
       if (ownedStop) ownedProcesses.set(runtime, ownedStop)
       await context.route('**/*', runtime.route)
@@ -332,7 +354,9 @@ export class BrowserProfileRuntime {
   constructor(options) {
     if ([options.preflightExtras, options.captureExtras, options.commitExtras].some(callback => typeof callback !== 'function')) throw fail('profile_runtime_extras_dependencies_required')
     if ([options.selectedPage, options.authorizeReviewedResume].some(callback => callback !== undefined && typeof callback !== 'function')) throw fail('profile_resume_configuration_invalid')
+    const downloadBinding = options.downloadBinding == null ? null : assertRuntimeDownloadBinding(options.downloadBinding)
     Object.assign(this, options); this.authority = authorityOf(options.authority); this.state = 'new'; this.network = 'blocked'; this.privatePages = new Set(); this.privateURLs = new Map(); this.pages = new Set(); this.markers = []; this.frameJobs = new Set(); this.knownOrigins = new Set(); this.operation = null; this.contentKeyEpoch = null
+    Object.defineProperty(this, 'downloadBinding', { value: downloadBinding, writable: false, configurable: false })
     Object.defineProperties(this, { selectedPage: { value: options.selectedPage, writable: false, configurable: false }, authorizeReviewedResume: { value: options.authorizeReviewedResume, writable: false, configurable: false } })
     const qualification=options.transferQualification
     if(qualification!==undefined){
@@ -366,6 +390,7 @@ export class BrowserProfileRuntime {
   async newPage(url = 'about:blank') { this.assertCurrent(); const page = await this._newPage(); if (url !== 'about:blank') await page.goto(url); return page }
   restoredSelectedPage() { return this.state === 'active' ? resumedPages.get(this) || null : null }
   async preflightResumeTabs() {
+    this.downloadBinding?.assertIdle()
     this.assertCurrent()
     return this._captureResumeTabs()
   }
@@ -408,6 +433,7 @@ export class BrowserProfileRuntime {
     this.frameJobs.add(job); void job.finally(() => this.frameJobs.delete(job))
   }
   async assertMovable() {
+    this.downloadBinding?.assertIdle()
     await Promise.all([...this.frameJobs]); if (this.inventoryFailure) throw fail(this.inventoryFailure)
     await this.ledger.inventory(this.contextId); this.ledger.assertIdle(this.contextId)
     for (const page of this.context.pages()) if (!this.pages.has(page)) throw fail('profile_page_untracked')
@@ -417,6 +443,7 @@ export class BrowserProfileRuntime {
     return { origins: [...origins].sort() }
   }
   async _assertDocumentSafety() {
+    this.downloadBinding?.assertIdle()
     await this.assertTransferAllowed?.({ authority: this.authority, context: this.context })
     const expression = DOCUMENT_SAFETY_EXPRESSION
     for (const page of this.context.pages()) if (!this.privatePages.has(page)) {
@@ -455,7 +482,7 @@ export class BrowserProfileRuntime {
     catch{throw fail('profile_transport_qualification_required')}
     this._current(token);this.activeProof();await assertPhysicalZero();this._current(token);this.activeProof()
   }
-  assertCurrent() { if (this.state !== 'active' || this.network !== 'active' || !this.activeProof) throw fail('profile_runtime_authority_inactive'); this.activeProof(); return this.authority }
+  assertCurrent() { if (this.state !== 'active' || this.network !== 'active' || !this.activeProof) throw fail('profile_runtime_authority_inactive'); this.activeProof(); this.downloadBinding?.assertHealthy(); return this.authority }
   _admit(states) { if (this.operation || !states.includes(this.state)) throw fail('profile_runtime_state_refused'); const token = Symbol(); this.operation = token; return token }
   _current(token) { if (this.operation !== token || this.state === 'disposed') throw fail('profile_runtime_operation_revoked') }
   _context(value, direction) {
@@ -509,6 +536,7 @@ export class BrowserProfileRuntime {
     if (this.browser.isConnected() || await this.assertProcessExited(this.processIdentity) !== true) throw fail('profile_runtime_process_alive')
   }
   async finalize({ context, source, destinationIdentity, contentKeyEpoch }) {
+    this.downloadBinding?.assertIdle()
     context = structuredClone(context); this._context(context, 'source')
     source = { identity: structuredClone(source?.identity), signingPrivateKey: source?.signingPrivateKey, encryptionPrivateKey: source?.encryptionPrivateKey }; destinationIdentity = structuredClone(destinationIdentity)
     if (profileCrypto.identityFingerprint(source.identity) !== this.authority.keyFingerprint || contentKeyEpoch?.epoch !== this.authority.contentKeyEpoch || !Buffer.isBuffer(contentKeyEpoch.key) || contentKeyEpoch.key.length !== 32) throw fail('profile_runtime_identity_mismatch')

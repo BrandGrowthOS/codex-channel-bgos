@@ -2,7 +2,7 @@ import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
 const policy = require('./browser-host-core/policy.js'), settings = require('./browser-host-core/settings.js')
-const METHODS = new Set(['browser_navigate', 'browser_click', 'browser_handle_dialog', 'browser_select_option', 'browser_file_upload', 'browser_pdf_save'])
+const METHODS = new Set(['browser_navigate', 'browser_click', 'browser_handle_dialog', 'browser_select_option', 'browser_type', 'browser_fill_form', 'browser_file_upload', 'browser_pdf_save'])
 const fail = code => Object.assign(new Error(code), { code })
 const refused = code => ({ isError: true, content: [{ type: 'text', text: `${code}: The action did not run. Review its original page in HOAI before making another request.` }] })
 const synchronous = callback => { const value = callback(); if (value?.then) { void Promise.resolve(value).catch(() => {}); throw fail('profile_permission_context_changed') }; if (value === false) throw fail('profile_permission_context_changed') }

@@ -1,8 +1,8 @@
 {
-  "playwrightVersion": "1.63.0",
+  "playwrightVersion": "1.64.1",
   "bundleExport": "playwright-core/lib/coreBundle",
-  "bundleSha256": "549070af3acabb3efcc4f55bfe6210f9f7c2fcf633cf7eaa59bfe60719969171",
-  "upstreamSource": "https://github.com/microsoft/playwright/blob/v1.63.0/packages/playwright-core/src/server/chromium/chromiumSwitches.ts",
+  "bundleSha256": "829521b67ed7be90c7d6d6098ff39f2241562d47e4ad7ccab13710924a56001d",
+  "upstreamSource": "https://github.com/microsoft/playwright/blob/v1.64.1/packages/playwright-core/src/server/chromium/chromiumSwitches.ts",
   "uiFeatureSource": "https://chromium.googlesource.com/chromium/src/+/bf3cc6d2d1098c5addd00a916373e6fa62d3dc6b",
   "uiFeaturesDisabled": ["WebUIOmniboxPopup", "WebUIOmniboxAimPopup"]
 }

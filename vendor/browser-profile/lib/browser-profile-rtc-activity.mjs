@@ -1,8 +1,8 @@
 ﻿import { randomUUID } from 'node:crypto'
 
 // Agent/main only. Each exact native version is qualified before website code.
-export const RTC_BROWSER_VERSION = '155.0.8059.39'
-export const RTC_BROWSER_VERSIONS = Object.freeze(['153.0.8010.12', RTC_BROWSER_VERSION])
+export const RTC_BROWSER_VERSION = '156.0.8078.4'
+export const RTC_BROWSER_VERSIONS = Object.freeze([RTC_BROWSER_VERSION])
 export const RTC_MAX_HISTORY = 4096
 const URL = 'chrome://webrtc-internals/', API = '__hoaiPrivateRtc', BINDING = '__hoaiPrivateRtcSignal'
 const fail = code => Object.assign(new Error(code), { code, reason: code })

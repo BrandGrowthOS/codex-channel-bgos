@@ -152,7 +152,8 @@ function decrypt(key, envelope, associated, max, length) {
 }
 function wrappingKey(privateKey, peer, salt, context) {
   const shared = crypto.diffieHellman({ privateKey, publicKey: publicKey(peer, "x25519") });
-  try { return Buffer.from(crypto.hkdfSync("sha256", shared, salt, aad(context, "key-derivation"), 32)); }
+  // Electron bounds HKDF info; hash the complete domain-separated context.
+  try { return Buffer.from(crypto.hkdfSync("sha256", shared, salt, crypto.createHash("sha256").update(aad(context, "key-derivation")).digest(), 32)); }
   finally { shared.fill(0); }
 }
 
