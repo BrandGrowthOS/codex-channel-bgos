@@ -120,7 +120,7 @@ export class AgentRuntimePermissionClient {
     if ([...this.#records.values()].some(record => record.request.rpcId === frame.rpcId && shared.sameAuthority(record.request.authority, authority))) throw fail('profile_permission_duplicate')
     if (this.#records.size >= 64) throw fail('profile_permission_capacity')
     const request = Object.freeze({ gateId: randomUUID(), requestNonce: randomBytes(32).toString('base64url'), authority, bindingId: binding.bindingId, socketId: binding.socketId,
-      rpcId: frame.rpcId, rpcNonce: frame.rpcNonce, actionHash: createHash('sha256').update(JSON.stringify(frame.message)).digest('hex'), kind, origin: canonicalOrigin, expiresAt: Math.min(started + 60000, deadline) })
+      rpcId: frame.rpcId, rpcNonce: frame.rpcNonce, actionHash: createHash('sha256').update(JSON.stringify(frame.message)).digest('hex'), kind, origin: canonicalOrigin, expiresAt: Math.min(started + 59000, deadline) })
     const record = { request, endpoint: identity, current, signal, started, consumeAttempted: false, status: null }, handle = Object.freeze(Object.create(null))
     this.#records.set(request.gateId, record); this.#handles.set(handle, record)
     const body = { ...request, signature: shared.documentSignature(identity, { version: 1, kind: 'runtime-permission-request', request }) }
@@ -140,7 +140,7 @@ export class AgentRuntimePermissionClient {
     if (consume && record.consumeAttempted) throw fail('profile_permission_consumed')
     if (consume && (record.status?.state !== 'answered' || record.status.choice !== 'allow_once')) throw fail('profile_permission_answer_required')
     if (consume) record.consumeAttempted = true
-    const query = { ...Object.fromEntries(SCOPE.map(key => [key, record.request[key]])), readNonce: randomBytes(32).toString('base64url'), readExpiresAt: Math.min(this.now() + 10000, record.request.expiresAt) }
+    const query = { ...Object.fromEntries(SCOPE.map(key => [key, record.request[key]])), readNonce: randomBytes(32).toString('base64url'), readExpiresAt: Math.min(this.now() + 9000, record.request.expiresAt) }
     const body = { ...query, signature: shared.documentSignature(record.endpoint, { version: 1, kind: consume ? 'runtime-permission-consume' : 'runtime-permission-read', ...query }) }
     const raw = await this.#http(record, record.request.gateId + (consume ? '/consume' : '/read'), body, consume); this.#check(record)
     if (query.readExpiresAt <= this.now()) throw fail('profile_permission_response_invalid')
