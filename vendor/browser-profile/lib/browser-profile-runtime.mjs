@@ -24,6 +24,7 @@ const syncCall = (callback, receiver, value) => {
   return result
 }
 const limits = Object.freeze({ targets: 2048, history: 8192, requests: 16384, commands: 4096, messageBytes: 1024 * 1024, frames: 10000, pages: 256 })
+const frameNamespaceProofs = new WeakMap()
 const ownedProcesses = new WeakMap()
 const resumedPages = new WeakMap()
 const resumeImports = new WeakMap()
@@ -421,6 +422,7 @@ export class BrowserProfileRuntime {
   }
   _frame(page, frame, event = 'navigated') {
     const observed = this.observedPages.get(page), main = page.mainFrame(), url = frame.url()
+    const firstObservation = !!observed && !observed.frames.has(frame)
     if (observed && !observed.frames.has(frame)) observed.frames.set(frame, 0)
     if (observed && event === 'navigated') {
       observed.frames.set(frame, (observed.frames.get(frame) || 0) + 1)
@@ -443,6 +445,8 @@ export class BrowserProfileRuntime {
       }
       if (!observed || chain.at(-1)?.frame !== main || typeof proof !== 'function' || !resumeId(contextId)) throw fail('profile_frame_unqualified')
       generation = observed.frames.get(frame) || 0
+      const evidence = { firstObservation, frame, page, context, browser, root, ledger, contextId, authority, authorityValue, proof, generation, parent: chain[1]?.frame, parentGeneration: chain[1]?.generation, parentURL: chain[1]?.url, main, chain, observed, terminalUnsupported: false, native: null, work: null }
+      frameNamespaceProofs.set(marker, evidence)
       const sameDocument = (value, original, isMain) => value === original || isMain && resumeURLBase(original) !== null && resumeURLBase(value) === resumeURLBase(original)
       const inherited = chain.slice(1).map(value => originOf(value.url)).find(Boolean)
       if (attached) { marker.pending = true; marker.origin = inherited || null }
@@ -478,12 +482,12 @@ export class BrowserProfileRuntime {
             const path = [], publicPath = [...chain].reverse(); let node = tree
             for (let index = 0; index < publicPath.length; index++) {
               const expected = publicPath[index], native = node.frame, value = resumeFrameURL(native)
-              if (!resumeId(native.id) || !resumeId(native.loaderId) || typeof native.securityOrigin !== 'string' || !sameDocument(value, expected.url === '' ? 'about:blank' : expected.url, index === 0) || index && native.parentId !== path[index - 1].id) throw fail('profile_frame_unqualified')
+              if (!resumeId(native.id) || !resumeId(native.loaderId) || typeof native.securityOrigin !== 'string' || !(expected.url === '' && this.browserVersion === '156.0.8078.4' && ['', 'about:blank'].includes(value) || sameDocument(value, expected.url === '' ? 'about:blank' : expected.url, index === 0)) || index && native.parentId !== path[index - 1].id) throw fail('profile_frame_unqualified')
               const expectedOrigin = originOf(expected.url) || (expected.url === 'about:blank' || expected.url === '') && publicPath.slice(0, index).reverse().map(value => originOf(value.url)).find(Boolean)
-              if (!expectedOrigin || native.securityOrigin !== expectedOrigin) throw fail('profile_partitioned_origin_unsupported')
-              path.push({ id: native.id, parentId: native.parentId || null, loaderId: native.loaderId, url: value, securityOrigin: native.securityOrigin })
+              if (!expectedOrigin || native.securityOrigin !== expectedOrigin && !(this.browserVersion === '156.0.8078.4' && ['', 'about:blank'].includes(expected.url) && native.securityOrigin === '://')) throw fail('profile_partitioned_origin_unsupported')
+              path.push({ id: native.id, parentId: native.parentId || null, loaderId: native.loaderId, url: value, securityOrigin: native.securityOrigin, effectiveOrigin: expectedOrigin })
               if (index + 1 < publicPath.length) {
-                const candidates = (node.childFrames || []).filter(child => resumeFrameURL(child.frame) === (publicPath[index + 1].url === '' ? 'about:blank' : publicPath[index + 1].url))
+                const candidates = (node.childFrames || []).filter(child => publicPath[index + 1].url === '' && this.browserVersion === '156.0.8078.4' ? ['', 'about:blank'].includes(child.frame?.url) : resumeFrameURL(child.frame) === (publicPath[index + 1].url === '' ? 'about:blank' : publicPath[index + 1].url))
                 if (candidates.length !== 1) throw fail('profile_frame_ambiguous')
                 node = candidates[0]
               }
@@ -494,20 +498,92 @@ export class BrowserProfileRuntime {
           nativeAnchor = true
           let topURL, originURL
           try { topURL = new URL(top); originURL = new URL(marker.origin) } catch { throw fail('profile_partitioned_origin_unsupported') }
-          if (!top || !marker.origin || marker.origin !== top && (frame === main || topURL.protocol !== originURL.protocol || topURL.hostname !== originURL.hostname) || path.some(value => !originOf(value.securityOrigin)) || originOf(candidate.securityOrigin) !== marker.origin) throw fail('profile_partitioned_origin_unsupported')
-          const { storageKey } = await command('Storage.getStorageKeyForFrame', { frameId: candidate.id })
-          if (storageKey !== marker.origin + '/') throw fail('profile_partitioned_origin_unsupported')
+          if (!top || !marker.origin || marker.origin !== top && (frame === main || topURL.protocol !== originURL.protocol || topURL.hostname !== originURL.hostname) || path.some(value => !originOf(value.effectiveOrigin)) || candidate.effectiveOrigin !== marker.origin) throw fail('profile_partitioned_origin_unsupported')
+          let storageKey
+          try {
+            check(); const answer = await cdp.send('Storage.getStorageKeyForFrame', { frameId: candidate.id }); storageKey = answer?.storageKey
+            if (attached && (typeof storageKey !== 'string' || storageKey.includes('^'))) evidence.terminalUnsupported = true
+            check()
+          } catch (error) { if (/opaque origin/i.test(error?.message || '')) evidence.terminalUnsupported = true; throw error }
+          if (storageKey !== marker.origin + '/') { evidence.terminalUnsupported = true; throw fail('profile_partitioned_origin_unsupported') }
           const currentInfo = (await command('Target.getTargetInfo')).targetInfo, currentPath = locate((await command('Page.getFrameTree')).frameTree)
           if (currentInfo?.type !== info.type || currentInfo.browserContextId !== contextId || currentInfo.targetId !== info.targetId || !sameDocument(currentInfo.url, info.url, true) || canonical(path.map((value, index) => index ? value : { ...value, url: resumeURLBase(value.url) })) !== canonical(currentPath.map((value, index) => index ? value : { ...value, url: resumeURLBase(value.url) }))) throw fail('profile_frame_context_changed')
-          check(); marker.qualified = true; marker.pending = false
+          check(); evidence.native = Object.freeze({ targetId: info.targetId, path: Object.freeze(path.map(value => Object.freeze({ ...value }))), storageKey }); marker.qualified = true; marker.pending = false
         } finally { await cdp.detach().catch(() => {}) }
-      }).catch(error => {
+      }).catch(async error => {
+        if (error.reason === 'profile_partitioned_origin_unsupported') evidence.terminalUnsupported = true
+        if (!marker.qualified && attached && !evidence.terminalUnsupported) {
+          try { await this._coverInitialPortableState(marker, evidence); return } catch {}
+        }
         if (!marker.qualified) {
           marker.reason = error.reason || 'profile_frame_unqualified'; marker.pending = false
         }
       })
+      evidence.work = job
       this.frameJobs.add(job); void job.finally(() => this.frameJobs.delete(job))
     } catch (error) { marker.reason = error.reason || 'profile_frame_unqualified' }
+  }
+  async _coverInitialPortableState(marker, original) {
+    // Chromium156's genuine initial ordinary iframe either inherits its
+    // creator's namespace or is opaque with no accessible LS/IDB store, even
+    // through Inspector storage commands. This construction coverage never
+    // qualifies an observed opaque/nonced key or unknown committed document,
+    // and never borrows the subsequently loaded child's StorageKey.
+    if (this.browserVersion !== '156.0.8078.4' || original.firstObservation !== true || original.generation !== 0 || marker.url !== '' || !marker.pending || original.terminalUnsupported || !original.parent) throw fail('profile_frame_unqualified')
+    const { frame, page, context, browser, root, ledger, contextId, authority, authorityValue, proof, generation, parent, parentGeneration, parentURL, main, chain, observed } = original
+    const childURL = frame.url(), childGeneration = observed.frames.get(frame) || 0
+    if (childGeneration !== generation && childGeneration !== generation + 1) throw fail('profile_frame_context_changed')
+    const check = () => {
+      syncCall(proof, undefined); this.downloadBinding?.assertHealthy()
+      if (this.browserVersion !== '156.0.8078.4' || original.terminalUnsupported || frameNamespaceProofs.get(marker) !== original || this.context !== context || this.browser !== browser || this.root !== root || this.ledger !== ledger || this.contextId !== contextId || this.authority !== authority || canonical(authorityOf(authority)) !== authorityValue || this.activeProof !== proof || !['active','staged'].includes(this.state) || !['active','quiescing'].includes(this.network) || this.observedPages.get(page) !== observed || page.context() !== context || context.browser() !== browser || !browser.isConnected() || page.isClosed() || this.privatePages.has(page) || !this.pages.has(page) || !context.pages().includes(page) || page.mainFrame() !== main || page.url() !== main.url()) throw fail('profile_frame_context_changed')
+      const members = page.frames()
+      if (!Array.isArray(members) || members.length > limits.frames || members.some(value => !observed.frames.has(value))) throw fail('profile_frame_context_changed')
+      for (const value of chain) if (!members.includes(value.frame) || value.frame.isDetached() || value.frame.page() !== page || value.frame.parentFrame() !== value.parent || value.frame.url() !== (value.frame === frame ? childURL : value.url) || (observed.frames.get(value.frame) || 0) !== (value.frame === frame ? childGeneration : value.generation)) throw fail('profile_frame_context_changed')
+    }
+    check()
+    const parents = this.markers.filter(value => {
+      const evidence = frameNamespaceProofs.get(value)
+      return evidence && evidence.frame === parent && evidence.page === page && evidence.context === context && evidence.authority === authority && evidence.authorityValue === authorityValue && evidence.proof === proof && evidence.generation === parentGeneration && value.url === parentURL
+    })
+    if (parents.length !== 1) throw fail('profile_frame_unqualified')
+    const parentMarker = parents[0], parentEvidence = frameNamespaceProofs.get(parentMarker)
+    if (!parentEvidence?.work) throw fail('profile_frame_unqualified')
+    await parentEvidence.work; check()
+    const nativeParent = parentEvidence.native?.path.at(-1)
+    if (!parentMarker.qualified || parentEvidence.terminalUnsupported || !nativeParent || parentEvidence.native.storageKey !== marker.origin + '/' || nativeParent.effectiveOrigin !== marker.origin || !originOf(marker.origin)) throw fail('profile_partitioned_origin_unsupported')
+    const publicPath = [...chain].reverse().map(value => ({ ...value, url: value.frame === frame ? childURL : value.url }))
+    const locate = tree => {
+      let count = 0
+      const visit = (node, depth=0) => { if (!node?.frame || ++count > limits.frames || depth >= 32 || node.childFrames !== undefined && !Array.isArray(node.childFrames)) throw fail('profile_frame_unqualified'); for (const child of node.childFrames || []) visit(child,depth+1) }; visit(tree)
+      if (tree.frame.parentId) throw fail('profile_frame_unqualified')
+      const path = []; let node = tree
+      for (let index=0;index<publicPath.length;index++) {
+        const expected = publicPath[index], native = node.frame, url = native?.url === '' && expected.url === '' ? '' : resumeFrameURL(native)
+        const matches = expected.url === '' ? ['', 'about:blank'].includes(url) : url === expected.url
+        if (!matches || !resumeId(native.id) || !resumeId(native.loaderId) || index && native.parentId !== path[index-1].id || typeof native.securityOrigin !== 'string') throw fail('profile_frame_unqualified')
+        path.push({ id:native.id,loaderId:native.loaderId,parentId:native.parentId || null,url,securityOrigin:native.securityOrigin })
+        if (index+1<publicPath.length) { const next=publicPath[index+1].url, candidates=(node.childFrames || []).filter(value=>next === '' ? ['', 'about:blank'].includes(value.frame?.url) : resumeFrameURL(value.frame) === next); if(candidates.length!==1)throw fail('profile_frame_ambiguous');node=candidates[0] }
+      }
+      const parentPath=parentEvidence.native.path
+      if(path.length!==parentPath.length+1 || parentPath.some((expected,index)=>{const actual=path[index];return actual.id!==expected.id || actual.loaderId!==expected.loaderId || actual.parentId!==expected.parentId || actual.url!==expected.url || actual.securityOrigin!==expected.securityOrigin})) throw fail('profile_frame_context_changed')
+      return path
+    }
+    const cdp = await context.newCDPSession(page)
+    try {
+      const command=async(method,params={})=>{check();const result=await cdp.send(method,params);check();return result}
+      const info=(await command('Target.getTargetInfo')).targetInfo
+      if(info?.type!=='page'||info.browserContextId!==contextId||info.targetId!==parentEvidence.native.targetId||info.url!==main.url())throw fail('profile_frame_context_changed')
+      const path=locate((await command('Page.getFrameTree')).frameTree), child=path.at(-1)
+      const owner=await command('DOM.getFrameOwner',{frameId:child.id})
+      if(!Number.isSafeInteger(owner?.backendNodeId)||owner.backendNodeId<=0||owner.backendNodeId>2147483647)throw fail('profile_frame_unqualified')
+      const node=(await command('DOM.describeNode',{backendNodeId:owner.backendNodeId,depth:0})).node
+      if(node?.nodeType!==1||node.nodeName!=='IFRAME'||node.localName!=='iframe'||node.backendNodeId!==owner.backendNodeId||node.frameId!==child.id)throw fail('profile_frame_unqualified')
+      const currentOwner=await command('DOM.getFrameOwner',{frameId:child.id}), currentNode=(await command('DOM.describeNode',{backendNodeId:owner.backendNodeId,depth:0})).node
+      if(currentOwner.backendNodeId!==owner.backendNodeId||currentNode?.nodeType!==node.nodeType||currentNode.nodeName!==node.nodeName||currentNode.localName!==node.localName||currentNode.backendNodeId!==node.backendNodeId||currentNode.frameId!==node.frameId||canonical(path)!==canonical(locate((await command('Page.getFrameTree')).frameTree)))throw fail('profile_frame_context_changed')
+      const currentInfo=(await command('Target.getTargetInfo')).targetInfo
+      if(currentInfo?.type!==info.type||currentInfo.targetId!==info.targetId||currentInfo.browserContextId!==info.browserContextId||currentInfo.url!==info.url)throw fail('profile_frame_context_changed')
+      check(); marker.qualified=true;marker.pending=false;marker.qualification='initial-portable-state-covered'
+    } finally { await cdp.detach().catch(()=>{}) }
   }
   async assertMovable() {
     this.downloadBinding?.assertIdle()
