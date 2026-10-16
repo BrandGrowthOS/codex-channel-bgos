@@ -355,7 +355,7 @@ export class BrowserProfileRuntime {
     if ([options.preflightExtras, options.captureExtras, options.commitExtras].some(callback => typeof callback !== 'function')) throw fail('profile_runtime_extras_dependencies_required')
     if ([options.selectedPage, options.authorizeReviewedResume].some(callback => callback !== undefined && typeof callback !== 'function')) throw fail('profile_resume_configuration_invalid')
     const downloadBinding = options.downloadBinding == null ? null : assertRuntimeDownloadBinding(options.downloadBinding)
-    Object.assign(this, options); this.authority = authorityOf(options.authority); this.state = 'new'; this.network = 'blocked'; this.privatePages = new Set(); this.privateURLs = new Map(); this.pages = new Set(); this.markers = []; this.frameJobs = new Set(); this.knownOrigins = new Set(); this.operation = null; this.contentKeyEpoch = null
+    Object.assign(this, options); this.authority = authorityOf(options.authority); this.state = 'new'; this.network = 'blocked'; this.privatePages = new Set(); this.privateURLs = new Map(); this.pages = new Set(); this.markers = []; this.frameJobs = new Set(); this.knownOrigins = new Set(); this.operation = null; this.contentKeyEpoch = null; this.observedPages = new WeakMap()
     Object.defineProperty(this, 'downloadBinding', { value: downloadBinding, writable: false, configurable: false })
     Object.defineProperties(this, { selectedPage: { value: options.selectedPage, writable: false, configurable: false }, authorizeReviewedResume: { value: options.authorizeReviewedResume, writable: false, configurable: false } })
     const qualification=options.transferQualification
@@ -378,7 +378,12 @@ export class BrowserProfileRuntime {
     this.pageCreated = page => { if (this.pages.size >= limits.pages) { this.inventoryFailure = 'profile_inventory_limit'; return } this.pages.add(page); if (this.creatingPrivate) { this.privatePages.add(page); return } this._observePage(page) }
     this.context.on('page', this.pageCreated)
   }
-  _observePage(page) { page.on('framenavigated', frame => this._frame(page, frame)); page.on('frameattached', frame => this._frame(page, frame)) }
+  _observePage(page) {
+    if (this.observedPages.has(page)) return
+    this.observedPages.set(page, { generation: 0, documentGeneration: 0, topURL: null, frames: new WeakMap() })
+    page.on('framenavigated', frame => this._frame(page, frame, 'navigated'))
+    page.on('frameattached', frame => this._frame(page, frame, 'attached'))
+  }
   async _newPage(privatePage = false) {
     this.creatingPrivate = privatePage
     try {
@@ -414,23 +419,95 @@ export class BrowserProfileRuntime {
     if (current.length !== pages.length || current.some((page, index) => page !== pages[index] || page.url() !== tabs[index].url) || syncCall(this.selectedPage, undefined) !== selected) throw fail('profile_resume_selection_unproved')
     return validateResumeTabs({ version: 1, selectedIndex, tabs })
   }
-  _frame(page, frame) {
-    const url = frame.url(); if (frame === page.mainFrame() && url === 'about:blank') return
+  _frame(page, frame, event = 'navigated') {
+    const observed = this.observedPages.get(page), main = page.mainFrame(), url = frame.url()
+    if (observed && !observed.frames.has(frame)) observed.frames.set(frame, 0)
+    if (observed && event === 'navigated') {
+      observed.frames.set(frame, (observed.frames.get(frame) || 0) + 1)
+      if (frame === main) {
+        if (observed.topURL === url || resumeURLBase(observed.topURL) === null || resumeURLBase(observed.topURL) !== resumeURLBase(url)) observed.documentGeneration++
+        observed.topURL = url; observed.generation++
+      }
+    }
+    if (frame === main && url === 'about:blank') return
     if (this.markers.length >= limits.frames || this.frameJobs.size >= limits.frames || typeof url !== 'string' || url.length > 16384) { this.inventoryFailure = 'profile_inventory_limit'; return }
-    const marker = { frame, page, url, origin: originOf(url), qualified: false }; this.markers.push(marker)
-    const job = (async () => {
-      const cdp = await this.context.newCDPSession(page)
-      try {
-      const tree = (await cdp.send('Page.getFrameTree')).frameTree
-      const main = frame === page.mainFrame(), sameDocument = value => value === url || main && resumeURLBase(url) !== null && resumeURLBase(value) === resumeURLBase(url)
-      const frames = node => [node.frame, ...(node.childFrames || []).flatMap(frames)], candidates = main ? [tree.frame] : frames(tree).filter(value => value.url === url)
-      if (candidates.length !== 1) throw fail('profile_frame_ambiguous')
-      const { storageKey } = await cdp.send('Storage.getStorageKeyForFrame', { frameId: candidates[0].id }), top = originOf(tree.frame.url)
-      if (frame.isDetached() || !sameDocument(frame.url()) || !sameDocument(candidates[0].url) || !top || storageKey !== top + '/' || marker.origin && marker.origin !== top || !marker.origin && url !== 'about:blank') throw fail('profile_partitioned_origin_unsupported')
-      marker.origin = top; marker.qualified = true
-      } finally { await cdp.detach().catch(() => {}) }
-    })().catch(error => { marker.reason = error.reason || 'profile_frame_unqualified' })
-    this.frameJobs.add(job); void job.finally(() => this.frameJobs.delete(job))
+    const marker = { frame, page, url, origin: originOf(url), qualified: false }, attached = event === 'attached' && frame !== main && url === ''
+    this.markers.push(marker)
+    let check, generation
+    try {
+      const context = this.context, browser = this.browser, root = this.root, ledger = this.ledger, contextId = this.contextId, authority = this.authority, authorityValue = canonical(authorityOf(authority)), proof = this.activeProof
+      const topGeneration = observed?.generation, topDocumentGeneration = observed?.documentGeneration, chain = [], seen = new Set()
+      for (let value = frame; value; value = value.parentFrame()) {
+        if (seen.has(value) || chain.length >= 32) throw fail('profile_frame_unqualified')
+        seen.add(value); chain.push({ frame: value, url: value.url(), parent: value.parentFrame(), generation: observed?.frames.get(value) || 0 })
+      }
+      if (!observed || chain.at(-1)?.frame !== main || typeof proof !== 'function' || !resumeId(contextId)) throw fail('profile_frame_unqualified')
+      generation = observed.frames.get(frame) || 0
+      const sameDocument = (value, original, isMain) => value === original || isMain && resumeURLBase(original) !== null && resumeURLBase(value) === resumeURLBase(original)
+      const inherited = chain.slice(1).map(value => originOf(value.url)).find(Boolean)
+      if (attached) { marker.pending = true; marker.origin = inherited || null }
+      else if (!marker.origin && url === 'about:blank' && frame !== main) marker.origin = inherited || null
+      let nativeAnchor = false
+      check = () => {
+        // The trusted coordinator proof can reenter; native/public identities
+        // are checked only after it has returned synchronously.
+        syncCall(proof, undefined); this.downloadBinding?.assertHealthy()
+        const anchoredHash = nativeAnchor && observed.documentGeneration === topDocumentGeneration
+        if (this.context !== context || this.browser !== browser || this.root !== root || this.ledger !== ledger || this.contextId !== contextId || this.authority !== authority || canonical(authorityOf(this.authority)) !== authorityValue || this.activeProof !== proof || !['active', 'staged'].includes(this.state) || !['active', 'quiescing'].includes(this.network) || this.observedPages.get(page) !== observed || observed.generation !== topGeneration && !anchoredHash || page.context() !== context || context.browser() !== browser || !browser.isConnected() || page.isClosed() || this.privatePages.has(page) || !this.pages.has(page) || !context.pages().includes(page) || page.mainFrame() !== main) throw fail('profile_frame_context_changed')
+        const current = page.frames()
+        if (!Array.isArray(current) || current.length > limits.frames || current.some(value => !observed.frames.has(value)) || page.url() !== main.url()) throw fail('profile_frame_context_changed')
+        for (const value of chain) {
+          if (!current.includes(value.frame) || value.frame.page() !== page || value.frame.isDetached() || value.frame.parentFrame() !== value.parent || ((observed.frames.get(value.frame) || 0) !== value.generation && !(value.frame === main && anchoredHash)) || !sameDocument(value.frame.url(), value.url, value.frame === main)) throw fail('profile_frame_context_changed')
+        }
+      }
+      check()
+      // An empty public URL can already have a native initial document. Prove
+      // that original about:blank key while current; a later commit cannot
+      // repair an unknown or unsupported initial document.
+      const job = Promise.resolve().then(async () => {
+        check(); const cdp = await context.newCDPSession(page)
+        try {
+          check()
+          const command = async (method, params = {}) => { check(); const value = await cdp.send(method, params); check(); return value }
+          const info = (await command('Target.getTargetInfo')).targetInfo
+          if (info?.type !== 'page' || info.browserContextId !== contextId || !resumeId(info.targetId) || !sameDocument(info.url, chain.at(-1).url, true)) throw fail('profile_frame_context_changed')
+          const locate = tree => {
+            if (!tree?.frame || tree.frame.parentId) throw fail('profile_frame_unqualified')
+            let count = 0
+            const visit = (node, depth = 0) => { if (!node?.frame || ++count > limits.frames || depth >= 32 || node.childFrames !== undefined && !Array.isArray(node.childFrames)) throw fail('profile_frame_unqualified'); for (const child of node.childFrames || []) visit(child, depth + 1) }; visit(tree)
+            const path = [], publicPath = [...chain].reverse(); let node = tree
+            for (let index = 0; index < publicPath.length; index++) {
+              const expected = publicPath[index], native = node.frame, value = resumeFrameURL(native)
+              if (!resumeId(native.id) || !resumeId(native.loaderId) || typeof native.securityOrigin !== 'string' || !sameDocument(value, expected.url === '' ? 'about:blank' : expected.url, index === 0) || index && native.parentId !== path[index - 1].id) throw fail('profile_frame_unqualified')
+              const expectedOrigin = originOf(expected.url) || (expected.url === 'about:blank' || expected.url === '') && publicPath.slice(0, index).reverse().map(value => originOf(value.url)).find(Boolean)
+              if (!expectedOrigin || native.securityOrigin !== expectedOrigin) throw fail('profile_partitioned_origin_unsupported')
+              path.push({ id: native.id, parentId: native.parentId || null, loaderId: native.loaderId, url: value, securityOrigin: native.securityOrigin })
+              if (index + 1 < publicPath.length) {
+                const candidates = (node.childFrames || []).filter(child => resumeFrameURL(child.frame) === (publicPath[index + 1].url === '' ? 'about:blank' : publicPath[index + 1].url))
+                if (candidates.length !== 1) throw fail('profile_frame_ambiguous')
+                node = candidates[0]
+              }
+            }
+            return path
+          }
+          const path = locate((await command('Page.getFrameTree')).frameTree), top = originOf(path[0].url), candidate = path.at(-1)
+          nativeAnchor = true
+          let topURL, originURL
+          try { topURL = new URL(top); originURL = new URL(marker.origin) } catch { throw fail('profile_partitioned_origin_unsupported') }
+          if (!top || !marker.origin || marker.origin !== top && (frame === main || topURL.protocol !== originURL.protocol || topURL.hostname !== originURL.hostname) || path.some(value => !originOf(value.securityOrigin)) || originOf(candidate.securityOrigin) !== marker.origin) throw fail('profile_partitioned_origin_unsupported')
+          const { storageKey } = await command('Storage.getStorageKeyForFrame', { frameId: candidate.id })
+          if (storageKey !== marker.origin + '/') throw fail('profile_partitioned_origin_unsupported')
+          const currentInfo = (await command('Target.getTargetInfo')).targetInfo, currentPath = locate((await command('Page.getFrameTree')).frameTree)
+          if (currentInfo?.type !== info.type || currentInfo.browserContextId !== contextId || currentInfo.targetId !== info.targetId || !sameDocument(currentInfo.url, info.url, true) || canonical(path.map((value, index) => index ? value : { ...value, url: resumeURLBase(value.url) })) !== canonical(currentPath.map((value, index) => index ? value : { ...value, url: resumeURLBase(value.url) }))) throw fail('profile_frame_context_changed')
+          check(); marker.qualified = true; marker.pending = false
+        } finally { await cdp.detach().catch(() => {}) }
+      }).catch(error => {
+        if (!marker.qualified) {
+          marker.reason = error.reason || 'profile_frame_unqualified'; marker.pending = false
+        }
+      })
+      this.frameJobs.add(job); void job.finally(() => this.frameJobs.delete(job))
+    } catch (error) { marker.reason = error.reason || 'profile_frame_unqualified' }
   }
   async assertMovable() {
     this.downloadBinding?.assertIdle()
