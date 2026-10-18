@@ -28,6 +28,21 @@ const CREDS = {
   assistantId: ASSISTANT,
 };
 
+describe("managed caller route selection", () => {
+  const paired = { ...CREDS, ownerUserId: "user_owner" };
+  const context = { HOAI_RELAY_CONTEXT_FILE: "/owned/context.json", HOAI_RELAY_OWNER_USER_ID: "user_owner", HOAI_RELAY_CLIENT_PID: "123", HOAI_RELAY_PROFILE_SYNC: "0" };
+  it("selects profile discovery after stale flags only for an authenticated managed pairing", () => {
+    expect((browserMcpConfigOverrides(bundled, process.execPath, paired, context)[ENV_KEY] as any).HOAI_RELAY_PROFILE_SYNC).toBe("1");
+  });
+  it("does not enable unpaired, standalone or mismatched contexts from a supplied flag", () => {
+    for (const [relay, env] of [[null, context], [paired, undefined], [paired, { ...context, HOAI_RELAY_OWNER_USER_ID: "user_other" }],
+      [paired, { ...context, HOAI_RELAY_CLIENT_PID: "" }], [{ ...paired, pairingToken: "" }, context]] as const) {
+      const result = browserMcpConfigOverrides(bundled, process.execPath, relay, env)[ENV_KEY] as Record<string, string> | undefined;
+      expect(result?.HOAI_RELAY_PROFILE_SYNC).toBeUndefined();
+    }
+  });
+});
+
 describe("resolveBrowserShim", () => {
   it("prefers the app-installed shim under ~/.hoai/bin", () => {
     expect(
