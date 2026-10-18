@@ -10,7 +10,7 @@ const require = createRequire(import.meta.url)
 const failure = () => Object.assign(new Error('The bundled Chromium could not be installed. Check the pinned package and writable user cache.'), { code: 'browser_install_failed' })
 const lockName = '.hoai-chromium-install.lock'
 const pin = JSON.parse(readFileSync(new URL('./browser-bootstrap.pin.json', import.meta.url), 'utf8'))
-const regular = (path, max) => { const st = lstatSync(path); if (!st.isFile() || st.isSymbolicLink() || st.nlink !== 1 || st.size > max) throw failure(); return st }
+const regular = (path, max, { allowHardlinks = false } = {}) => { const st = lstatSync(path); if (!st.isFile() || st.isSymbolicLink() || (!allowHardlinks && st.nlink !== 1) || st.size > max) throw failure(); return st }
 
 /** Exact bundled package paths only; not a different executable or downloader. */
 export function bundledChromium() {
@@ -18,7 +18,9 @@ export function bundledChromium() {
   const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
   if (pkg.version !== pin.playwrightVersion) throw failure()
   for (const path of ['cli.js', 'lib/bootstrap.js', 'lib/coreBundle.js', 'lib/utilsBundle.js', 'lib/entry/oopBrowserDownload.js']) {
-    const file = join(root, path); regular(file, 16000000)
+    // Bun's package cache uses hardlinks on Linux and Windows. These exact
+    // dependency bytes are hash-pinned below. Runtime files and locks keep the single-link check.
+    const file = join(root, path); regular(file, 16000000, { allowHardlinks: true })
     if (createHash('sha256').update(readFileSync(file)).digest('hex') !== pin.sha256[path]) throw failure()
   }
   const executable = require('playwright-core').chromium.executablePath()

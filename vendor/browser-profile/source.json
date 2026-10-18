@@ -1,7 +1,7 @@
 {
   "version": 1,
   "repository": "BrandGrowthOS/bgos-claude-plugin",
-  "sourceCommit": "1317e71b941a915efea3deacfeb4dd34b031819a",
+  "sourceCommit": "7d8db11a0fd4535ba4e538cd2b7f7cd2f18a8095",
   "entry": "bin/hoai-browser-host.mjs",
   "why": "The same reviewed browser host, profile runtime, encryption and authorization execute for Claude and Codex. Only the Codex daemon launcher is different.",
   "files": {
@@ -15,7 +15,7 @@
       "sha256": "8ade5cd8d3b6876828ceb29cebe72e892731aa9e39fae7b4df4ac67d5dfc4e11"
     },
     "lib/browser-bootstrap.mjs": {
-      "sha256": "76467e8feaca93098fdf270f85a3dea12f9dffad2c4e976c268ba2ff299c3965"
+      "sha256": "be61f2294ef35b6da72dc1c6eb10133321be56cb4ed54af7366be07edeccf3c0"
     },
     "lib/browser-bootstrap.pin.json": {
       "sha256": "21057fbfe0993ccace1bc9f5ff977039af41cd9b790c6eed473dd58a73cb13ae"
