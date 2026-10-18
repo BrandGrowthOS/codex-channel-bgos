@@ -24,14 +24,110 @@ const plain = value => value && typeof value === 'object' && !Array.isArray(valu
 const encoded = (value, length) => typeof value === 'string' && /^[A-Za-z0-9+/]+={0,2}$/.test(value) && Buffer.from(value, 'base64').length === length
 const protectedWindowsDirectories = new Map()
 
-function protectWindowsDirectory(directory, stat) {
+// Why a profile folder is refused, in words its owner can act on. The message
+// reaches the agent (and through it the owner), so it never names a path, an
+// account or a Windows error; `detail` carries those for the host's own log.
+const PROFILE_REFUSALS = {
+  alias: folder => `${folder} is a link or not a plain folder. Use a plain folder.`,
+  owner_foreign: folder => `${folder} belongs to another account. Make the agent's own account its owner (on Windows, Full control of the folder for the agent's account lets the browser take it over), then try again.`,
+  owner_not_set: folder => `Windows did not let the agent's account become the owner of ${folder}, and the folder could not be checked instead. Give the agent's account Full control of the folder, then try again.`,
+  other_writer: folder => `another account can write to ${folder}. Remove that access, or on Windows give the agent's account Full control of the folder so the browser can lock the others out, then try again.`,
+  not_private: folder => `${folder} could not be made private to the agent's account. Check the folder's permissions, then try again.`,
+  acl_step_failed: folder => `the Windows permission step for ${folder} did not finish (PowerShell). Try again, and if it keeps failing check that PowerShell runs for the agent's account.`,
+}
+const PROFILE = 'the browser profile folder', ABOVE_PROFILE = 'a folder above the browser profile folder'
+const refuse = (reason, detail, folder = PROFILE) => Object.assign(new Error(`unsafe_profile: ${PROFILE_REFUSALS[reason](folder)} The browser host log has the details.`),
+  { code: 'unsafe_profile', reason, detail })
+
+// Access bits that only read, list or traverse: FILE_READ_DATA, FILE_READ_EA,
+// FILE_TRAVERSE, FILE_READ_ATTRIBUTES, READ_CONTROL, SYNCHRONIZE, GENERIC_READ
+// and GENERIC_EXECUTE. Any other bit, known or not, lets an account change the
+// folder, what is in it, its access list or its owner. Inherit-only entries
+// count too: they hand that access to everything made in the folder.
+const READ_ONLY_RIGHTS = 0xA01200A9
+// ACCESS_DENIED and its object, callback and callback object forms. A deny lets
+// no one in; any other entry type counts as an allow.
+const DENY_ENTRIES = new Set([1, 6, 10, 12])
+const otherWriter = (entry, me) => !DENY_ENTRIES.has(entry?.type) && entry?.sid !== me &&
+  (!Number.isInteger(entry?.mask) || ((entry.mask >>> 0) & ~READ_ONLY_RIGHTS) !== 0)
+const accounts = entries => [...new Set(entries.map(entry => entry?.name || entry?.sid || 'an entry with no account'))].join(', ')
+
+// The vault's access list is one entry, the user's own Full control, so its
+// allow-list is the user alone: SYSTEM and Administrators are other accounts.
+function windowsOwnershipRefusal({ me, owner, dacl }) {
+  if (typeof me !== 'string' || !me || typeof owner !== 'string' || !owner) return 'owner_not_set'
+  if (owner !== me) return 'owner_foreign'
+  if (dacl === null) return 'other_writer' // no access list at all lets everyone in
+  if (!Array.isArray(dacl)) return 'owner_not_set'
+  return dacl.some(entry => otherWriter(entry, me)) ? 'other_writer' : null
+}
+
+// powershell -Command - runs stdin one line at a time and goes on after an
+// error, so each step catches its own and the last line always answers: the
+// user, whether the access list was written and, when it was not (or after a
+// lock without SetOwner), the folder's owner and every entry of its access
+// list, whatever the entry type (GetAccessRules leaves out object and custom
+// entries). A folder that takes the owner reads nothing back, as before.
+// PowerShell reads stdin in the console code page, so the script stays ASCII:
+// the folder arrives as UTF-16 in base64 (no quoting either), and non-ASCII
+// in the answer is escaped.
+function windowsAclScript(directory, setOwner) {
+  const target = Buffer.from(directory, 'utf16le').toString('base64')
+  return ["$ErrorActionPreference = 'Stop'", `$target = [System.Text.Encoding]::Unicode.GetString([System.Convert]::FromBase64String('${target}'))`, '$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()',
+    '$acl = New-Object System.Security.AccessControl.DirectorySecurity', ...(setOwner ? ['$acl.SetOwner($identity.User)'] : []),
+    '$acl.SetAccessRuleProtection($true, $false)',
+    "$rule = New-Object System.Security.AccessControl.FileSystemAccessRule($identity.User, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')",
+    '$acl.AddAccessRule($rule)',
+    '$answer = @{ me = $identity.User.Value; set = $false }',
+    'try { [System.IO.Directory]::SetAccessControl($target, $acl); $answer.set = $true } catch { $answer.error = $_.Exception.Message }',
+    `$read = ${setOwner ? '-not $answer.set' : '$true'}`,
+    '$name = { param($sid) try { $sid.Translate([System.Security.Principal.NTAccount]).Value } catch { $sid.Value } }',
+    "if ($read) { try { $answer.meName = $identity.Name; $sd = New-Object System.Security.AccessControl.RawSecurityDescriptor(([System.IO.Directory]::GetAccessControl($target, 'Access,Owner')).GetSecurityDescriptorBinaryForm(), 0); " +
+      '$answer.owner = $sd.Owner.Value; $answer.ownerName = & $name $sd.Owner; $answer.protected = [bool]($sd.ControlFlags -band [System.Security.AccessControl.ControlFlags]::DiscretionaryAclProtected); ' +
+      '$answer.dacl = $null; if ($null -ne $sd.DiscretionaryAcl) { $answer.dacl = @(foreach ($ace in $sd.DiscretionaryAcl) { $known = $ace -is [System.Security.AccessControl.KnownAce]; ' +
+      '@{ type = [int]$ace.AceType; flags = [int]$ace.AceFlags; mask = $(if ($known) { [int]$ace.AccessMask } else { $null }); sid = $(if ($known) { $ace.SecurityIdentifier.Value } else { $null }); name = $(if ($known) { & $name $ace.SecurityIdentifier } else { $null }) } }) } ' +
+      '} catch { $answer.readError = $_.Exception.Message } }',
+    "[Console]::Out.WriteLine([regex]::Replace((ConvertTo-Json $answer -Compress -Depth 4), '[^\\u0000-\\u007F]', { param($m) '\\u{0:x4}' -f [int][char]$m.Value }))",
+  ].join('\n') + '\n'
+}
+
+function runWindowsAclScript(script) {
+  let output
+  try { output = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '-'], { input: script, encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true, timeout: 10000 }) }
+  catch (error) { return { failed: error.code === 'ETIMEDOUT' ? 'PowerShell did not finish within 10 s' : `PowerShell failed (${error.code || `exit ${error.status}`})` } }
+  try { return JSON.parse(output.split(/\r?\n/).filter(line => line.startsWith('{')).pop()) }
+  catch { return { failed: 'PowerShell gave no readable answer' } }
+}
+
+/**
+ * @param {string} directory
+ * @param {{ ino: number | bigint }} stat
+ * @param {(script: string) => any} [run]
+ */
+export function protectWindowsDirectory(directory, stat, run = runWindowsAclScript) {
   if (protectedWindowsDirectories.get(directory) === stat.ino) return
   // No passphrase, vault data or caller code enters this process. Restrict the
   // fixed profile directory to its current Windows identity and inherited files.
-  const quoted = directory.replaceAll("'", "''")
-  const script = `$ErrorActionPreference = 'Stop'\n$target = '${quoted}'\n$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()\n$acl = New-Object System.Security.AccessControl.DirectorySecurity\n$acl.SetOwner($identity.User)\n$acl.SetAccessRuleProtection($true, $false)\n$rule = New-Object System.Security.AccessControl.FileSystemAccessRule($identity.User, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')\n$acl.AddAccessRule($rule)\n[System.IO.Directory]::SetAccessControl($target, $acl)\n`
-  try { execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '-'], { input: script, stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true, timeout: 10000 }) }
-  catch { throw fail('unsafe_profile') }
+  const first = run(windowsAclScript(directory, true))
+  if (first.set !== true) {
+    // Setting the owner needs WRITE_OWNER, which Modify alone does not give,
+    // not even to the folder's owner. A folder that is already the user's own
+    // and that no other account can write gets the same access list without
+    // SetOwner (an owner may write that list unless an OWNER RIGHTS entry
+    // says otherwise), read back before it is accepted. Anything else is
+    // refused, and says why.
+    const reason = first.failed ? 'acl_step_failed' : windowsOwnershipRefusal(first)
+    const me = first.meName || first.me, refused = `Windows refused to make ${me} its owner (${first.error})`
+    if (reason === 'acl_step_failed') throw refuse(reason, first.failed)
+    if (reason === 'owner_foreign') throw refuse(reason, `${directory} belongs to ${first.ownerName || first.owner}, not to ${me}; ${refused}`)
+    if (reason === 'other_writer') throw refuse(reason, `${first.dacl === null ? 'everyone (no access list)' : accounts(first.dacl.filter(entry => otherWriter(entry, first.me)))} can write to ${directory}; ${refused}`)
+    if (reason) throw refuse(reason, `${refused}, and its owner and access list could not be read (${first.readError || 'no answer'})`)
+    const second = run(windowsAclScript(directory, false))
+    if (second.failed) throw refuse('acl_step_failed', second.failed)
+    const locked = second.set === true && second.owner === first.me && second.protected === true && Array.isArray(second.dacl) && second.dacl.length === 1 &&
+      second.dacl[0]?.type === 0 && second.dacl[0].sid === first.me && second.dacl[0].flags === 3 && (second.dacl[0].mask >>> 0) === 0x1F01FF
+    if (!locked) throw refuse('not_private', second.set === true ? `${directory} reads back as owner ${second.ownerName || second.owner}, ${second.protected ? '' : 'not '}protected, entries for ${accounts(second.dacl || [])}` : `the access list of ${directory} could not be limited to ${me} (${second.error})`)
+  }
   protectedWindowsDirectories.set(directory, stat.ino)
 }
 
@@ -43,20 +139,26 @@ export function secureProfileDir(directory) {
   while (true) {
     try {
       const st = lstatSync(current)
-      if (!st.isDirectory() || st.isSymbolicLink()) throw fail('unsafe_profile')
-      if (process.platform !== 'win32' && (st.uid !== 0 && st.uid !== process.getuid() ||
-          ((st.mode & 0o022) && !(st.uid === 0 && (st.mode & 0o1000))))) throw fail('unsafe_profile')
+      const folder = current === absolute ? PROFILE : ABOVE_PROFILE
+      if (!st.isDirectory() || st.isSymbolicLink()) throw refuse('alias', `${current} is ${st.isSymbolicLink() ? 'a link' : 'not a folder'}`, folder)
+      if (process.platform !== 'win32' && st.uid !== 0 && st.uid !== process.getuid()) throw refuse('owner_foreign', `${current} belongs to uid ${st.uid}`, folder)
+      if (process.platform !== 'win32' && (st.mode & 0o022) && !(st.uid === 0 && (st.mode & 0o1000))) {
+        throw refuse('other_writer', `${current} can be written by its group or by everyone (mode ${(st.mode & 0o7777).toString(8)})`, folder)
+      }
     }
     catch (error) { if (error.code !== 'ENOENT') throw error }
     const parent = dirname(current); if (parent === current) break; current = parent
   }
   mkdirSync(absolute, { recursive: true, mode: 0o700 })
   const st = lstatSync(absolute)
-  if (st.isSymbolicLink() || !st.isDirectory() || realpathSync(absolute) !== absolute) throw fail('unsafe_profile')
+  if (st.isSymbolicLink() || !st.isDirectory()) throw refuse('alias', `${absolute} is ${st.isSymbolicLink() ? 'a link' : 'not a folder'}`)
+  const real = realpathSync(absolute)
+  if (real !== absolute) throw refuse('alias', `${absolute} resolves to ${real}`)
   if (process.platform !== 'win32') {
-    if (st.uid !== process.getuid()) throw fail('unsafe_profile')
+    if (st.uid !== process.getuid()) throw refuse('owner_foreign', `${absolute} belongs to uid ${st.uid}`)
     chmodSync(absolute, 0o700)
-    if (lstatSync(absolute).mode & 0o077) throw fail('unsafe_profile')
+    const mode = lstatSync(absolute).mode
+    if (mode & 0o077) throw refuse('not_private', `${absolute} keeps mode ${(mode & 0o7777).toString(8)} after chmod 700`)
   } else protectWindowsDirectory(absolute, st)
   return absolute
 }
@@ -182,7 +284,7 @@ export class AgentBrowserVault {
     if (names.some(name => !LEGACY.has(name))) throw fail('legacy_cleanup_required')
     for (const name of names) {
       const target = resolve(this.dir, name)
-      if (dirname(target) !== this.dir || !target.startsWith(this.dir + sep)) throw fail('unsafe_profile')
+      if (dirname(target) !== this.dir || !target.startsWith(this.dir + sep)) throw refuse('alias', `${target} is not inside ${this.dir}`, 'a name in the browser profile folder')
       // Recursive deletion stays below this verified fixed profile. rm does
       // not follow symlinks; a native Chrome Singleton link is unlinked only.
       rmSync(target, { recursive: true, force: false })

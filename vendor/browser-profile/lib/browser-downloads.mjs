@@ -144,7 +144,8 @@ const clip = (s, n = 60) => cleanFileName(s || '', n)
 /** The ask, read after "<agent> wants to": what, where an Allow puts it, what no answer does. */
 export function askSummary({ fileName, device, agentName, displayDir, keepable, fileLimit = DOWNLOAD_KEEP_LIMITS.fileBytes }) {
   const where = clip(device)
-  const agent = clip(agentName || 'Your agent')
+  // Mid sentence, so a missing name reads "your agent", never "Your agent".
+  const agent = clip(agentName || 'your agent')
   const unanswered = keepable
     ? `If you don't answer, the file is kept for you on ${where} (up to ${sizeWords(fileLimit)}) and ${agent} doesn't get it.`
     : `If you don't answer, the file is deleted.`
@@ -162,7 +163,7 @@ const NOTICE_WHY = {
 /** The notice the moment a file is kept: why, where, and what each button does. */
 export function keptSummary({ fileName, device, agentName, displayDir, reason }) {
   const where = clip(device)
-  const agent = clip(agentName || 'Your agent')
+  const agent = clip(agentName || 'your agent')
   const why = NOTICE_WHY[reason] || NOTICE_WHY.no_answer
   return fit(
     (n) => `download ${n}: ${why}, so it is kept for you on ${where} and ${agent} does not get it. Allow gives this one file to ${agent} in ${displayDir}; Deny deletes it now. It is deleted by itself after 7 days.`,
@@ -871,7 +872,10 @@ export class DownloadStore {
       kind: 'download',
       origin: row.origin ?? null,
       summary: keptSummary({ fileName: row.fileName, device: this.deviceLabel, agentName: row.agentName, displayDir: this.displayOutputDir(key), reason: row.keptReason }),
-      agentName: row.agentName || 'Your agent',
+      // No name known (a record from before the host carried it): null, and the
+      // backend names the agent from its own record rather than "Your agent".
+      agentName: row.agentName || null,
+      download: { stage: 'kept', fileName: row.fileName, folder: this.displayOutputDir(key), device: this.deviceLabel, reason: row.keptReason || 'no_answer' },
       purpose: null,
       waitSeconds: KEPT_NOTICE_WAIT_S,
       choices: [...KEPT_NOTICE_CHOICES],
@@ -1281,13 +1285,15 @@ export class SlotDownloads {
       if (decision.verdict === 'deny') return this._discard(row, 'deleted', 'rule')
       this._sizeNow(row)
       const ctx = this._ctx()
+      const keepable = this._keepable(row)
       const out = await this.gates.raise({
         key: this.gateKey,
         assistantId: this.store.assistantId,
         kind: 'download',
         origin: row.origin,
-        summary: askSummary({ fileName: row.fileName, device: this.store.deviceLabel, agentName: ctx.agentName, displayDir: this.store.displayOutputDir(this.key), keepable: this._keepable(row), fileLimit: this.store.limits.fileBytes }),
+        summary: askSummary({ fileName: row.fileName, device: this.store.deviceLabel, agentName: ctx.agentName, displayDir: this.store.displayOutputDir(this.key), keepable, fileLimit: this.store.limits.fileBytes }),
         agentName: ctx.agentName ?? null,
+        download: { stage: 'ask', fileName: row.fileName, folder: this.store.displayOutputDir(this.key), device: this.store.deviceLabel, keepsIfUnanswered: keepable },
         purpose: ctx.purpose ?? null,
         waitSeconds: DOWNLOAD_ASK_WAIT_S,
         choices: this.choices,

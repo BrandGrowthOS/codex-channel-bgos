@@ -57,9 +57,10 @@
  *      HOAI_BROWSER_HOST_ASSISTANT_ID, HOAI_BROWSER_HOST_PARENT_PID.
  */
 
-import { spawn } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
-import { chmodSync, closeSync, constants, existsSync, fstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync } from 'node:fs'
+import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmSync, unlinkSync } from 'node:fs'
+import { readdir, rm } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { homedir, hostname, tmpdir } from 'node:os'
 import { delimiter, dirname, isAbsolute, join, posix as posixPath, win32 as win32Path } from 'node:path'
@@ -67,6 +68,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { AgentBrowserVault, browserVaultScope } from '../lib/agent-browser-vault.mjs'
 import { ensureBrowser, bundledChromium, browserBootstrapReadiness, browserInstallActivity, cancelBrowserInstallations, whenBrowserInstallationsDrained } from '../lib/browser-bootstrap.mjs'
 import { terminateBrowserDaemon } from '../lib/browser-profile-daemon-stop.mjs'
+import { launcherProcessQuery, parseLauncherProcesses, readBootClock } from '../lib/agent-inventory.mjs'
 import { BrowserSecretRedactor } from '../lib/browser-secret-redactor.mjs'
 import { DOWNLOAD_ASK_WAIT_S, DownloadStore, SlotDownloads, downloadLines, downloadPaths } from '../lib/browser-downloads.mjs'
 
@@ -133,6 +135,50 @@ export const RELAY_SWEEP_MS = 60_000
 export const BROWSER_IDLE_MS = 30 * 60_000
 /** How long Chrome may take to report its DevTools endpoint. */
 export const BROWSER_START_TIMEOUT_MS = 30_000
+/**
+ * How long a start that failed waits for the Chrome it killed to exit. Until it has, Chrome holds its
+ * runtime folder on Windows, and its SingletonLock names a live pid on macOS and Linux, so the start's
+ * own cleanup (or a stop right after it) would find the folder in use.
+ */
+export const BROWSER_KILL_WAIT_MS = 3_000
+/**
+ * Windows: how long a stop keeps retrying the removal of a runtime folder that Chrome's helper
+ * processes still hold for a moment after the browser exited. Past this it is left (and logged)
+ * for the next browser start to remove; it is never thrown into the stop's caller.
+ */
+export const RUNTIME_DIR_RETRY_MS = 2_000
+const RUNTIME_DIR_RETRY_STEP_MS = 100
+/** The errors Windows gives for a folder a process still holds. */
+const RUNTIME_DIR_BUSY = new Set(['EPERM', 'EBUSY', 'EACCES', 'ENOTEMPTY'])
+/**
+ * Every runtime folder is named `hoai-browser-runtime-<pid>-<start>-XXXXXX` in the host's TEMP: its
+ * host's pid and that process's start time (ms on startStampNow's clock, base 36). The owner rides in
+ * the name, not in a file, so it is there from the moment the folder exists and survives a removal on
+ * Windows that took everything else in the folder before Chrome's helpers let go of the rest.
+ */
+export const RUNTIME_DIR_PREFIX = 'hoai-browser-runtime-'
+/** A runtime folder that names no owner (made by a host before 0.69.10) is swept once untouched this long. */
+export const RUNTIME_DIR_UNOWNED_AGE_MS = 24 * 60 * 60_000
+/**
+ * A live pid still owns its folder unless its process started later than the recorded start by more
+ * than this: then the pid was reused and the recorded host is gone. A process's start is read to the
+ * second (ps etime), and a host records its own a little after the system dated it.
+ */
+export const RUNTIME_DIR_OWNER_SLACK_MS = 2 * 60_000
+/**
+ * A folder whose host is proven gone (its pid is dead, or held by a newer process) is removed only once
+ * untouched this long. A folder whose Chrome is still starting has no Chrome lock yet for the busy check
+ * to find, and two things put one there: a host that crashed after making its folder and before its Chrome
+ * took the lock (the Chrome it spawned can outlive it), and a live host whose start is misread as later
+ * than it recorded (on Windows CIM dates a start in local time, so a host started in the repeated hour when
+ * daylight saving ends reads an hour late, and on macOS a step of the wall clock moves it). This is well
+ * past what a start takes from making its folder to its Chrome taking the lock (the private folder and
+ * downloads steps, then BROWSER_START_TIMEOUT_MS).
+ */
+export const RUNTIME_DIR_REUSE_QUIET_MS = 10 * 60_000
+/** The host's start sweep runs this long after its start, off the start path. */
+export const RUNTIME_SWEEP_DELAY_MS = 5_000
+const PROCESS_START_QUERY_MS = 30_000
 
 export const RESULT_POST_TIMEOUT_MS = 30_000
 export const RESULT_POST_ATTEMPTS = 3
@@ -449,6 +495,17 @@ export function assistantIdOrNull(value) {
   else if (typeof value === 'string' && /^[0-9]+$/.test(value)) n = Number(value)
   else return null
   return Number.isSafeInteger(n) && n > 0 ? n : null
+}
+
+/**
+ * The agent's name as the frame carries it (the backend sends the
+ * assistant's own name), or null. The cards name the agent with it; null
+ * leaves the naming to the backend, which reads its own record.
+ */
+export function assistantNameOrNull(value) {
+  if (typeof value !== 'string') return null
+  const name = value.trim().slice(0, 60)
+  return name || null
 }
 
 /** ~/.bgos-agent, where every per-agent folder of this machine lives. */
@@ -881,7 +938,7 @@ export function killStartedChromes(chromes = startedChromes) {
   }
 }
 
-export function launchChromium({ executable, profileDir, headless = true, timeoutMs = BROWSER_START_TIMEOUT_MS, spawnImpl = spawn, platform = process.platform, env = process.env }) {
+export function launchChromium({ executable, profileDir, headless = true, timeoutMs = BROWSER_START_TIMEOUT_MS, killWaitMs = BROWSER_KILL_WAIT_MS, spawnImpl = spawn, platform = process.platform, env = process.env }) {
   return new Promise((resolve, reject) => {
     let child
     try {
@@ -904,7 +961,11 @@ export function launchChromium({ executable, profileDir, headless = true, timeou
         try {
           child.kill('SIGKILL')
         } catch {}
-        reject(err)
+        // The killed Chrome holds its runtime folder until it has exited (Windows; elsewhere its
+        // SingletonLock names its pid), and the caller removes that folder next. Bounded: a Chrome
+        // that never exits still fails the start.
+        if (child.pid !== undefined) void waitForExit(child, killWaitMs).then(() => reject(err))
+        else reject(err)
       } else resolve({ child, endpoint })
     }
     const timer = setTimeout(
@@ -1158,13 +1219,191 @@ function waitForExit(child, ms) {
   })
 }
 
+/** Windows: runtime folders a stop could not remove yet (Chrome still held them); the next start removes them, or the next host's start sweep (sweepRuntimeFolders). */
+const leftRuntimeDirs = new Set()
+
+/**
+ * Now, on the clock a runtime folder's name records its host's start on. Linux: the boot clock (ms
+ * since boot, what ps measures etime on), which no step of the wall clock moves (a WSL2 or other
+ * paused VM resynced after sleep, a board without a clock battery that NTP corrects); on the wall
+ * clock such a step would make a live host's start read later than recorded (lib/agent-inventory.mjs,
+ * review 3 F1). Elsewhere the wall clock, which Windows and macOS date a process's start on.
+ */
+export function startStampNow(platform = process.platform) {
+  const boot = readBootClock({ platform })
+  return boot ? boot.uptimeMs : Date.now()
+}
+
+/** This process's start, as its runtime folders record it. */
+export const HOST_STARTED_AT_MS = Math.floor(startStampNow() - process.uptime() * 1000)
+
+/** The prefix of this host's runtime folders: its pid and start time (RUNTIME_DIR_PREFIX). */
+export function runtimeDirPrefix({ pid = process.pid, startedAtMs = HOST_STARTED_AT_MS } = {}) {
+  return `${RUNTIME_DIR_PREFIX}${pid}-${startedAtMs.toString(36)}-`
+}
+
+/** The host a runtime folder's name records, {pid, startedAtMs}, or null when it names none. */
+export function runtimeDirOwner(name) {
+  const m = /^hoai-browser-runtime-(\d{1,10})-([0-9a-z]{1,12})-[A-Za-z0-9]{6}$/.exec(String(name))
+  if (!m) return null
+  const pid = Number(m[1])
+  const startedAtMs = parseInt(m[2], 36)
+  return pid > 0 && Number.isSafeInteger(startedAtMs) ? { pid, startedAtMs } : null
+}
+
+/**
+ * Why a Chrome still runs in this runtime folder, or null. Asked before any removal, so a folder a
+ * running Chrome holds is never partly removed. win32: Chrome holds `lockfile` open without delete
+ * sharing for as long as it runs, and Windows deletes it when Chrome exits, so removing it is refused
+ * (EBUSY) exactly while Chrome runs. posix: Chrome's SingletonLock is a link to `<hostname>-<pid>`;
+ * a live pid, or another machine's name (which cannot be checked), is in use.
+ */
+export function runtimeDirBusy(dir, { platform = process.platform, unlink = unlinkSync, readlink = readlinkSync, alive = pidAlive, host = hostname() } = {}) {
+  if (platform === 'win32') {
+    try {
+      unlink(join(dir, 'lockfile'))
+    } catch (err) {
+      if (err?.code !== 'ENOENT') return err?.code || 'lockfile'
+    }
+    return null
+  }
+  let target
+  try {
+    target = String(readlink(join(dir, 'SingletonLock')))
+  } catch {
+    return null
+  }
+  const m = /^(.*)-(\d+)$/.exec(target)
+  return m && m[1] === host && !alive(Number(m[2])) ? null : 'SingletonLock'
+}
+
+/**
+ * The start times of these pids, pid -> {startedAtMs, boot?}, by lib/agent-inventory.mjs's one query
+ * (on Linux with the start on the boot clock, `boot.startedUptimeMs`). A pid absent could not be read.
+ * Never rejects.
+ */
+export function processStartsOf(pids, { platform = process.platform } = {}) {
+  const query = launcherProcessQuery(platform, pids)
+  if (!query) return Promise.resolve(new Map())
+  return new Promise((resolve) => {
+    try {
+      execFile(query.file, query.args, { encoding: 'utf8', timeout: PROCESS_START_QUERY_MS, windowsHide: true, maxBuffer: 1 << 20 }, (_err, stdout) => {
+        // ps exits 1 when one of several pids is gone, with the others still printed.
+        try {
+          resolve(parseLauncherProcesses(platform, stdout, pids, Date.now(), platform === 'linux' ? readBootClock({ platform }) : null))
+        } catch {
+          resolve(new Map())
+        }
+      })
+    } catch {
+      resolve(new Map())
+    }
+  })
+}
+
+/**
+ * The host's start sweep of its own TEMP: removes the runtime folders no live host owns. A host that
+ * crashed, or whose final stop met a folder Chrome's helpers still held, leaves its folder behind,
+ * and nothing else in that process will ever remove it.
+ *
+ * Only real folders named hoai-browser-runtime-* directly in `tmp` are looked at (on macOS and Linux
+ * only this user's): a link by that name is left whole and never followed, and a removal unlinks the
+ * links inside a folder without following them (fs rm). A folder is removed only when its owner is
+ * proven gone: its pid is not alive, or the process holding that pid now started after the recorded
+ * host (RUNTIME_DIR_OWNER_SLACK_MS; on Linux both on the boot clock, and a holder of a later boot reads
+ * as earlier, so it is kept), and in both cases the folder is untouched for RUNTIME_DIR_REUSE_QUIET_MS:
+ * never on the time comparison alone, which a live host's misread start can pass, and never at once for a
+ * dead pid, whose Chrome may outlive it and still be starting (a folder kept for being recent waits for a
+ * later host start). This host's own folders, and an owner whose start cannot be read, are kept. Two
+ * hosts run at once (the desktop app's and an agent's); each keeps the other's folders. A
+ * folder that names no owner is removed only once untouched for RUNTIME_DIR_UNOWNED_AGE_MS. A folder
+ * a Chrome still runs in (runtimeDirBusy), or one Windows refuses to remove, stays and is logged;
+ * nothing is ever thrown. The removals are awaited one at a time, so a large one never holds the host.
+ * @returns {Promise<{ swept: string[], left: string[] }>}
+ */
+export async function sweepRuntimeFolders({
+  tmp = tmpdir(),
+  platform = process.platform,
+  now = Date.now(),
+  alive = pidAlive,
+  processStarts = (/** @type {number[]} */ pids) => processStartsOf(pids, { platform }),
+  busy = (/** @type {string} */ dir) => runtimeDirBusy(dir, { platform }),
+  removeDir = (/** @type {string} */ dir) => rm(dir, { recursive: true, force: true }),
+  log = (/** @type {string} */ _line) => {},
+} = {}) {
+  /** @type {string[]} */ const swept = []
+  /** @type {string[]} */ const left = []
+  let names
+  try {
+    names = (await readdir(tmp)).filter((name) => name.startsWith(RUNTIME_DIR_PREFIX))
+  } catch {
+    return { swept, left }
+  }
+  /** @type {{ dir: string, why: string }[]} */ const stale = []
+  /** @type {{ dir: string, owner: { pid: number, startedAtMs: number }, mtimeMs: number }[]} */ const asks = []
+  for (const name of names) {
+    const dir = join(tmp, name)
+    let stat
+    try {
+      stat = lstatSync(dir)
+    } catch {
+      continue
+    }
+    if (!stat.isDirectory()) continue
+    if (platform !== 'win32' && typeof process.getuid === 'function' && stat.uid !== process.getuid()) continue
+    const owner = runtimeDirOwner(name)
+    if (!owner) {
+      if (now - stat.mtimeMs >= RUNTIME_DIR_UNOWNED_AGE_MS) stale.push({ dir, why: 'it names no owner and was untouched for over a day' })
+    } else if (owner.pid === process.pid && owner.startedAtMs === HOST_STARTED_AT_MS) {
+      // This host's own: a stop's leftover is removed by its next browser start.
+    } else if (!alive(owner.pid)) {
+      // A Chrome the dead host spawned can outlive it and still be starting, with no lock for the busy check yet.
+      if (now - stat.mtimeMs >= RUNTIME_DIR_REUSE_QUIET_MS) stale.push({ dir, why: `its host (pid ${owner.pid}) is gone` })
+    } else asks.push({ dir, owner, mtimeMs: stat.mtimeMs })
+  }
+  if (asks.length) {
+    let starts = new Map()
+    try {
+      starts = await processStarts([...new Set(asks.map((a) => a.owner.pid))])
+    } catch {}
+    for (const { dir, owner, mtimeMs } of asks) {
+      const proc = starts.get(owner.pid)
+      const started = platform === 'linux' ? proc?.boot?.startedUptimeMs : proc?.startedAtMs
+      if (typeof started === 'number' && started > owner.startedAtMs + RUNTIME_DIR_OWNER_SLACK_MS && now - mtimeMs >= RUNTIME_DIR_REUSE_QUIET_MS) stale.push({ dir, why: `its host (pid ${owner.pid}) is gone; that pid is a newer process now` })
+    }
+  }
+  for (const { dir, why } of stale) {
+    let inUse
+    try {
+      inUse = busy(dir)
+    } catch (err) {
+      inUse = err?.code || 'unreadable'
+    }
+    if (inUse) {
+      left.push(dir)
+      log(`left the browser runtime folder ${dir}: still in use (${inUse})`)
+      continue
+    }
+    try {
+      await removeDir(dir)
+      swept.push(dir)
+      log(`removed the stale browser runtime folder ${dir}: ${why}`)
+    } catch (err) {
+      left.push(dir)
+      log(`left the browser runtime folder ${dir}: ${platform === 'win32' && RUNTIME_DIR_BUSY.has(err?.code) ? 'still in use' : 'could not be removed'} (${err?.code ?? err?.message ?? err})`)
+    }
+  }
+  if (names.length) log(`runtime folder sweep of ${tmp}: ${swept.length} removed, ${left.length} left, ${names.length - swept.length - left.length} kept`)
+  return { swept, left }
+}
+
 /**
  * A fresh Chrome shell and a nonpersistent Playwright browsing context.
  * The stable profile contains encrypted owner storage and policy only. Never
  * attach an old native profile or recover its unauthenticated CDP endpoint.
  */
 export class ChromiumEngine {
-  constructor({ executable, profileDir, outputDir, heldDir = /** @type {string | null} */ (null), scope = '', headless = true, caps = DEFAULT_CAPS, clientName = 'hoai-browser-host', clientVersion = '0.0.0', log = () => {} }) {
+  constructor({ executable, profileDir, outputDir, heldDir = /** @type {string | null} */ (null), scope = '', headless = true, caps = DEFAULT_CAPS, clientName = 'hoai-browser-host', clientVersion = '0.0.0', log = () => {}, launch = launchChromium, platform = process.platform, removeDir = (/** @type {string} */ dir) => rmSync(dir, { recursive: true, force: true }), runtimeBusy = (/** @type {string} */ dir) => runtimeDirBusy(dir, { platform }) }) {
     this.profileDir = profileDir
     this.outputDir = outputDir
     this.heldDir = heldDir
@@ -1179,6 +1418,10 @@ export class ChromiumEngine {
     this._clientName = clientName
     this._clientVersion = clientVersion
     this._log = log
+    this._launch = launch
+    this._platform = platform
+    this._removeDir = removeDir
+    this._runtimeBusy = runtimeBusy
     this._child = null
     this._engine = null
     this.alive = false
@@ -1191,9 +1434,26 @@ export class ChromiumEngine {
   async start() {
     this.vault = new AgentBrowserVault({ profileDir: this.profileDir, scope: this._scope })
     ensurePrivateDir(this.outputDir)
+    // Windows: runtime folders an earlier stop had to leave while Chrome still held them.
+    for (const dir of leftRuntimeDirs) {
+      try {
+        this._removeDir(dir)
+        leftRuntimeDirs.delete(dir)
+      } catch {}
+    }
     // Never attach to a legacy native profile: it may contain unencrypted
     // login state. Owner consent can clear it through the vault protocol.
-    this._runtimeDir = mkdtempSync(join(tmpdir(), 'hoai-browser-runtime-'))
+    this._runtimeDir = mkdtempSync(join(tmpdir(), runtimeDirPrefix()))
+    try {
+      await this._startIn()
+    } catch (err) {
+      await this._abandonStart(err)
+      throw err
+    }
+    return this
+  }
+
+  async _startIn() {
     ensurePrivateDir(this._runtimeDir)
     // Downloads only into the held folder, and only when its guard holds
     // (owner only, never synced or roaming); otherwise Chrome refuses them.
@@ -1209,7 +1469,7 @@ export class ChromiumEngine {
     }
     this._acceptDownloads = acceptDownloads
     if (!this._engine) {
-      const { child, endpoint } = await launchChromium({ executable: this._executable, profileDir: this._runtimeDir, headless: this._headless })
+      const { child, endpoint } = await this._launch({ executable: this._executable, profileDir: this._runtimeDir, headless: this._headless, platform: this._platform })
       this._child = child
       child.on('exit', () => this._gone())
       // Bounded: a connect that hangs after Chrome printed its endpoint would
@@ -1229,7 +1489,40 @@ export class ChromiumEngine {
     this._engine.onSelectedPage = page => this.onSelectedPage?.(page)
     this.vault.bind(this._engine._context)
     this.alive = true
-    return this
+  }
+
+  /**
+   * A start that failed removes its own runtime folder: the pool never stops an engine whose start
+   * failed (BrowserPool.acquire). Not while its Chrome may still run in it: a Chrome _killChild gave up
+   * on, or one still holding the folder (runtimeDirBusy; launchChromium's wait for the Chrome it killed
+   * is bounded, on every platform). Such a folder is left whole and forgotten, so no later stop of
+   * this engine touches it; the next host's start sweep removes it once no Chrome runs there. The
+   * removal gets the stop's bounded retry on Windows.
+   */
+  async _abandonStart(err) {
+    const engine = this._engine
+    this._engine = null
+    await engine?.stop().catch(() => {})
+    let exited = err?.code !== 'browser_stop_failed'
+    try {
+      await this._killChild()
+    } catch {
+      exited = false
+    }
+    let inUse = exited ? null : 'its Chrome did not exit'
+    if (!inUse) {
+      try {
+        inUse = this._runtimeBusy(this._runtimeDir)
+      } catch (e) {
+        inUse = e?.code || 'unreadable'
+      }
+    }
+    if (inUse) {
+      this._log(`the browser's runtime folder ${this._runtimeDir} is left for the next host start: still in use (${inUse})`)
+      this._runtimeDir = null
+      return
+    }
+    await this._removeRuntimeDir().catch((err) => this._log(`the browser's runtime folder ${this._runtimeDir} could not be removed (${err?.code ?? err?.message ?? err})`))
   }
 
   _newEngine(endpoint, connectTimeoutMs = 0) {
@@ -1306,8 +1599,34 @@ export class ChromiumEngine {
     await engine?.stop().catch(() => {})
     await this._killChild()
     await this.vault?.lock()
-    if (this._runtimeDir) { rmSync(this._runtimeDir, { recursive: true, force: true }); this._runtimeDir = null }
+    if (this._runtimeDir) await this._removeRuntimeDir()
     if (persistenceFailed) throw Object.assign(new HostError('credential_storage', 'The browser closed and locked, but its latest state could not be saved encrypted. The previous saved state is retained.'), { browserClosed: true })
+  }
+
+  /**
+   * Removes this browser's runtime folder. On Windows Chrome's helper processes hold it for a
+   * moment after the browser exited: the removal is retried for RUNTIME_DIR_RETRY_MS, and a folder
+   * still held after that is left for the next start (or the next host's start sweep) to remove, never thrown into the stop's caller.
+   */
+  async _removeRuntimeDir() {
+    const dir = this._runtimeDir
+    const deadline = Date.now() + RUNTIME_DIR_RETRY_MS
+    for (;;) {
+      try {
+        this._removeDir(dir)
+        this._runtimeDir = null
+        return
+      } catch (err) {
+        if (this._platform !== 'win32' || !RUNTIME_DIR_BUSY.has(err?.code)) throw err
+        if (Date.now() >= deadline) {
+          leftRuntimeDirs.add(dir)
+          this._runtimeDir = null
+          this._log(`the browser's runtime folder ${dir} is still in use (${err.code}); it is left for the next browser start, or the next host start, to remove`)
+          return
+        }
+      }
+      await new Promise((r) => setTimeout(r, RUNTIME_DIR_RETRY_STEP_MS))
+    }
   }
 
   async _killChild() {
@@ -1378,6 +1697,9 @@ export class BrowserPool {
           try {
             await engine.start()
           } catch (err) {
+            // The agent hears why a profile folder was refused; the folder and
+            // the accounts involved go to this log only.
+            if (err?.code === 'unsafe_profile') this._log(`the browser on ${paths.profileDir} was refused (${err.reason || 'unsafe_profile'}): ${err.detail || err.message}`)
             try {
               engine.onStartFailed?.()
             } catch {}
@@ -1699,7 +2021,9 @@ export class BrowserHostCore {
       }
     }
     const wait = waitSecondsFrom(waitSeconds)
-    const summary = policy.summarizeToolCall(name, engineArgs)
+    // The words after "<agent> wants to" on the card: the imperative the
+    // desktop's strip prints, never the trail's past tense ("wants to opened").
+    const summary = policy.intentPhrase(name, engineArgs, { kind: decision.gate, origin: classification.origin ?? null })
     // A download ask the page raised is not the agent's: its action waits for
     // it (at most its 60 s) rather than being told the browser is busy. The
     // wait comes out of this call's own budget: the relay cuts a call at
@@ -1989,7 +2313,7 @@ export class RelaySessions {
       return relayError('bad_frame', 'This relay client already speaks for another agent; a frame cannot change the assistant it speaks for.')
     }
     try {
-      const entry = await this._entry(clientId, { assistantId, principal: principal.principal })
+      const entry = await this._entry(clientId, { assistantId, assistantName: assistantNameOrNull(f.assistantName), principal: principal.principal })
       entry.lastSeenAt = Date.now()
       const hasId = message.id !== undefined && message.id !== null
       if (!hasId) {
@@ -2709,6 +3033,9 @@ export async function main({
     createRelay: core => createManagedProfileRelay({ core, deviceLabel, log }),
   })
   const host = new BrowserHost({ agentRoot, env, deviceLabel, browserTools: loadBrowserTools, createEngine, createProfileCompanion, log, scope }).start()
+  // What a host gone since left in this TEMP: a crash, or a folder Chrome still held at its final
+  // stop. Off the start path, so the sockets connect first.
+  setTimeout(() => void sweepRuntimeFolders({ log }).catch(() => {}), RUNTIME_SWEEP_DELAY_MS).unref?.()
 
   return await new Promise((resolve) => {
     // The retry, rescan and parent timers are unref'd so an embedder (and a

@@ -1,15 +1,18 @@
 {
   "version": 1,
   "repository": "BrandGrowthOS/bgos-claude-plugin",
-  "sourceCommit": "dfa897b054eec22ec70d9412bdfbe4b692aa6342",
+  "sourceCommit": "1317e71b941a915efea3deacfeb4dd34b031819a",
   "entry": "bin/hoai-browser-host.mjs",
   "why": "The same reviewed browser host, profile runtime, encryption and authorization execute for Claude and Codex. Only the Codex daemon launcher is different.",
   "files": {
     "bin/hoai-browser-host.mjs": {
-      "sha256": "de4a28a28e38a6449ff0c9642203ce86d03b96e3fa1f38fdc147606b039912b9"
+      "sha256": "a080fb73d6bc85cccc6902440d3b680b1120236836f8231dd35f1dfeee55a59a"
     },
     "lib/agent-browser-vault.mjs": {
-      "sha256": "8490520932afbd6337bad28c50f2c43941d8f28e2471f6f86a94d78db5431fd9"
+      "sha256": "4ad24ff8e6864be9397cd236664feb1f4830ba48efb90ab2b8e389a1043ab858"
+    },
+    "lib/agent-inventory.mjs": {
+      "sha256": "8ade5cd8d3b6876828ceb29cebe72e892731aa9e39fae7b4df4ac67d5dfc4e11"
     },
     "lib/browser-bootstrap.mjs": {
       "sha256": "76467e8feaca93098fdf270f85a3dea12f9dffad2c4e976c268ba2ff299c3965"
@@ -18,13 +21,13 @@
       "sha256": "21057fbfe0993ccace1bc9f5ff977039af41cd9b790c6eed473dd58a73cb13ae"
     },
     "lib/browser-downloads.mjs": {
-      "sha256": "374f0764de9a3a1863e56fef75882458c0f5fbb402eab82d13ef28ee1bbb573f"
+      "sha256": "b5d282decd75dbed2b057cdb624c36e73ff72268298e6ee8bc73e26b2cbdc605"
     },
     "lib/browser-env.mjs": {
       "sha256": "dcfc2fe6f54a085f561827a251903c67b2861bb5b1aad427a361fcdda84f34d6"
     },
     "lib/browser-gate.mjs": {
-      "sha256": "eab5305fc3fe050dc3f92cc213bbddfe73a68296ef56f1ec43f18491295ab672"
+      "sha256": "8247d3f665fc5248eb073d725a0fba6300d2073532ed30c78f7c0eef85f1e60b"
     },
     "lib/browser-host-core/package.json": {
       "sha256": "76b7518a4261ff7e6d5fc4497657db59f408ecde46d265bcd4a6eeb187d6dfa6"
@@ -224,6 +227,9 @@
     "lib/browser-secret-redactor.mjs": {
       "sha256": "d19227c106183c6ccf9408db1ec8e832a0805d38d79ae338ecfdd97262f6a8a4"
     },
+    "lib/keepalive-plan.mjs": {
+      "sha256": "9135b6be923526d7e979e0bc1c188552b09e6bea1fe6d65f5ab15a1477437efb"
+    },
     "lib/remote-credentials-crypto.cjs": {
       "sha256": "f4e2bdec3c3981b8119d831aab2474943ce3867818a661effef2209181a8a22f"
     },
@@ -235,6 +241,18 @@
     },
     "lib/remote-view.mjs": {
       "sha256": "fde7a7eb7b966d0858428fb05b50a06ba6018ad8aa8f3cedb29849d28a8528dd"
+    },
+    "lib/service-supervision.mjs": {
+      "sha256": "af7e3a4335b95f787dada60e1766358814680b26982ce41e560b4e3be3b520c0"
+    },
+    "lib/watcher-bundle.mjs": {
+      "sha256": "d3e9acc2d2b616a1a0469608f7c4e921db6561ea186b032bd6521a960f3520f4"
+    },
+    "lib/watcher-service.mjs": {
+      "sha256": "ddab6c8115a243cb7bb8019a0589a9188116c5d2a27d4240c54e1745dd8fae3a"
+    },
+    "lib/win32-script-text.mjs": {
+      "sha256": "7f5422196e950839dcf6dd586b745a66b9215744850b02ecdea6fbfdea105cb5"
     }
   }
 }

@@ -175,6 +175,8 @@ export function deniedMessage(reason, waitSeconds) {
  * @property {number} [pollMs] how often to read this card (a long notice can read slower)
  * @property {(gate: Record<string, unknown>) => void} [onRaised] told the gate (and its id) the moment the browser is reserved for it
  * @property {(gate: Record<string, unknown>) => void} [onPosted] told once the card is really in the owner's chat
+ * @property {Record<string, unknown>|null} [download] a download card's facts (stage, fileName, folder, device, and
+ *   keepsIfUnanswered or reason), so the app can word the card in the owner's language and say what no answer does
  */
 
 export class GateKeeper {
@@ -238,7 +240,7 @@ export class GateKeeper {
    * call far past its cap and the agent learns nothing it can act on.
    */
   /** @param {RaiseOptions} options */
-  async raise({ key, assistantId, kind, origin, summary, agentName, purpose, waitSeconds, choices, action = null, attachMs = GATE_ATTACH_MS, pollMs, onRaised, onPosted }) {
+  async raise({ key, assistantId, kind, origin, summary, agentName, purpose, waitSeconds, choices, action = null, attachMs = GATE_ATTACH_MS, pollMs, onRaised, onPosted, download = null }) {
     if (this._closed) return { allowed: false, reason: 'session_closed' }
     const already = this.pending(key)
     if (already) {
@@ -274,7 +276,7 @@ export class GateKeeper {
       onRaised?.(gate)
     } catch {}
 
-    const posted = await this._post({ gate, agentName, purpose })
+    const posted = await this._post({ gate, agentName, purpose, download })
     if (!posted) {
       this._finish(key, entry, { allowed: false, reason: 'card_unreachable' })
       return entry.outcome
@@ -399,7 +401,7 @@ export class GateKeeper {
    * card that never posted ends the gate immediately and says so, rather than
    * spending 60 seconds pretending somebody was asked.
    */
-  async _post({ gate, agentName, purpose }) {
+  async _post({ gate, agentName, purpose, download = null }) {
     try {
       const ok = await this._postCard({
         gateId: gate.gateId,
@@ -417,6 +419,9 @@ export class GateKeeper {
         purpose,
         waitSeconds: remainingWaitSeconds(gate.startedAt + gate.waitSeconds * 1000 - this._now()),
         expiresAt: gate.expiresAt,
+        // A backend that predates the field strips it (whitelist) and the card
+        // keeps its English summary.
+        ...(download && typeof download === 'object' ? { download } : {}),
       })
       if (!ok) this._log(`the permission card for ${gate.gateId} was refused`)
       return !!ok
