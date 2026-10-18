@@ -43,6 +43,11 @@ const RELAY_PROBE_MS = Number(process.env.HOAI_RELAY_PROBE_MS) || 20_000;
 const CANCEL_DELIVERY_MS = 5_000;
 const RELAY_MCP_PATH = "/api/v1/integrations/browser/mcp";
 const RELAY_HOST_PATH = "/api/v1/integrations/browser/host";
+const PROFILE_PATH = "/api/v1/browser/profile-sync/rpc";
+const PROFILE_FIELDS = ["profileId", "actingUserId", "assistantId", "endpointId", "bootId", "runtimeId", "sessionId", "writerEpoch", "revision", "contentKeyEpoch", "grantVersion", "keyFingerprint"];
+const PROFILE_COUNTERS = new Set(["assistantId", "writerEpoch", "revision", "contentKeyEpoch", "grantVersion"]);
+const PROFILE_UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
+const PROFILE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 
 const OFFLINE_TOOL = {
   name: "hoai_browser_status",
@@ -125,11 +130,14 @@ const CONNECT_REASON_TEXT = {
 const CLIENT_ID = crypto.randomUUID(); // the MCP session key on the desktop side
 const RELAY = readRelayCredentials(process.env);
 const MANAGED_CONTEXT_REQUIRED = Object.hasOwn(process.env, "HOAI_RELAY_CONTEXT_FILE");
+const PROFILE_DISCOVERY = process.env.HOAI_RELAY_PROFILE_SYNC === "1" && Boolean(RELAY?.headers["X-BGOS-Pairing"]);
 const CONTEXT_REFUSAL = Object.freeze({ valid: false, code: "acting_context_unavailable", text: "This browser action was not sent because its current sender could not be verified. Send a new message in your HOAI chat and try again. Nothing ran." });
 
 let mode = "offline"; // offline | local | relay
 let upstream = null; // local: { url, token, sessionId, initialized, instructions }
 const relayConnections = new Map(); // actor/chat/session clientId -> initialized relay
+const profileScopes = new Map(); // verified client -> current exact authority
+const managedNamespaces = new Set(); // No fallback after this process saw a namespace.
 let clientInfo = null;
 let clientProtocol = PROTOCOL_VERSION;
 let initSeq = 0;
@@ -207,7 +215,7 @@ function readManagedContext() {
     const clientId = crypto.createHash("sha256").update(JSON.stringify([CLIENT_ID, context.actingUserId, context.chatId, context.sessionId])).digest("hex");
     const recipient = context.actingUserId !== context.ownerUserId;
     const headers = recipient ? { "X-BGOS-Acting-User": context.actingUserId } : {};
-    return Object.freeze({ valid: true, clientId, headers: Object.freeze(headers), recipient });
+    return Object.freeze({ valid: true, clientId, actingUserId: context.actingUserId, headers: Object.freeze(headers), recipient });
   } catch { return CONTEXT_REFUSAL; }
 }
 const relayClientId = context => context?.clientId || CLIENT_ID;
@@ -304,6 +312,82 @@ async function relayFetch(method, pathname, body, signal, context) {
   return { status: res.status, payload, retryAfter: res.headers.get("retry-after") };
 }
 
+// Caller-only typed wire stays self-contained: this shim is also installed as
+// a single file. Endpoint key/signature handling remains in the paired host.
+function profileAuthority(value, actor, assistantId, profileId) {
+  if (!value || Object.keys(value).length !== PROFILE_FIELDS.length || PROFILE_FIELDS.some(key => PROFILE_COUNTERS.has(key) ?
+      !Number.isSafeInteger(value[key]) || value[key] < (key === "revision" ? 0 : 1) : typeof value[key] !== "string" || !PROFILE_ID.test(value[key])) ||
+      !PROFILE_UUID.test(value.profileId) || !PROFILE_UUID.test(value.endpointId) || !/^[a-f0-9]{64}$/.test(value.keyFingerprint) ||
+      value.actingUserId !== actor || value.assistantId !== assistantId || value.profileId !== profileId) throw Error("profile_scope_refused");
+  return Object.freeze(Object.fromEntries(PROFILE_FIELDS.map(key => [key, value[key]])));
+}
+async function profileFetch(route, body, signal, context, maximum = 64 * 1024) {
+  const base = new URL(RELAY.backendUrl);
+  if (base.username || base.password || !(base.protocol === "https:" || base.protocol === "http:" && ["127.0.0.1", "[::1]"].includes(base.hostname))) throw Error("profile_endpoint_refused");
+  const controller = new AbortController(), abort = () => controller.abort(), timer = setTimeout(abort, Math.max(1, Math.min(30000, RELAY_PROBE_MS)));
+  signal?.addEventListener("abort", abort, { once: true }); if (signal?.aborted) abort();
+  let reader;
+  try {
+    const response = await fetch(new URL(PROFILE_PATH + route, base.origin), { method: "POST", headers: { Accept: "application/json", "Accept-Encoding": "identity", "Content-Type": "application/json", ...RELAY.headers, ...context?.headers },
+      body: JSON.stringify(body), signal: controller.signal, redirect: "error", credentials: "omit", cache: "no-store" });
+    reader = response.body.getReader(); const chunks = []; let length = 0;
+    for (;;) { const { value, done } = await reader.read(); if (done) break; if ((length += value.byteLength) > maximum) { await reader.cancel(); throw Error("profile_response_too_large"); } chunks.push(value); }
+    const payload = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)));
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw Error("profile_response_refused");
+    return { status: response.status, payload };
+  } finally { clearTimeout(timer); signal?.removeEventListener("abort", abort); reader?.releaseLock(); controller.abort(); }
+}
+function profileRefusal(state = "unavailable") {
+  return { code: "browser_profile_unavailable", text: `This person's managed browser is ${state}. Open Browser in HOAI to finish setup or review its current session. This request did not select another browser. Nothing ran.` };
+}
+async function discoverProfile(context) {
+  if (!PROFILE_DISCOVERY) return null;
+  const clientId = relayClientId(context); profileScopes.delete(clientId);
+  try {
+    const assistantId = Number(RELAY.assistantId);
+    if (!Number.isSafeInteger(assistantId) || assistantId < 1) throw Error("profile_assistant_refused");
+    const response = await profileFetch("/resolve", { assistantId }, undefined, context), value = response.payload;
+    if (response.status < 200 || response.status >= 300) throw Error("profile_discovery_refused");
+    const actor = context?.actingUserId || process.env.HOAI_RELAY_OWNER_USER_ID || value.actingUserId;
+    if (typeof actor !== "string" || !PROFILE_ID.test(actor) || value.actingUserId !== actor || value.assistantId !== assistantId) throw Error("profile_actor_refused");
+    const namespace = JSON.stringify([actor, assistantId]);
+    if (value.managed === false && Object.keys(value).length === 3) {
+      if (managedNamespaces.has(namespace)) throw Error("profile_downgrade_refused");
+      return null;
+    }
+    if (value.managed !== true || !PROFILE_UUID.test(value.profileId) || !["idle", "active", "quiescing", "stopped", "staged", "fenced"].includes(value.state) ||
+        Object.keys(value).length !== (value.state === "active" ? 6 : 5)) throw Error("profile_namespace_refused");
+    if (!managedNamespaces.has(namespace) && managedNamespaces.size >= 128) throw Error("profile_namespace_limit");
+    managedNamespaces.add(namespace);
+    if (value.state !== "active") return { failed: profileRefusal(value.state === "idle" ? "awaiting setup" : value.state) };
+    const authority = profileAuthority(value.authority, actor, assistantId, value.profileId);
+    profileScopes.set(clientId, authority); while (profileScopes.size > 32) profileScopes.delete(profileScopes.keys().next().value);
+    return { authority };
+  } catch { return { failed: profileRefusal() }; }
+}
+async function profileSend(message, signal, context, authority, pending) {
+  const clientId = relayClientId(context), scope = { assistantId: authority.assistantId, clientId, authority, waitMs: 0 };
+  let sent = false;
+  try {
+    signal?.throwIfAborted();
+    const started = Date.now(); sent = true;
+    let response = await profileFetch("/call", { ...scope, message }, signal, context, 8 * 1024 * 1024 + 64 * 1024);
+    for (;;) {
+      if (response.status >= 200 && response.status < 300 && response.payload.status === "done") return { ok: true, message: response.payload.message || {} };
+      if (response.status >= 200 && response.status < 300 && response.payload.status === "pending" && PROFILE_UUID.test(response.payload.rpcId)) {
+        const rpcId = response.payload.rpcId; pending?.(rpcId);
+        if (Date.now() - started > RELAY_TOTAL_MS) throw Error("profile_result_timeout");
+        await sleep(Math.max(25, Math.min(2000, Number(response.payload.pollAfterMs) || 250)), signal);
+        response = await profileFetch(`/${rpcId}/poll`, scope, signal, context, 8 * 1024 * 1024 + 64 * 1024); continue;
+      }
+      return { ok: false, code: "browser_profile_unavailable", sent, text: "The managed browser did not confirm this request. It may have run. Inspect that same browser before repeating an action. No other browser was selected." };
+    }
+  } catch {
+    signal?.throwIfAborted();
+    return { ok: false, code: "browser_profile_unavailable", sent, text: "The managed browser result is unconfirmed. The action may have run or may still be running. Inspect that same browser before repeating it. No automatic retry was sent." };
+  }
+}
+
 function relayErrorCode(status, payload) {
   const code = payload && (payload.code || payload.error);
   if (typeof code === "string" && RELAY_ERROR_TEXT[code]) return code;
@@ -356,6 +440,7 @@ function relayErrorText(code, status, payload, retryAfter) {
  * in front.
  */
 function connectReason(res) {
+  if (res.code === "browser_profile_unavailable") return "The current managed browser did not confirm the connection. It was not replaced or retried. Open Browser in HOAI to review that session.";
   if (res.hostError) return `The browser's host answered the connection request with an error: ${String(res.hostError).slice(0, 300)}. Retry in a moment; if it keeps happening, tell your owner.`;
   const base = CONNECT_REASON_TEXT[res.code];
   if (base && res.code === "host_disconnected") return base + droppedHostSuffix(res.payload);
@@ -393,8 +478,10 @@ function sleep(ms, signal) {
  * { ok: false, code, text, transport? } where transport marks a network
  * failure (the relay itself is unreachable) as opposed to an honest answer.
  */
-async function relaySend(message, signal, context) {
+async function relaySend(message, signal, context, pending) {
   signal?.throwIfAborted();
+  const authority = profileScopes.get(relayClientId(context));
+  if (authority) return profileSend(message, signal, context, authority, pending);
   const body = { clientId: relayClientId(context), message, waitMs: RELAY_WAIT_MS };
   if (RELAY.assistantId) body.assistantId = RELAY.assistantId;
   const startedAt = Date.now();
@@ -481,9 +568,11 @@ function probeFailure(status, retryAfter) {
  */
 async function ensureRelay(context) {
   const clientId = relayClientId(context);
+  const profile = await discoverProfile(context);
+  if (profile?.failed) { relayConnections.delete(clientId); return { relay: null, refusal: profile.failed }; }
   const existing = relayConnections.get(clientId);
-  if (existing?.initialized) return { relay: existing };
-  const host = await relayHostOnline(context);
+  if (existing?.initialized && JSON.stringify(existing.profileAuthority || null) === JSON.stringify(profile?.authority || null)) return { relay: existing };
+  const host = profile?.authority ? { online: true, hostLabel: "Managed browser through HOAI" } : await relayHostOnline(context);
   if (host && host.failed) return { relay: null, refusal: host.failed };
   if (!host || !host.online) return { relay: null, refusal: null };
   const init = await relaySend({ jsonrpc: "2.0", id: `shim-init-${++initSeq}`, method: "initialize", params: initializeParams() }, undefined, context);
@@ -491,7 +580,7 @@ async function ensureRelay(context) {
   if (init.message && init.message.error) return { relay: null, refusal: connectRefusal({ code: "host_init_error", hostError: init.message.error.message || JSON.stringify(init.message.error) }) };
   if (!init.message) return { relay: null, refusal: null };
   await relaySend({ jsonrpc: "2.0", method: "notifications/initialized" }, undefined, context).catch(() => {});
-  const relay = { initialized: true, instructions: init.message.result?.instructions || "", hostLabel: host.hostLabel };
+  const relay = { initialized: true, instructions: init.message.result?.instructions || "", hostLabel: host.hostLabel, ...(profile?.authority ? { profileAuthority: profile.authority } : {}) };
   relayConnections.delete(clientId); relayConnections.set(clientId, relay);
   while (relayConnections.size > 32) relayConnections.delete(relayConnections.keys().next().value);
   return { relay };
@@ -576,6 +665,10 @@ async function cancelRequest(notification) {
     if (destination.mode === "local") {
       const response = await post(message, destination.up, signal);
       if (response.status < 200 || response.status >= 300) throw new Error("Cancellation refused");
+    } else if (destination.mode === "profile") {
+      if (!destination.rpcId) throw Error("Cancellation outcome unknown");
+      const response = await profileFetch(`/${destination.rpcId}/cancel`, { assistantId: destination.authority.assistantId, clientId: destination.clientId, authority: destination.authority, waitMs: 0 }, signal, destination.context);
+      if (response.status < 200 || response.status >= 300) throw Error("Cancellation refused");
     } else {
       const response = await relaySend(message, signal, destination.context);
       if (!response.ok) throw new Error("Cancellation refused");
@@ -610,8 +703,9 @@ async function handle(msg, entry) {
   };
   const relayRequest = async body => {
     signal?.throwIfAborted();
-    if (entry) entry.destination = { mode: "relay", context };
-    return relaySend(body, signal, context);
+    const authority = profileScopes.get(relayClientId(context));
+    if (entry) entry.destination = authority ? { mode: "profile", context, authority, clientId: relayClientId(context), rpcId: null } : { mode: "relay", context };
+    return relaySend(body, signal, context, rpcId => { if (entry?.destination?.mode === "profile" && entry.destination.authority === authority) entry.destination.rpcId = rpcId; });
   };
   if (method === "initialize") {
     clientInfo = params?.clientInfo || null;
