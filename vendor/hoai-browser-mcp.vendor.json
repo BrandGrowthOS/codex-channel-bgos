@@ -1,11 +1,11 @@
 {
   "file": "vendor/hoai-browser-mcp.mjs",
   "source": "BGOS: frontend/electron-app/agent-browser/shim/hoai-browser-mcp.mjs",
-  "sha256": "a55d97ae441d157cd26c50c25aa63f4d4d2dbe9094278e00f3b0550001f06fa9",
-  "vendoredAt": "2026-10-15",
-  "why": "Byte-identical current-main HOAI shim with exact managed profile routing, recipient-specific wording and original sender cancellation. No local fallback after a managed namespace is discovered.",
+  "sha256": "c8d9b7a938c09fffb56fa6cb303a71bdfb932976da5d354bf17d0de19c5e2b83",
+  "vendoredAt": "2026-10-20",
+  "why": "Byte-identical copy of the shim in bgos-claude-plugin PR #262 (0.72.0, commit 41332b9) and BGOS PR #2827 (commit 1d9701feb). Managed profile routing stays opt-in through the paired launcher. The profile runtime and launcher integration remain in Codex PR #32.",
   "howToUpdate": "docs/vendoring-the-hoai-browser-shim.md",
   "crossTreeCheck": "HOAI_BROWSER_SHIM_SOURCE=<path to the BGOS shim> npx vitest run test/browser-shim-vendor.spec.ts",
   "alsoVendoredBy": "bgos-claude-plugin: bin/hoai-browser-mcp.mjs (same bytes, same pin)",
-  "sourceCommit": "190525c600b77b4faf8563fa3a97ad22b2850316"
+  "sourceCommit": "1d9701feb638a0bc15b0532dea03b48a0b3bfb7f"
 }

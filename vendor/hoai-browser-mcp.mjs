@@ -24,6 +24,10 @@
 //
 // The app installs a copy at ~/.hoai/bin/hoai-browser-mcp.mjs; plugins ship
 // their own copy. Source of truth: frontend/electron-app/agent-browser/shim/.
+// The plugin's 0.72.0 copy leads it (BGOS mission 173: every browser_profile_*
+// refusal in one plain sentence, a 409 is host_offline only when the relay says
+// so, no profile question): BGOS takes this copy back byte for byte
+// (docs/vendoring-the-hoai-browser-shim.md in the plugin).
 
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -55,6 +59,8 @@ const OFFLINE_TOOL = {
   inputSchema: { type: "object", properties: {} },
   annotations: { title: "Browser session status", readOnlyHint: true, destructiveHint: false, openWorldHint: false },
 };
+// The one tool while a profile refusal holds: the desktop may be running, so the words do not say it is unreachable.
+const PROFILE_REFUSED_TOOL = { ...OFFLINE_TOOL, description: "Status of your HOAI Agent Browser. While your browser cannot be used this is the only tool; it tells you why." };
 const OFFLINE_TEXT_LOCAL = "The HOAI Agent Browser is not available: the Home of Agents desktop app is not running on this computer (or the agent browser endpoint is off). Ask the owner to open Home of Agents; Cmd or Ctrl+Shift+B opens the Agent Browser. The browser tools appear here as soon as it is up.";
 const OFFLINE_TEXT_RELAY = "The HOAI Agent Browser is not available: your owner's Home of Agents desktop app is not running or not signed in, and there is no desktop app on this machine. Ask them to open Home of Agents on their computer (Cmd or Ctrl+Shift+B opens the Agent Browser); the browser tools appear here as soon as it is online.";
 // On a share recipient's turn (the signed managed context names someone other than the owner) the browser is
@@ -91,6 +97,60 @@ const RELAY_ERROR_TEXT = {
 };
 
 const RELAY_UNSUPPORTED_TEXT = "This HOAI backend does not have the browser relay yet. Tell the owner to update Home of Agents.";
+
+// Every browser_profile_* refusal an agent can meet, and the ONE plain sentence it is told (BGOS mission 173). The
+// codes come from the backend (the legacy fence, storage), from the desktop (its admission answers
+// browser_profile_<supervisor state>), from this agent's own browser host, and from the shim (the writer state that
+// discovery reports, and a call the browser never confirmed). None of them says the desktop app is not running: a
+// connected desktop refusing for its profile used to read as host_offline (RC4).
+const PROFILE_CODE = /^browser_profile_[a-z0-9_]{1,80}$/;
+// The legacy fence (409, or the bridge's 423) and the desktop's own admission send this code before a call runs and
+// also after one ran (the fence withholds a collected result; the desktop rechecks its runtime once an action is
+// done), so its words are true either way and never invite a blind repeat.
+const PROFILE_OLDER_ROUTE = "Your browser's managed profile refused this call on the route it came by, and it may still have run; check the page with browser_snapshot before you repeat it, and ask your owner to open your browser in HOAI if this keeps happening.";
+const PROFILE_REFUSAL_TEXT = {
+  browser_profile_setup_required: "Your owner has not set up your browser yet; a Set up card is in your chat.",
+  browser_profile_restart_review_required: "Your browser is closed and your owner needs to open it once in HOAI before you can use it again.",
+  browser_profile_recovery_required: "Your browser needs your owner to look at it in HOAI before it can open again, so nothing ran.",
+  browser_profile_outcome_unknown: "HOAI could not confirm your browser's last change, so your owner needs to check your browser in HOAI before you use it again.",
+  browser_profile_return_pending: "Your browser is still moving back from another computer, so try again in a few minutes.",
+  browser_profile_active_elsewhere: "Your browser is open on another computer right now, so it can only be used there until it is closed.",
+  browser_profile_stopped_local_only: "Your browser closed but HOAI has not confirmed its last save yet, so your owner needs to open HOAI on that computer before you can use it.",
+  browser_profile_closing: "Your browser is closing and saving right now, so try again in a minute.",
+  browser_profile_authority_required: PROFILE_OLDER_ROUTE,
+  browser_profile_managed: PROFILE_OLDER_ROUTE,
+  browser_profile_unavailable: "Your browser could not be reached through HOAI just now, so nothing ran; try again in a moment, and if it repeats ask your owner to open your browser in HOAI.",
+  browser_profile_unconfirmed: "Your browser did not confirm this action, so it may have run; check the page with browser_snapshot before you repeat it.",
+  browser_profile_storage_full: "Your browser's storage in HOAI is full, so nothing new was saved or opened; ask your owner to free space for it in HOAI.",
+  browser_profile_close_blocked: "Your browser could not close cleanly yet, so it is still open; try closing it again in a moment.",
+  browser_profile_transition_absent: "HOAI could not find your browser's move between computers, so your owner needs to open your browser in HOAI to finish it.",
+};
+// A browser_profile_* code this copy does not know yet (a newer backend or desktop) still keeps its code. Its words
+// cannot know whether the call ran, so they say to look first.
+const PROFILE_UNKNOWN_TEXT = "Your browser could not take this call in HOAI; check the page with browser_snapshot before you repeat it, and ask your owner to open your browser in HOAI if this keeps happening.";
+// The writer state discovery reports for a managed profile that is not active.
+const PROFILE_STATE_CODE = {
+  idle: "browser_profile_setup_required",
+  stopped: "browser_profile_restart_review_required",
+  staged: "browser_profile_restart_review_required",
+  quiescing: "browser_profile_closing",
+  fenced: "browser_profile_recovery_required",
+};
+
+/** The browser_profile_* code a relay or profile answer carries, in its code or as the "<code>: " a host's refusal leads with, else null. */
+function profileCodeOf(payload) {
+  const code = payload && (payload.code || payload.error);
+  if (typeof code === "string" && PROFILE_CODE.test(code)) return code;
+  const carried = payload && typeof payload.message === "string" ? /^(browser_profile_[a-z0-9_]{1,80})(?::|$)/.exec(payload.message) : null;
+  return carried ? carried[1] : null;
+}
+
+/** "<code>: <sentence>". On a share recipient's turn the browser is theirs, so the sentence names them, not the owner. */
+function profileLine(code, context) {
+  const sentence = Object.hasOwn(PROFILE_REFUSAL_TEXT, code) ? PROFILE_REFUSAL_TEXT[code] : PROFILE_UNKNOWN_TEXT;
+  const words = context?.recipient ? sentence.replace(/\bYour owner\b/g, "The person you act for").replace(/\byour owner\b/g, "the person you act for") : sentence;
+  return `${code}: ${words}`;
+}
 
 // The relay answers whose words name the owner's desktop app, as said on a share recipient's turn instead (item 0.2).
 const RECIPIENT_RELAY_ERROR_TEXT = {
@@ -324,11 +384,16 @@ function profileAuthority(value, actor, assistantId, profileId) {
 async function profileFetch(route, body, signal, context, maximum = 64 * 1024) {
   const base = new URL(RELAY.backendUrl);
   if (base.username || base.password || !(base.protocol === "https:" || base.protocol === "http:" && ["127.0.0.1", "[::1]"].includes(base.hostname))) throw Error("profile_endpoint_refused");
+  // Pairing only: the backend refuses a profile call that also carries an account key, a session or an
+  // Authorization header, so the pairing token (and the signed acting person on a recipient's turn) is all it gets.
+  const pairing = RELAY.headers["X-BGOS-Pairing"];
+  if (!pairing) throw Error("profile_pairing_required");
+  const acting = context?.headers?.["X-BGOS-Acting-User"];
   const controller = new AbortController(), abort = () => controller.abort(), timer = setTimeout(abort, Math.max(1, Math.min(30000, RELAY_PROBE_MS)));
   signal?.addEventListener("abort", abort, { once: true }); if (signal?.aborted) abort();
   let reader;
   try {
-    const response = await fetch(new URL(PROFILE_PATH + route, base.origin), { method: "POST", headers: { Accept: "application/json", "Accept-Encoding": "identity", "Content-Type": "application/json", ...RELAY.headers, ...context?.headers },
+    const response = await fetch(new URL(PROFILE_PATH + route, base.origin), { method: "POST", headers: { Accept: "application/json", "Accept-Encoding": "identity", "Content-Type": "application/json", "X-BGOS-Pairing": pairing, ...(acting ? { "X-BGOS-Acting-User": acting } : {}) },
       body: JSON.stringify(body), signal: controller.signal, redirect: "error", credentials: "omit", cache: "no-store" });
     reader = response.body.getReader(); const chunks = []; let length = 0;
     for (;;) { const { value, done } = await reader.read(); if (done) break; if ((length += value.byteLength) > maximum) { await reader.cancel(); throw Error("profile_response_too_large"); } chunks.push(value); }
@@ -337,8 +402,9 @@ async function profileFetch(route, body, signal, context, maximum = 64 * 1024) {
     return { status: response.status, payload };
   } finally { clearTimeout(timer); signal?.removeEventListener("abort", abort); reader?.releaseLock(); controller.abort(); }
 }
-function profileRefusal(state = "unavailable") {
-  return { code: "browser_profile_unavailable", text: `This person's managed browser is ${state}. Open Browser in HOAI to finish setup or review its current session. This request did not select another browser. Nothing ran.` };
+// A managed profile that cannot take this call. It never selects another browser; the text is its code and sentence.
+function profileRefusal(code, context) {
+  return { code, profile: true, text: profileLine(code, context) };
 }
 async function discoverProfile(context) {
   if (!PROFILE_DISCOVERY) return null;
@@ -347,7 +413,7 @@ async function discoverProfile(context) {
     const assistantId = Number(RELAY.assistantId);
     if (!Number.isSafeInteger(assistantId) || assistantId < 1) throw Error("profile_assistant_refused");
     const response = await profileFetch("/resolve", { assistantId }, undefined, context), value = response.payload;
-    if (response.status < 200 || response.status >= 300) throw Error("profile_discovery_refused");
+    if (response.status < 200 || response.status >= 300) throw Object.assign(Error("profile_discovery_refused"), { profileCode: profileCodeOf(value) });
     const actor = context?.actingUserId || process.env.HOAI_RELAY_OWNER_USER_ID || value.actingUserId;
     if (typeof actor !== "string" || !PROFILE_ID.test(actor) || value.actingUserId !== actor || value.assistantId !== assistantId) throw Error("profile_actor_refused");
     const namespace = JSON.stringify([actor, assistantId]);
@@ -359,11 +425,11 @@ async function discoverProfile(context) {
         Object.keys(value).length !== (value.state === "active" ? 6 : 5)) throw Error("profile_namespace_refused");
     if (!managedNamespaces.has(namespace) && managedNamespaces.size >= 128) throw Error("profile_namespace_limit");
     managedNamespaces.add(namespace);
-    if (value.state !== "active") return { failed: profileRefusal(value.state === "idle" ? "awaiting setup" : value.state) };
+    if (value.state !== "active") return { failed: profileRefusal(PROFILE_STATE_CODE[value.state], context) };
     const authority = profileAuthority(value.authority, actor, assistantId, value.profileId);
     profileScopes.set(clientId, authority); while (profileScopes.size > 32) profileScopes.delete(profileScopes.keys().next().value);
     return { authority };
-  } catch { return { failed: profileRefusal() }; }
+  } catch (error) { return { failed: profileRefusal(error?.profileCode || "browser_profile_unavailable", context) }; }
 }
 async function profileSend(message, signal, context, authority, pending) {
   const clientId = relayClientId(context), scope = { assistantId: authority.assistantId, clientId, authority, waitMs: 0 };
@@ -380,18 +446,24 @@ async function profileSend(message, signal, context, authority, pending) {
         await sleep(Math.max(25, Math.min(2000, Number(response.payload.pollAfterMs) || 250)), signal);
         response = await profileFetch(`/${rpcId}/poll`, scope, signal, context, 8 * 1024 * 1024 + 64 * 1024); continue;
       }
-      return { ok: false, code: "browser_profile_unavailable", sent, text: "The managed browser did not confirm this request. It may have run. Inspect that same browser before repeating an action. No other browser was selected." };
+      // A refusal that names its browser_profile_* code says so; anything else was not confirmed, and may have run.
+      const refused = profileCodeOf(response.payload);
+      if (refused) return { ok: false, code: refused, profile: true, sent, text: profileLine(refused, context) };
+      return { ok: false, code: "browser_profile_unconfirmed", sent, text: profileLine("browser_profile_unconfirmed", context) };
     }
   } catch {
     signal?.throwIfAborted();
-    return { ok: false, code: "browser_profile_unavailable", sent, text: "The managed browser result is unconfirmed. The action may have run or may still be running. Inspect that same browser before repeating it. No automatic retry was sent." };
+    return { ok: false, code: "browser_profile_unconfirmed", sent, text: profileLine("browser_profile_unconfirmed", context) };
   }
 }
 
 function relayErrorCode(status, payload) {
+  const profile = profileCodeOf(payload);
+  if (profile) return profile;
   const code = payload && (payload.code || payload.error);
   if (typeof code === "string" && RELAY_ERROR_TEXT[code]) return code;
-  if (status === 409) return "host_offline";
+  // A 409 is host_offline only when the relay says so in its code (above). The profile fence answers 409 while the
+  // desktop is connected, and so may any conflict a newer backend adds; neither means the desktop app is not running.
   if (status === 504) return "host_timeout";
   // Only a body that says rate_limited is the relay's own per agent limit (returned above); a bare 429 is not.
   if (status === 429) return "throttled";
@@ -428,7 +500,8 @@ function relaySuffix(code, payload, retryAfter, saidAbout = "") {
   return text;
 }
 
-function relayErrorText(code, status, payload, retryAfter) {
+function relayErrorText(code, status, payload, retryAfter, context) {
+  if (PROFILE_CODE.test(code)) return profileLine(code, context);
   if (RELAY_ERROR_TEXT[code]) return RELAY_ERROR_TEXT[code] + relaySuffix(code, payload, retryAfter);
   const detail = relayDetail(payload);
   return `The HOAI relay answered ${status}${detail ? `: ${detail}` : ""}. Retry once; if it persists, tell the owner.`;
@@ -440,7 +513,7 @@ function relayErrorText(code, status, payload, retryAfter) {
  * in front.
  */
 function connectReason(res) {
-  if (res.code === "browser_profile_unavailable") return "The current managed browser did not confirm the connection. It was not replaced or retried. Open Browser in HOAI to review that session.";
+  if (res.code === "browser_profile_unconfirmed") return "The current managed browser did not confirm the connection. It was not replaced or retried. Open Browser in HOAI to review that session.";
   if (res.hostError) return `The browser's host answered the connection request with an error: ${String(res.hostError).slice(0, 300)}. Retry in a moment; if it keeps happening, tell your owner.`;
   const base = CONNECT_REASON_TEXT[res.code];
   if (base && res.code === "host_disconnected") return base + droppedHostSuffix(res.payload);
@@ -522,8 +595,8 @@ async function relaySend(message, signal, context, pending) {
     }
     // Any 429 on the collect is a limit on COLLECTING, never the relay refusing to send: the call already went.
     const code = collecting && r.status === 429 ? "collect_throttled" : relayErrorCode(r.status, r.payload);
-    const text = collecting && SENT_CALL_CODES.has(code) ? sentCallText(code, r.status, relayDetail(r.payload), "") : relayErrorText(code, r.status, r.payload, r.retryAfter);
-    return { ok: false, code, sent: collecting, text, status: r.status, payload: r.payload, retryAfter: r.retryAfter };
+    const text = collecting && SENT_CALL_CODES.has(code) ? sentCallText(code, r.status, relayDetail(r.payload), "") : relayErrorText(code, r.status, r.payload, r.retryAfter, context);
+    return { ok: false, code, ...(PROFILE_CODE.test(code) ? { profile: true } : {}), sent: collecting, text, status: r.status, payload: r.payload, retryAfter: r.retryAfter };
   }
 }
 
@@ -576,7 +649,8 @@ async function ensureRelay(context) {
   if (host && host.failed) return { relay: null, refusal: host.failed };
   if (!host || !host.online) return { relay: null, refusal: null };
   const init = await relaySend({ jsonrpc: "2.0", id: `shim-init-${++initSeq}`, method: "initialize", params: initializeParams() }, undefined, context);
-  if (!init.ok) return { relay: null, refusal: init.code === "host_offline" ? null : connectRefusal(init) };
+  // A profile refusal is said as itself (its code and sentence), never as a connection that could not be set up.
+  if (!init.ok) return { relay: null, refusal: init.code === "host_offline" ? null : init.profile ? { code: init.code, profile: true, text: init.text } : connectRefusal(init) };
   if (init.message && init.message.error) return { relay: null, refusal: connectRefusal({ code: "host_init_error", hostError: init.message.error.message || JSON.stringify(init.message.error) }) };
   if (!init.message) return { relay: null, refusal: null };
   await relaySend({ jsonrpc: "2.0", method: "notifications/initialized" }, undefined, context).catch(() => {});
@@ -596,7 +670,95 @@ function dropRelay(code, context) {
   // reloaded, so the desktop's session died with its socket) or a dead relay
   // means the session on the desktop is gone; the next call re-elects through
   // a fresh initialize.
-  if (code === "host_offline" || code === "host_disconnected" || code === "relay_unreachable" || code === "relay_unsupported" || code === "call_lost") relayConnections.delete(relayClientId(context));
+  // A browser_profile_* refusal too: the next call discovers the profile afresh.
+  if (code === "host_offline" || code === "host_disconnected" || code === "relay_unreachable" || code === "relay_unsupported" || code === "call_lost" || PROFILE_CODE.test(code)) relayConnections.delete(relayClientId(context));
+}
+
+// ─── One browser per agent: no profile question (BGOS mission 173) ───────────
+//
+// KC, 2026-10-19: an agent opens its own browser and never asks its owner a profile question. A desktop before 5.22
+// still offers "profile: preview or signed-in", preview by default, in its open tool, its close tool and its
+// instructions, and this agent's own browser host listed the same choice, so the shim serves every host's words
+// without it. On a HOAI route (relay or managed profile) it opens the agent's own browser itself: signed-in, the
+// agent's persistent profile and the only one a managed desktop opens. On this machine's loopback door the owner's
+// own default applies, which for a client it cannot verify is a temporary browser. A future host that drops the
+// choice loses nothing else; its open tool still gets the one sentence.
+const OWN_BROWSER_SENTENCE = "This opens your own browser, the one your owner set up for you; there is no profile to choose.";
+// On the loopback door the desktop cannot verify the client, so it opens a temporary browser (desktop-host.js
+// defaultProfileFor: preview unless verified).
+const LOCAL_BROWSER_SENTENCE = "This opens a temporary browser on this computer; there is no profile to choose.";
+const OWN_BROWSER_PROFILE = "signed-in";
+// Sentences that offer, or report, a choice of profile.
+const PROFILE_CHOICE = /\bpreview\b|\bprofile\s*:?\s*"?(?:preview|signed-in)\b/i;
+// The 5.21 desktop's instructions, said without the choice but keeping what they tell the agent.
+const INSTRUCTION_REWRITES = [
+  [/,? and profile "preview" \([^()]*\) or "signed-in" \([^()]*\)/g, ""],
+  [/ and profile "signed-in"/g, ""],
+  [/\bSigned-in is per agent and remembered:/g, "Your browser is your own and remembered:"],
+  [/\byour next signed-in session\b/g, "your next session"],
+  [/\bIf you skip this, a verified HOAI agent opens its own signed-in profile by default; an unverified local client opens a preview\./g, "If you skip this, your first browser tool opens your own browser."],
+  [/\bAn explicit preview or a verify session remains temporary\./g, "A verify session remains temporary."],
+  [/\btemporary preview browser\b/g, "temporary browser"],
+];
+// The same instructions on this machine's loopback door, where nothing is remembered: the desktop cannot verify
+// the client, so its browser is temporary.
+const LOCAL_INSTRUCTION_REWRITES = [
+  INSTRUCTION_REWRITES[0],
+  INSTRUCTION_REWRITES[1],
+  [/\bSigned-in is per agent and remembered:[^\n]*?still signed in\./g, "On this computer's direct connection your browser is temporary: nothing is remembered after it closes."],
+  [/\bIf you skip this, a verified HOAI agent opens its own signed-in profile by default; an unverified local client opens a preview\./g, "If you skip this, your first browser tool opens it for you."],
+  ...INSTRUCTION_REWRITES.slice(5),
+];
+// Split on a sentence end inside one line; "1. hoai_browser_open_session" is not one (no capital follows).
+const SENTENCE_END = /(?<=[a-z0-9)"'\]][.!?])\s+(?=[A-Z])/;
+
+function withoutProfileChoice(text, rewrites = []) {
+  if (typeof text !== "string" || !text) return text;
+  let out = text;
+  for (const [pattern, replacement] of rewrites) out = out.replace(pattern, replacement);
+  out = out.replace(/\s*\([^()]*\b(?:preview|signed-in)\b[^()]*\)/gi, "");
+  return out.split("\n").map(line => line.split(SENTENCE_END).filter(sentence => !PROFILE_CHOICE.test(sentence)).join(" ")).join("\n");
+}
+
+/** A host's tool list with no profile choice: hoai_browser_open_session loses its profile argument and says why. */
+function withoutProfileTools(message, route) {
+  const tools = message?.result?.tools;
+  if (!Array.isArray(tools)) return message;
+  const served = tools.map(tool => {
+    if (!tool || typeof tool.name !== "string" || !tool.name.startsWith("hoai_browser_")) return tool;
+    const copy = { ...tool, description: withoutProfileChoice(tool.description) };
+    if (tool.name === "hoai_browser_open_session") {
+      const schema = tool.inputSchema && typeof tool.inputSchema === "object" ? tool.inputSchema : { type: "object" };
+      const { profile: _profile, ...kept } = schema.properties || {};
+      // An argument's own words may report the choice too (the desktop's verify: "Always opens a Preview session.").
+      const properties = Object.fromEntries(Object.entries(kept).map(([name, property]) => [name, property && typeof property.description === "string" ? { ...property, description: withoutProfileChoice(property.description) } : property]));
+      copy.inputSchema = { ...schema, properties, ...(Array.isArray(schema.required) ? { required: schema.required.filter(name => name !== "profile") } : {}) };
+      copy.description = [copy.description, route === "local" ? LOCAL_BROWSER_SENTENCE : OWN_BROWSER_SENTENCE].filter(Boolean).join(" ");
+    }
+    return copy;
+  });
+  return { ...message, result: { ...message.result, tools: served } };
+}
+
+/** The open call as the shim sends it: the agent's own profile on a HOAI route, the owner's default on loopback. */
+function ownBrowserCall(params, route) {
+  if (params?.name !== "hoai_browser_open_session") return params;
+  const { profile: _profile, ...args } = params.arguments && typeof params.arguments === "object" ? params.arguments : {};
+  return { ...params, arguments: route === "local" ? args : { ...args, profile: OWN_BROWSER_PROFILE } };
+}
+
+/**
+ * A host's tool refusal that names a browser_profile_* code (the desktop's "### Error\ntool_error: <code>" or
+ * "### Error\n<code>: ...", or a JSON-RPC error saying it) is answered with that code and its one sentence.
+ */
+function withProfileRefusal(message, context) {
+  const result = message?.result;
+  const first = result?.isError === true && Array.isArray(result.content) ? result.content.find(item => item?.type === "text") : null;
+  const lead = first ? /^### Error\n(?:tool_error: )?(browser_profile_[a-z0-9_]{1,80})(?::|\s|$)/.exec(String(first.text || "")) :
+    message?.error ? /^(?:tool_error: )?(browser_profile_[a-z0-9_]{1,80})(?::|\s|$)/.exec(String(message.error.message || "")) : null;
+  if (!lead) return message;
+  const { error: _error, ...rest } = message;
+  return { ...rest, result: { ...(result || {}), content: [{ type: "text", text: profileLine(lead[1], context) }], isError: true } };
 }
 
 // ─── Mode resolution: local, then relay, then offline ────────────────────────
@@ -711,26 +873,28 @@ async function handle(msg, entry) {
     clientInfo = params?.clientInfo || null;
     clientProtocol = params?.protocolVersion || PROTOCOL_VERSION;
     const r = await resolveRequestMode();
-    const instructions = r.mode === "local" ? r.up.instructions : r.mode === "relay" ? r.relay.instructions : "";
+    const instructions = r.mode === "local" ? withoutProfileChoice(r.up.instructions, LOCAL_INSTRUCTION_REWRITES) : r.mode === "relay" ? withoutProfileChoice(r.relay.instructions, INSTRUCTION_REWRITES) : "";
+    // A profile refusal comes from a browser that answered, so it is not told as an unreachable desktop app.
+    const lead = r.refusal?.profile ? "HOAI Agent Browser: your default browser. " : "HOAI Agent Browser: your default browser once the Home of Agents desktop app is reachable. ";
     return reply({
       protocolVersion: clientProtocol,
       capabilities: { tools: { listChanged: true } },
       serverInfo: { name: "hoai-agent-browser", version: "shim-2" },
-      instructions: instructions || "HOAI Agent Browser: your default browser once the Home of Agents desktop app is reachable. " + (r.refusal && r.refusal.connecting ? `${CONNECT_LEAD_INSTRUCTIONS} ${r.refusal.reason}` : offlineText(r.refusal, context)),
+      instructions: instructions || lead + (r.refusal && r.refusal.connecting ? `${CONNECT_LEAD_INSTRUCTIONS} ${r.refusal.reason}` : offlineText(r.refusal, context)),
     });
   }
   if (method && method.startsWith("notifications/")) return; // no reply to notifications
   if (method === "ping") return reply({});
   if (method === "tools/list") {
     const r = await resolveRequestMode();
-    if (r.mode === "offline") return reply({ tools: [OFFLINE_TOOL] });
+    if (r.mode === "offline") return reply({ tools: [r.refusal?.profile ? PROFILE_REFUSED_TOOL : OFFLINE_TOOL] });
     if (r.mode === "local") {
       const res = await localRequest({ jsonrpc: "2.0", id, method, params: params || {} }, r.up);
       if (!res?.payload) {
         upstream = null;
         return reply({ tools: [OFFLINE_TOOL] });
       }
-      return send({ ...res.payload, id });
+      return send({ ...withoutProfileTools(res.payload, "local"), id });
     }
     const res = await relayRequest({ jsonrpc: "2.0", id, method, params: params || {} });
     if (!res.ok || !res.message || !res.message.result) {
@@ -738,20 +902,20 @@ async function handle(msg, entry) {
       if (!relayConnections.has(relayClientId(context))) setMode("offline");
       return reply({ tools: [OFFLINE_TOOL] });
     }
-    return send({ ...res.message, id });
+    return send({ ...withoutProfileTools(res.message, "relay"), id });
   }
   if (method === "tools/call") {
     const r = await resolveRequestMode();
     if (r.mode === "offline") return reply({ content: [{ type: "text", text: offlineText(r.refusal, context) }], isError: params?.name !== "hoai_browser_status" });
     if (r.mode === "local") {
-      const res = await localRequest({ jsonrpc: "2.0", id, method, params }, r.up);
+      const res = await localRequest({ jsonrpc: "2.0", id, method, params: ownBrowserCall(params, "local") }, r.up);
       if (!res?.payload) {
         upstream = null;
         return reply({ content: [{ type: "text", text: "The HOAI Agent Browser stopped answering (the desktop app may have quit). " + offlineText(undefined, context) }], isError: true });
       }
-      return send({ ...res.payload, id });
+      return send({ ...withProfileRefusal(res.payload, context), id });
     }
-    const res = await relayRequest({ jsonrpc: "2.0", id, method, params });
+    const res = await relayRequest({ jsonrpc: "2.0", id, method, params: ownBrowserCall(params, "relay") });
     if (!res.ok) {
       dropRelay(res.code, context);
       if (!relayConnections.has(relayClientId(context))) setMode("offline");
@@ -778,7 +942,7 @@ async function handle(msg, entry) {
       const where = `Reached on ${r.relay.hostLabel}.` + (context?.recipient ? ` ${RECIPIENT_BROWSER_TEXT}` : "");
       return send({ ...res.message, id, result: { ...result, content: [...content, { type: "text", text: where }] } });
     }
-    return send({ ...res.message, id });
+    return send({ ...withProfileRefusal(res.message, context), id });
   }
   return fail(-32601, `Method not found: ${method}`);
 }
