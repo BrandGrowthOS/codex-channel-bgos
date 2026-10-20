@@ -144,6 +144,7 @@ describe("managed browser context lifecycle", () => {
     expect(server.starts[0].context.context.actingUserId).toBe("user_owner");
     expect(server.discoveries[0].actingUserId).toBe("user_owner");
     expect(server.configs.get("thread-1")["mcp_servers.hoai_browser.args"]).toEqual([bundledShimPath()]);
+    expect(server.configs.get("thread-1")[envKey].HOAI_RELAY_PROFILE_SYNC).toBe("1");
     await finish("thread-1", one); expect(state("thread-1").live).toBe(false);
     const two = host.runTurn(9, "recipient", { browserActor: "user_recipient" }); await waitStarts(2);
     expect(state("thread-1").actingUserId).toBe("user_recipient");
@@ -192,6 +193,7 @@ describe("managed browser context lifecycle", () => {
   it("explicit fork and saved resume replace the scope instead of inheriting live owner authority", async () => {
     const run = host.runTurn(9, "owner", { browserActor: "user_owner" }); await waitStarts(1); await finish("thread-1", run);
     const fork = await host.forkThread(9);
+    expect(server.configs.get(fork)[envKey].HOAI_RELAY_PROFILE_SYNC).toBe("1");
     expect(state(fork).live).toBe(false);
     expect(server.configs.get(fork)[envKey].HOAI_RELAY_CONTEXT_FILE).not.toBe(server.configs.get("thread-1")[envKey].HOAI_RELAY_CONTEXT_FILE);
     await host.resumeSavedThread(9, "thread-1");

@@ -1,0 +1,89 @@
+{
+  "kind": "actual-packaged-node-child-lifecycle",
+  "platform": "win32",
+  "node": "v24.16.0",
+  "tarballSha256": "176fa9136628b6b400351f57d046257537e94c545eea886f0fc46f36f02fb39f",
+  "vendoredSourceCommit": "f8ceb6400d59522109b2945a1191a21a6822b3c2",
+  "vendoredFiles": 43,
+  "actualPackagedCliCheck": {
+    "managedAgentPlatform": "linux-agent-required",
+    "browser": "automatic-first-use-download",
+    "keyService": "requires-unlocked-persistent-Secret-Service-and-/usr/bin/gdbus-and-/usr/bin/secret-tool",
+    "keyServiceAvailability": "not-probed-without-an-enrolled-profile",
+    "sandbox": "required",
+    "authorization": "device-review-background-grant-and-session-confirmation-required"
+  },
+  "agentInstructionsPresent": true,
+  "before": {
+    "state": "running",
+    "busy": false,
+    "activeProfiles": 0,
+    "pendingWork": 0
+  },
+  "after": {
+    "state": "stopped",
+    "busy": false,
+    "activeProfiles": 0,
+    "pendingWork": 0
+  },
+  "originalRequestedStopReceipt": true,
+  "actualChildExitCode": 0,
+  "ownedChildGone": true,
+  "forcedStop": false,
+  "states": [
+    {
+      "state": "idle",
+      "busy": true,
+      "activeProfiles": null,
+      "pendingWork": null
+    },
+    {
+      "state": "starting",
+      "busy": true,
+      "activeProfiles": null,
+      "pendingWork": null
+    },
+    {
+      "state": "starting",
+      "busy": true,
+      "activeProfiles": 0,
+      "pendingWork": 0
+    },
+    {
+      "state": "running",
+      "busy": false,
+      "activeProfiles": 0,
+      "pendingWork": 0
+    },
+    {
+      "state": "stopping",
+      "busy": true,
+      "activeProfiles": 0,
+      "pendingWork": 0
+    },
+    {
+      "state": "stopping",
+      "busy": true,
+      "activeProfiles": 0,
+      "pendingWork": 0
+    },
+    {
+      "state": "stopped",
+      "busy": false,
+      "activeProfiles": 0,
+      "pendingWork": 0
+    },
+    {
+      "state": "stopped",
+      "busy": false,
+      "activeProfiles": 0,
+      "pendingWork": 0
+    }
+  ],
+  "boundaries": [
+    "This is the extracted npm package with actual Node fork, private IPC, common BrowserHost constructor/start and guarded stop.",
+    "HTTP identity, registration and live browser authorization are not qualified here. The exact loopback endpoint refuses all requests.",
+    "No Chromium page is launched. Dependencies resolve from the workspace fixture, not a fresh installation.",
+    "Linux provider and full native checkpoint composition are separately required."
+  ]
+}

@@ -1,0 +1,285 @@
+{
+  "kind": "direct-executable-mutations",
+  "results": [
+    {
+      "name": "synchronous-revoke-generation",
+      "file": "src/browser-profile-host.ts",
+      "line": 83,
+      "changedLine": "revoke():Promise<void>{this.generation+=0;const row=this.record;return row?this.stopRecord(row):Promise.resolve()}",
+      "before": "revoke():Promise<void>{this.generation++;",
+      "after": "revoke():Promise<void>{this.generation+=0;",
+      "sourceSha256": "eaaa57037743324604b02dddebfc1e7a58f46428e11e7c232c21ea5d73bf17b8",
+      "restoredSha256": "eaaa57037743324604b02dddebfc1e7a58f46428e11e7c232c21ea5d73bf17b8",
+      "red": {
+        "exitCode": 1,
+        "assertionFailed": true,
+        "output": "\n RUN  v2.1.9 E:/bgos-worktrees/browser-profile-sync-codex\n\n ❯ test/browser-profile-host.spec.ts (13 tests | 1 failed | 12 skipped) 11ms\n   × Codex managed browser process ownership > invalidates authorization awaiting its environment before any child exists 10ms\n     → promise resolved \"{ state: 'starting', busy: true, …(2) }\" instead of rejecting\n\n Test Files  1 failed (1)\n      Tests  1 failed | 12 skipped (13)\n   Start at  10:53:21\n   Duration  902ms (transform 91ms, setup 0ms, collect 110ms, tests 11ms, environment 0ms, prepare 149ms)\n\n⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯\n\n FAIL  test/browser-profile-host.spec.ts > Codex managed browser process ownership > invalidates authorization awaiting its environment before any child exists\nAssertionError: promise resolved \"{ state: 'starting', busy: true, …(2) }\" instead of rejecting\n\n- Expected\n+ Received\n\n- [Error: rejected promise]\n+ Object {\n+   \"activeProfiles\": null,\n+   \"busy\": true,\n+   \"pendingWork\": null,\n+   \"state\": \"starting\",\n+ }\n\n ❯ test/browser-profile-host.spec.ts:51:76\n     49|     const {manager,spawn}=fixture();let release!:(env:Record<string,st…\n     50|     vi.spyOn(manager as any,\"environment\").mockImplementationOnce(()=>…\n     51|     const pending=manager.synchronize(config());const result=expect(pe…\n       |                                                                            ^\n     52|     await manager.revoke();release({PATH:\"/usr/bin\"});await result;exp…\n     53|   });\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\n\n"
+      },
+      "green": {
+        "exitCode": 0,
+        "assertionFailed": false,
+        "output": "\n RUN  v2.1.9 E:/bgos-worktrees/browser-profile-sync-codex\n\n ✓ test/browser-profile-host.spec.ts (13 tests | 12 skipped) 3ms\n\n Test Files  1 passed (1)\n      Tests  1 passed | 12 skipped (13)\n   Start at  10:53:22\n   Duration  848ms (transform 95ms, setup 0ms, collect 114ms, tests 3ms, environment 0ms, prepare 143ms)\n\n"
+      }
+    },
+    {
+      "name": "same-config-confirmed-reconnect",
+      "file": "src/browser-profile-host.ts",
+      "line": 45,
+      "changedLine": "if(this.record?.hash===hash)return this.status();",
+      "before": "this.record?.hash===hash&&this.record.state!==\"stopped\"",
+      "after": "this.record?.hash===hash",
+      "sourceSha256": "eaaa57037743324604b02dddebfc1e7a58f46428e11e7c232c21ea5d73bf17b8",
+      "restoredSha256": "eaaa57037743324604b02dddebfc1e7a58f46428e11e7c232c21ea5d73bf17b8",
+      "red": {
+        "exitCode": 1,
+        "assertionFailed": true,
+        "output": "\n RUN  v2.1.9 E:/bgos-worktrees/browser-profile-sync-codex\n\n ❯ test/browser-profile-host.spec.ts (13 tests | 1 failed | 12 skipped) 19ms\n   × Codex managed browser process ownership > allows a fresh authorized synchronization of the same config after a confirmed revoke 18ms\n     → expected \"spy\" to be called 2 times, but got 1 times\n\n Test Files  1 failed (1)\n      Tests  1 failed | 12 skipped (13)\n   Start at  10:53:24\n   Duration  981ms (transform 103ms, setup 0ms, collect 127ms, tests 19ms, environment 0ms, prepare 171ms)\n\n⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯\n\n FAIL  test/browser-profile-host.spec.ts > Codex managed browser process ownership > allows a fresh authorized synchronization of the same config after a confirmed revoke\nAssertionError: expected \"spy\" to be called 2 times, but got 1 times\n ❯ test/browser-profile-host.spec.ts:60:55\n     58|   it(\"allows a fresh authorized synchronization of the same config aft…\n     59|     const {manager,children,spawn}=fixture();await manager.synchronize…\n     60|     await manager.synchronize(config());expect(spawn).toHaveBeenCalled…\n       |                                                       ^\n     61|   });\n     62|   it(\"never replaces an exited child without a positive requested clea…\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\n\n"
+      },
+      "green": {
+        "exitCode": 0,
+        "assertionFailed": false,
+        "output": "\n RUN  v2.1.9 E:/bgos-worktrees/browser-profile-sync-codex\n\n ✓ test/browser-profile-host.spec.ts (13 tests | 12 skipped) 16ms\n\n Test Files  1 passed (1)\n      Tests  1 passed | 12 skipped (13)\n   Start at  10:53:25\n   Duration  934ms (transform 90ms, setup 0ms, collect 110ms, tests 16ms, environment 0ms, prepare 142ms)\n\n"
+      }
+    },
+    {
+      "name": "positive-receipt-after-exit",
+      "file": "src/browser-profile-host.ts",
+      "line": 78,
+      "changedLine": "try{if(exitedBeforeRequest)throw fail();await Promise.race([Promise.all([row.physical.then(()=>{if(row.exitCode!==0)throw fail()}),Promise.resolve()]),new Promise<never>((_resolve,reject)=>{timer=setTimeout(()=>reject(fail()),this.options.stopTimeoutMs??25000)})]);",
+      "before": "),row.receipt])",
+      "after": "),Promise.resolve()])",
+      "sourceSha256": "eaaa57037743324604b02dddebfc1e7a58f46428e11e7c232c21ea5d73bf17b8",
+      "restoredSha256": "eaaa57037743324604b02dddebfc1e7a58f46428e11e7c232c21ea5d73bf17b8",
+      "red": {
+        "exitCode": 1,
+        "assertionFailed": true,
+        "output": "\n RUN  v2.1.9 E:/bgos-worktrees/browser-profile-sync-codex\n\n ❯ test/browser-profile-host.spec.ts (13 tests | 1 failed | 12 skipped) 20ms\n   × Codex managed browser process ownership > waits for the requested receipt when process exit is delivered first 19ms\n     → expected true to be false // Object.is equality\n\n Test Files  1 failed (1)\n      Tests  1 failed | 12 skipped (13)\n   Start at  10:53:27\n   Duration  918ms (transform 90ms, setup 0ms, collect 109ms, tests 20ms, environment 0ms, prepare 163ms)\n\n⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯\n\n FAIL  test/browser-profile-host.spec.ts > Codex managed browser process ownership > waits for the requested receipt when process exit is delivered first\nAssertionError: expected true to be false // Object.is equality\n\n- Expected\n+ Received\n\n- false\n+ true\n\n ❯ test/browser-profile-host.spec.ts:45:66\n\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\n\n"
+      },
+      "green": {
+        "exitCode": 0,
+        "assertionFailed": false,
+        "output": "\n RUN  v2.1.9 E:/bgos-worktrees/browser-profile-sync-codex\n\n ✓ test/browser-profile-host.spec.ts (13 tests | 12 skipped) 14ms\n\n Test Files  1 passed (1)\n      Tests  1 passed | 12 skipped (13)\n   Start at  10:53:29\n   Duration  958ms (transform 101ms, setup 0ms, collect 121ms, tests 14ms, environment 0ms, prepare 150ms)\n\n"
+      }
+    },
+    {
+      "name": "private-host-environment",
+      "file": "src/browser-profile-host.ts",
+      "line": 48,
+      "changedLine": "const env=this.options.environment??process.env;current();",
+      "before": "const env=await this.environment();current();",
+      "after": "const env=this.options.environment??process.env;current();",
+      "sourceSha256": "eaaa57037743324604b02dddebfc1e7a58f46428e11e7c232c21ea5d73bf17b8",
+      "restoredSha256": "eaaa57037743324604b02dddebfc1e7a58f46428e11e7c232c21ea5d73bf17b8",
+      "red": {
+        "exitCode": 1,
+        "assertionFailed": true,
+        "output": "\n RUN  v2.1.9 E:/bgos-worktrees/browser-profile-sync-codex\n\n ❯ test/browser-profile-host.spec.ts (13 tests | 1 failed | 12 skipped) 12ms\n   × Codex managed browser process ownership > uses one exact IPC configuration with a sanitized child environment and private stdio 11ms\n     → expected { PATH: '/usr/bin', …(4) } to deeply equal { PATH: '/usr/bin', …(1) }\n\n Test Files  1 failed (1)\n      Tests  1 failed | 12 skipped (13)\n   Start at  10:53:30\n   Duration  956ms (transform 86ms, setup 0ms, collect 111ms, tests 12ms, environment 0ms, prepare 154ms)\n\n⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯\n\n FAIL  test/browser-profile-host.spec.ts > Codex managed browser process ownership > uses one exact IPC configuration with a sanitized child environment and private stdio\nAssertionError: expected { PATH: '/usr/bin', …(4) } to deeply equal { PATH: '/usr/bin', …(1) }\n\n- Expected\n+ Received\n\n  Object {\n    \"HOME\": \"/tmp/synthetic-home\",\n+   \"NODE_OPTIONS\": \"--inspect\",\n+   \"OPENAI_API_KEY\": \"SYNTHETIC_DO_NOT_INHERIT\",\n    \"PATH\": \"/usr/bin\",\n+   \"SSH_AUTH_SOCK\": \"/secret-ssh\",\n  }\n\n ❯ test/browser-profile-host.spec.ts:29:62\n\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\n\n"
+      },
+      "green": {
+        "exitCode": 0,
+        "assertionFailed": false,
+        "output": "\n RUN  v2.1.9 E:/bgos-worktrees/browser-profile-sync-codex\n\n ✓ test/browser-profile-host.spec.ts (13 tests | 12 skipped) 12ms\n\n Test Files  1 passed (1)\n      Tests  1 passed | 12 skipped (13)\n   Start at  10:53:32\n   Duration  880ms (transform 93ms, setup 0ms, collect 111ms, tests 12ms, environment 0ms, prepare 148ms)\n\n"
+      }
+    },
+    {
+      "name": "retain-partial-start-ownership",
+      "file": "runtime/browser-profile-host.mjs",
+      "line": 69,
+      "changedLine": "host=create({config,environment,log:()=>{}}).start();clearTimeout(initial)",
+      "before": "host=create({config,environment,log:()=>{}});host.start();",
+      "after": "host=create({config,environment,log:()=>{}}).start();",
+      "sourceSha256": "3fe5082dcfe64e0b3b6763809c78c82aad5c2948b54f2eff47f4eba415e690c9",
+      "restoredSha256": "3fe5082dcfe64e0b3b6763809c78c82aad5c2948b54f2eff47f4eba415e690c9",
+      "red": {
+        "exitCode": 1,
+        "assertionFailed": true,
+        "output": "\n RUN  v2.1.9 E:/bgos-worktrees/browser-profile-sync-codex\n\n ❯ test/browser-profile-child.spec.ts (11 tests | 1 failed | 10 skipped) 6ms\n   × the actual common host child lifecycle > retains the host before start so partial start failure still drains its exact resources 5ms\n     → expected \"spy\" to be called 1 times, but got 0 times\n\n Test Files  1 failed (1)\n      Tests  1 failed | 10 skipped (11)\n   Start at  10:53:33\n   Duration  1.55s (transform 257ms, setup 0ms, collect 762ms, tests 6ms, environment 0ms, prepare 153ms)\n\n⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯\n\n FAIL  test/browser-profile-child.spec.ts > the actual common host child lifecycle > retains the host before start so partial start failure still drains its exact resources\nAssertionError: expected \"spy\" to be called 1 times, but got 0 times\n ❯ test/browser-profile-child.spec.ts:33:54\n\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\n\n"
+      },
+      "green": {
+        "exitCode": 0,
+        "assertionFailed": false,
+        "output": "\n RUN  v2.1.9 E:/bgos-worktrees/browser-profile-sync-codex\n\n ✓ test/browser-profile-child.spec.ts (11 tests | 10 skipped) 3ms\n\n Test Files  1 passed (1)\n      Tests  1 passed | 10 skipped (11)\n   Start at  10:53:36\n   Duration  1.47s (transform 235ms, setup 0ms, collect 684ms, tests 3ms, environment 0ms, prepare 154ms)\n\n"
+      }
+    },
+    {
+      "name": "parent-process-binding",
+      "file": "runtime/browser-profile-host.mjs",
+      "line": 68,
+      "changedLine": "config=configuration(frame.configuration);if(false)throw fail()",
+      "before": "if(config.parentPid!==process.ppid)throw fail()",
+      "after": "if(false)throw fail()",
+      "sourceSha256": "3fe5082dcfe64e0b3b6763809c78c82aad5c2948b54f2eff47f4eba415e690c9",
+      "restoredSha256": "3fe5082dcfe64e0b3b6763809c78c82aad5c2948b54f2eff47f4eba415e690c9",
+      "red": {
+        "exitCode": 1,
+        "assertionFailed": true,
+        "output": "\n RUN  v2.1.9 E:/bgos-worktrees/browser-profile-sync-codex\n\n ❯ test/browser-profile-child.spec.ts (11 tests | 1 failed | 10 skipped) 7ms\n   × the actual common host child lifecycle > refuses an unrelated parent before constructing any browser host 7ms\n     → expected \"spy\" to not be called at all, but actually been called 1 times\n\nReceived: \n\n  1st spy call:\n\n    Array [\n      Object {\n        \"config\": Object {\n          \"assistantIds\": Array [\n            42,\n          ],\n          \"backendUrl\": \"http://127.0.0.1:12345\",\n          \"directory\": \"C:\\Users\\karim\\AppData\\Local\\Temp\\synthetic-child\",\n          \"ownerUserId\": \"user_recipient\",\n          \"pairingId\": 8,\n          \"pairingToken\": \"SYNTHETIC_PAIRING_TOKEN_0123456789\",\n          \"parentPid\": 37049,\n        },\n        \"environment\": Object {\n          \"3DVPATH\": \"C:\\AMD\\Chipset_Software\\Binaries\\3D_V-Cache_Performance_Optimizer_Driver\\\",\n          \"ACSETUPSVCPORT\": \"23210\",\n          \"ACSVCPORT\": \"17532\",\n          \"ALLUSERSPROFILE\": \"C:\\ProgramData\",\n          \"ANDROID_HOME\": \"E:\\Android\\Sdk\",\n          \"ANDROID_SDK_ROOT\": \"E:\\Android\\Sdk\",\n          \"APPDATA\": \"C:\\Users\\karim\\AppData\\Roaming\",\n          \"BASE_URL\": \"/\",\n          \"BROWSER_USE_ACCESS_VERIFYING_IDENTITY\": \"MCowBQYDK2VwAyEA+8wwxIxNeCJitBMHt4E+6cWUGfMyZI2yNN5hTDfa7Lc=\",\n          \"CHOCOLATEYINSTALL\": \"C:\\ProgramData\\chocolatey\",\n          \"CHOCOLATEYLASTPATHUPDATE\": \"133695940121883902\",\n          \"CLAUDE_CODE_USE_POWERSHELL_TOOL\": \"1\",\n          \"CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS\": \"1\",\n          \"CODEX_APP_TOOLS_PIPE_PATH\": \"\\\\.\\pipe\\codex-browser-use-7776a1da-10a2-4464-b556-9aec7c94a48c\",\n          \"CODEX_CI\": \"1\",\n          \"CODEX_CLI_PATH\": \"C:\\Users\\karim\\AppData\\Local\\OpenAI\\Codex\\bin\\9614f1d9b40d9c4f\\codex.exe\",\n          \"CODEX_INTERNAL_ORIGINATOR_OVERRIDE\": \"Codex Desktop\",\n          \"CODEX_MCP_NODE_PATH\": \"C:\\Users\\karim\\AppData\\Local\\OpenAI\\Codex\\runtimes\\cua_node\\a9ba6825a525118c\\bin\\node.exe\",\n          \"CODEX_PERMISSION_PROFILE\": \":danger-full-access\",\n          \"CODEX_SAGE_BACKFILL_TRACKER_TAB_REUSE\": \"1\",\n          \"CODEX_SESSION_ID\": \"01a1075b-5caa-7b91-8c6d-9badd7e83998\",\n          \"CODEX_SHELL\": \"1\",\n          \"CODEX_TASK_WORKSPACE_VERIFYING_IDENTITY\": \"MCowBQYDK2VwAyEA+8wwxIxNeCJitBMHt4E+6cWUGfMyZI2yNN5hTDfa7Lc=\",\n          \"CODEX_TECTONIC_PATH\": \"C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.1007.9446.0_x64__2p2nqsd0c76g0\\app\\resources\\tectonic\\tectonic.exe\",\n          \"CODEX_THREAD_ID\": \"01a1075b-5caa-7b91-8c6d-9badd7e83998\",\n          \"CODEX_VERSION\": \"0.162.0-alpha.17.2\",\n          \"CODEX_WINDOWS_SANDBOX_PACKAGE_FAMILY\": \"OpenAI.Codex_2p2nqsd0c76g0\",\n          \"COLORTERM\": \"\",\n          \"COMMONPROGRAMFILES\": \"C:\\Program Files\\Common Files\",\n          \"COMMONPROGRAMFILES(X86)\": \"C:\\Program Files (x86)\\Common Files\",\n          \"COMMONPROGRAMW6432\": \"C:\\Program Files\\Common Files\",\n          \"COMPUTERNAME\": \"ALIENARES\",\n          \"COMSPEC\": \"C:\\WINDOWS\\system32\\cmd.exe\",\n          \"CUDA_PATH\": \"C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.6\",\n          \"CUDA_PATH_V11_7\": \"C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v11.7\",\n          \"DEV\": \"1\",\n          \"DISABLE_AUTO_UPDATE\": \"true\",\n          \"DRIVERDATA\": \"C:\\Windows\\System32\\Drivers\\DriverData\",\n          \"GAMEFIRSTUSERPATH\": \"C:\\ProgramData\\ASUS\\GameFirst\",\n          \"GAMETURBO\": \"C:\\Program Files (x86)\\ASUS\\GameFirst\\\",\n          \"GH_PAGER\": \"cat\",\n          \"GIT_PAGER\": \"cat\",\n          \"GRADLE_USER_HOME\": \"E:\\gc\",\n          \"HOAI_TEST_API_KEY\": \"hWeAayPMwiCAHp-HNtDo4x6o1B176LAXVGfVzRNlS8I\",\n          \"HOMEDRIVE\": \"C:\",\n          \"HOMEPATH\": \"\\Users\\karim\",\n          \"JAVA_HOME\": \"C:\\Program Files\\Microsoft\\jdk-21.0.11.10-hotspot\\\",\n          \"LANG\": \"C.UTF-8\",\n          \"LC_ALL\": \"C.UTF-8\",\n          \"LC_CTYPE\": \"C.UTF-8\",\n          \"LOCALAPPDATA\": \"C:\\Users\\karim\\AppData\\Local\",\n          \"LOGONSERVER\": \"\\\\ALIENARES\",\n          \"LOG_FORMAT\": \"json\",\n          \"MODE\": \"test\",\n          \"NODE_ENV\": \"test\",\n          \"NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S\": \"461c4ba94b821ec805da79c8e8138fe510b1b3358609fc93da47387a2cf3fbf3,7ed52dae165c3bc22b6d24f282e2c1fbc87f6949fbbe037767a7418d8f517f01\",\n          \"NO_COLOR\": \"1\",\n          \"NUMBER_OF_PROCESSORS\": \"32\",\n          \"NVTOOLSEXT_PATH\": \"C:\\Program Files\\NVIDIA Corporation\\NvToolsExt\\\",\n          \"OCULUSBASE\": \"C:\\Program Files\\Oculus\\\",\n          \"ONEDRIVE\": \"C:\\Users\\karim\\OneDrive\",\n          \"OS\": \"Windows_NT\",\n          \"PAGER\": \"cat\",\n          \"PAI_MODEL_DIR\": \"C:\\ProgramData\\Topaz Labs LLC\\Topaz Photo\\models\",\n          \"PATH\": \"C:\\Users\\karim\\.codex\\tmp\\arg0\\codex-arg0pVHjhC;C:\\Program Files\\Microsoft\\jdk-21.0.11.10-hotspot\\bin;C:\\Program Files\\Zulu\\zulu-17\\bin\\;C:\\Program Files\\NVIDIA\\CUDNN\\v9.3\\bin;C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.6\\bin;C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.6\\libnvvp;C:\\Users\\karim\\AppData\\Local\\Programs\\Python\\Python312\\Scripts\\;C:\\Users\\karim\\AppData\\Local\\Programs\\Python\\Python312\\;c:\\Users\\karim\\AppData\\Local\\Programs\\cursor\\resources\\app\\bin;C:\\Program Files\\Python311\\Scripts\\;C:\\Program Files\\Python311\\;D:\\VMware\\VMware Player\\bin\\;C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v11.7\\bin;C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v11.7\\libnvvp;C:\\Program Files (x86)\\Razer Chroma SDK\\bin;C:\\Program Files\\Razer Chroma SDK\\bin;C:\\Program Files (x86)\\Razer\\ChromaBroadcast\\bin;C:\\Program Files\\Razer\\ChromaBroadcast\\bin;C:\\Program Files\\Oculus\\Support\\oculus-runtime;C:\\Windows\\system32;C:\\Windows;C:\\Windows\\System32\\Wbem;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\;C:\\Windows\\System32\\OpenSSH\\;C:\\Program Files (x86)\\NVIDIA Corporation\\PhysX\\Common;C:\\Program Files\\dotnet\\;C:\\Users\\karim\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\powershell;C:\\Windows\\system32\\config\\systemprofile\\AppData\\Local\\Microsoft\\WindowsApps;C:\\WINDOWS\\system32;C:\\WINDOWS;C:\\WINDOWS\\System32\\Wbem;C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\;C:\\WINDOWS\\System32\\Ope;C:\\Users\\karim\\AppData\\Roaming\\Python\\Python311\\Scripts;C:\\ProgramData\\chocolatey\\bin;C:\\Program Files\\NVIDIA Corporation\\Nsight Compute 2024.3.1\\;E:\\AI Models\\Faster-Whisper-XXL\\_xxl_data;C:\\Program Files\\PuTTY\\;E:\\AI Apps\\Topaz Labs LLC\\Topaz Gigapixel AI\\bin\\;C:\\Program Files\\NVIDIA Corporation\\NVIDIA app\\NvDLISR;C:\\Program Files\\Microsoft\\jdk-21.0.11.10-hotspot\\\\bin;E:\\Oracle_JDK-23\\bin;C:\\WINDOWS\\system32;C:\\WINDOWS;C:\\WINDOWS\\System32\\Wbem;C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\;C:\\WINDOWS\\System32\\OpenSSH\\;C:\\Program Files\\eSpeak NG\\;C:\\Program Files\\GitHub CLI\\;C:\\Program Files (x86)\\cloudflared\\;C:\\Program Files\\Cloudflare\\Cloudflare WARP\\;C:\\Program Files\\Tailscale\\;C:\\Program Files\\WinGet\\Links;C:\\Program Files\\nodejs\\;C:\\Program Files\\Git\\cmd;C:\\Program Files\\Docker\\Docker\\resources\\bin;C:\\Users\\karim\\AppData\\Local\\hoai\\bin;C:\\Users\\karim\\.grok\\bin;C:\\Users\\karim\\.cargo\\bin;C:\\Users\\karim\\AppData\\Local\\Microsoft\\WindowsApps;C:\\Users\\karim\\AppData\\Local\\Programs\\Microsoft VS Code\\bin;C:\\Users\\karim\\AppData\\Local\\Programs\\Ollama;C:\\Users\\karim\\.lmstudio\\bin;C:\\Users\\karim\\AppData\\Local\\Muse Hub\\lib;C:\\Users\\karim\\AppData\\Local\\Programs\\cursor\\resources\\app\\bin;C:\\Users\\karim\\.dotnet\\tools;C:\\Users\\karim\\AppData\\Local\\Android\\Sdk\\platform-tools;C:\\Users\\karim\\AppData\\Local\\Android\\Sdk\\emulator;C:\\Users\\karim\\Scripts;C:\\Users\\karim\\.local\\bin;C:\\Users\\karim\\AppData\\Local\\Programs\\Lens\\resources\\cli\\bin;C:\\Users\\karim\\.bun\\bin;C:\\Users\\karim\\AppData\\Roaming\\npm;C:\\Users\\karim\\AppData\\Local\\OpenAI\\Codex\\bin\\77fbd4d52e601e0a;C:\\Users\\karim\\AppData\\Local\\OpenAI\\Codex\\bin\\9614f1d9b40d9c4f\",\n          \"PATHEXT\": \".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;.PY;.PYW;.CPL\",\n          \"PROCESSOR_ARCHITECTURE\": \"AMD64\",\n          \"PROCESSOR_IDENTIFIER\": \"AMD64 Family 25 Model 97 Stepping 2, AuthenticAMD\",\n          \"PROCESSOR_LEVEL\": \"25\",\n          \"PROCESSOR_REVISION\": \"6102\",\n          \"PROD\": \"\",\n          \"PROGRAMDATA\": \"C:\\ProgramData\",\n          \"PROGRAMFILES\": \"C:\\Program Files\",\n          \"PROGRAMFILES(X86)\": \"C:\\Program Files (x86)\",\n          \"PROGRAMW6432\": \"C:\\Program Files\",\n          \"PSMODULEPATH\": \"C:\\Users\\karim\\Documents\\WindowsPowerShell\\Modules;C:\\Program Files\\WindowsPowerShell\\Modules;C:\\WINDOWS\\system32\\WindowsPowerShell\\v1.0\\Modules\",\n          \"PUBLIC\": \"C:\\Users\\Public\",\n          \"RLSSVCPORT\": \"22112\",\n          \"RUST_LOG\": \"warn\",\n          \"SHELL\": \"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\",\n          \"SSR\": \"1\",\n          \"SYSTEMDRIVE\": \"C:\",\n          \"SYSTEMROOT\": \"C:\\WINDOWS\",\n          \"TEMP\": \"C:\\Users\\karim\\AppData\\Local\\Temp\",\n          \"TERM\": \"dumb\",\n          \"TEST\": \"true\",\n          \"TINYPOOL_WORKER_ID\": \"1\",\n          \"TMP\": \"C:\\Users\\karim\\AppData\\Local\\Temp\",\n          \"USERDOMAIN\": \"ALIENARES\",\n          \"USERDOMAIN_ROAMINGPROFILE\": \"ALIENARES\",\n          \"USERNAME\": \"karim\",\n          \"USERPROFILE\": \"C:\\Users\\karim\",\n          \"VBOX_HWVIRTEX_IGNORE_SVM_IN_USE\": \"1\",\n          \"VITEST\": \"true\",\n          \"VITEST_MODE\": \"RUN\",\n          \"VITEST_POOL_ID\": \"1\",\n          \"VITEST_WORKER_ID\": \"1\",\n          \"WINDIR\": \"C:\\WINDOWS\",\n          \"YOUTUBE-DL.EXE\": \"H:\\My Drive\\Resolute Words Channel\",\n          \"ZSH_TMUX_AUTOSTART\": \"false\",\n          \"ZSH_TMUX_AUTOSTARTED\": \"true\",\n        },\n        \"log\": [Function log],\n      },\n    ]\n\n\nNumber of calls: 1\n\n\n Test Files  1 failed (1)\n      Tests  1 failed | 10 skipped (11)\n   Start at  10:53:38\n   Duration  1.43s (transform 260ms, setup 0ms, collect 696ms, tests 7ms, environment 0ms, prepare 134ms)\n\n⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯\n\n FAIL  test/browser-profile-child.spec.ts > the actual common host child lifecycle > refuses an unrelated parent before constructing any browser host\nAssertionError: expected \"spy\" to not be called at all, but actually been called 1 times\n\nReceived: \n\n  1st spy call:\n\n    Array [\n      Object {\n        \"config\": Object {\n          \"assistantIds\": Array [\n            42,\n          ],\n          \"backendUrl\": \"http://127.0.0.1:12345\",\n          \"directory\": \"C:\\Users\\karim\\AppData\\Local\\Temp\\synthetic-child\",\n          \"ownerUserId\": \"user_recipient\",\n          \"pairingId\": 8,\n          \"pairingToken\": \"SYNTHETIC_PAIRING_TOKEN_0123456789\",\n          \"parentPid\": 37049,\n        },\n        \"environment\": Object {\n          \"3DVPATH\": \"C:\\AMD\\Chipset_Software\\Binaries\\3D_V-Cache_Performance_Optimizer_Driver\\\",\n          \"ACSETUPSVCPORT\": \"23210\",\n          \"ACSVCPORT\": \"17532\",\n          \"ALLUSERSPROFILE\": \"C:\\ProgramData\",\n          \"ANDROID_HOME\": \"E:\\Android\\Sdk\",\n          \"ANDROID_SDK_ROOT\": \"E:\\Android\\Sdk\",\n          \"APPDATA\": \"C:\\Users\\karim\\AppData\\Roaming\",\n          \"BASE_URL\": \"/\",\n          \"BROWSER_USE_ACCESS_VERIFYING_IDENTITY\": \"MCowBQYDK2VwAyEA+8wwxIxNeCJitBMHt4E+6cWUGfMyZI2yNN5hTDfa7Lc=\",\n          \"CHOCOLATEYINSTALL\": \"C:\\ProgramData\\chocolatey\",\n          \"CHOCOLATEYLASTPATHUPDATE\": \"133695940121883902\",\n          \"CLAUDE_CODE_USE_POWERSHELL_TOOL\": \"1\",\n          \"CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS\": \"1\",\n          \"CODEX_APP_TOOLS_PIPE_PATH\": \"\\\\.\\pipe\\codex-browser-use-7776a1da-10a2-4464-b556-9aec7c94a48c\",\n          \"CODEX_CI\": \"1\",\n          \"CODEX_CLI_PATH\": \"C:\\Users\\karim\\AppData\\Local\\OpenAI\\Codex\\bin\\9614f1d9b40d9c4f\\codex.exe\",\n          \"CODEX_INTERNAL_ORIGINATOR_OVERRIDE\": \"Codex Desktop\",\n          \"CODEX_MCP_NODE_PATH\": \"C:\\Users\\karim\\AppData\\Local\\OpenAI\\Codex\\runtimes\\cua_node\\a9ba6825a525118c\\bin\\node.exe\",\n          \"CODEX_PERMISSION_PROFILE\": \":danger-full-access\",\n          \"CODEX_SAGE_BACKFILL_TRACKER_TAB_REUSE\": \"1\",\n          \"CODEX_SESSION_ID\": \"01a1075b-5caa-7b91-8c6d-9badd7e83998\",\n          \"CODEX_SHELL\": \"1\",\n          \"CODEX_TASK_WORKSPACE_VERIFYING_IDENTITY\": \"MCowBQYDK2VwAyEA+8wwxIxNeCJitBMHt4E+6cWUGfMyZI2yNN5hTDfa7Lc=\",\n          \"CODEX_TECTONIC_PATH\": \"C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.1007.9446.0_x64__2p2nqsd0c76g0\\app\\resources\\tectonic\\tectonic.exe\",\n          \"CODEX_THREAD_ID\": \"01a1075b-5caa-7b91-8c6d-9badd7e83998\",\n          \"CODEX_VERSION\": \"0.162.0-alpha.17.2\",\n          \"CODEX_WINDOWS_SANDBOX_PACKAGE_FAMILY\": \"OpenAI.Codex_2p2nqsd0c76g0\",\n          \"COLORTERM\": \"\",\n          \"COMMONPROGRAMFILES\": \"C:\\Program Files\\Common Files\",\n          \"COMMONPROGRAMFILES(X86)\": \"C:\\Program Files (x86)\\Common Files\",\n          \"COMMONPROGRAMW6432\": \"C:\\Program Files\\Common Files\",\n          \"COMPUTERNAME\": \"ALIENARES\",\n          \"COMSPEC\": \"C:\\WINDOWS\\system32\\cmd.exe\",\n          \"CUDA_PATH\": \"C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.6\",\n          \"CUDA_PATH_V11_7\": \"C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v11.7\",\n          \"DEV\": \"1\",\n          \"DISABLE_AUTO_UPDATE\": \"true\",\n          \"DRIVERDATA\": \"C:\\Windows\\System32\\Drivers\\DriverData\",\n          \"GAMEFIRSTUSERPATH\": \"C:\\ProgramData\\ASUS\\GameFirst\",\n          \"GAMETURBO\": \"C:\\Program Files (x86)\\ASUS\\GameFirst\\\",\n          \"GH_PAGER\": \"cat\",\n          \"GIT_PAGER\": \"cat\",\n          \"GRADLE_USER_HOME\": \"E:\\gc\",\n          \"HOAI_TEST_API_KEY\": \"hWeAayPMwiCAHp-HNtDo4x6o1B176LAXVGfVzRNlS8I\",\n          \"HOMEDRIVE\": \"C:\",\n          \"HOMEPATH\": \"\\Users\\karim\",\n          \"JAVA_HOME\": \"C:\\Program Files\\Microsoft\\jdk-21.0.11.10-hotspot\\\",\n          \"LANG\": \"C.UTF-8\",\n          \"LC_ALL\": \"C.UTF-8\",\n          \"LC_CTYPE\": \"C.UTF-8\",\n          \"LOCALAPPDATA\": \"C:\\Users\\karim\\AppData\\Local\",\n          \"LOGONSERVER\": \"\\\\ALIENARES\",\n          \"LOG_FORMAT\": \"json\",\n          \"MODE\": \"test\",\n          \"NODE_ENV\": \"test\",\n          \"NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S\": \"461c4ba94b821ec805da79c8e8138fe510b1b3358609fc93da47387a2cf3fbf3,7ed52dae165c3bc22b6d24f282e2c1fbc87f6949fbbe037767a7418d8f517f01\",\n          \"NO_COLOR\": \"1\",\n          \"NUMBER_OF_PROCESSORS\": \"32\",\n          \"NVTOOLSEXT_PATH\": \"C:\\Program Files\\NVIDIA Corporation\\NvToolsExt\\\",\n          \"OCULUSBASE\": \"C:\\Program Files\\Oculus\\\",\n          \"ONEDRIVE\": \"C:\\Users\\karim\\OneDrive\",\n          \"OS\": \"Windows_NT\",\n          \"PAGER\": \"cat\",\n          \"PAI_MODEL_DIR\": \"C:\\ProgramData\\Topaz Labs LLC\\Topaz Photo\\models\",\n          \"PATH\": \"C:\\Users\\karim\\.codex\\tmp\\arg0\\codex-arg0pVHjhC;C:\\Program Files\\Microsoft\\jdk-21.0.11.10-hotspot\\bin;C:\\Program Files\\Zulu\\zulu-17\\bin\\;C:\\Program Files\\NVIDIA\\CUDNN\\v9.3\\bin;C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.6\\bin;C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.6\\libnvvp;C:\\Users\\karim\\AppData\\Local\\Programs\\Python\\Python312\\Scripts\\;C:\\Users\\karim\\AppData\\Local\\Programs\\Python\\Python312\\;c:\\Users\\karim\\AppData\\Local\\Programs\\cursor\\resources\\app\\bin;C:\\Program Files\\Python311\\Scripts\\;C:\\Program Files\\Python311\\;D:\\VMware\\VMware Player\\bin\\;C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v11.7\\bin;C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v11.7\\libnvvp;C:\\Program Files (x86)\\Razer Chroma SDK\\bin;C:\\Program Files\\Razer Chroma SDK\\bin;C:\\Program Files (x86)\\Razer\\ChromaBroadcast\\bin;C:\\Program Files\\Razer\\ChromaBroadcast\\bin;C:\\Program Files\\Oculus\\Support\\oculus-runtime;C:\\Windows\\system32;C:\\Windows;C:\\Windows\\System32\\Wbem;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\;C:\\Windows\\System32\\OpenSSH\\;C:\\Program Files (x86)\\NVIDIA Corporation\\PhysX\\Common;C:\\Program Files\\dotnet\\;C:\\Users\\karim\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\powershell;C:\\Windows\\system32\\config\\systemprofile\\AppData\\Local\\Microsoft\\WindowsApps;C:\\WINDOWS\\system32;C:\\WINDOWS;C:\\WINDOWS\\System32\\Wbem;C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\;C:\\WINDOWS\\System32\\Ope;C:\\Users\\karim\\AppData\\Roaming\\Python\\Python311\\Scripts;C:\\ProgramData\\chocolatey\\bin;C:\\Program Files\\NVIDIA Corporation\\Nsight Compute 2024.3.1\\;E:\\AI Models\\Faster-Whisper-XXL\\_xxl_data;C:\\Program Files\\PuTTY\\;E:\\AI Apps\\Topaz Labs LLC\\Topaz Gigapixel AI\\bin\\;C:\\Program Files\\NVIDIA Corporation\\NVIDIA app\\NvDLISR;C:\\Program Files\\Microsoft\\jdk-21.0.11.10-hotspot\\\\bin;E:\\Oracle_JDK-23\\bin;C:\\WINDOWS\\system32;C:\\WINDOWS;C:\\WINDOWS\\System32\\Wbem;C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\;C:\\WINDOWS\\System32\\OpenSSH\\;C:\\Program Files\\eSpeak NG\\;C:\\Program Files\\GitHub CLI\\;C:\\Program Files (x86)\\cloudflared\\;C:\\Program Files\\Cloudflare\\Cloudflare WARP\\;C:\\Program Files\\Tailscale\\;C:\\Program Files\\WinGet\\Links;C:\\Program Files\\nodejs\\;C:\\Program Files\\Git\\cmd;C:\\Program Files\\Docker\\Docker\\resources\\bin;C:\\Users\\karim\\AppData\\Local\\hoai\\bin;C:\\Users\\karim\\.grok\\bin;C:\\Users\\karim\\.cargo\\bin;C:\\Users\\karim\\AppData\\Local\\Microsoft\\WindowsApps;C:\\Users\\karim\\AppData\\Local\\Programs\\Microsoft VS Code\\bin;C:\\Users\\karim\\AppData\\Local\\Programs\\Ollama;C:\\Users\\karim\\.lmstudio\\bin;C:\\Users\\karim\\AppData\\Local\\Muse Hub\\lib;C:\\Users\\karim\\AppData\\Local\\Programs\\cursor\\resources\\app\\bin;C:\\Users\\karim\\.dotnet\\tools;C:\\Users\\karim\\AppData\\Local\\Android\\Sdk\\platform-tools;C:\\Users\\karim\\AppData\\Local\\Android\\Sdk\\emulator;C:\\Users\\karim\\Scripts;C:\\Users\\karim\\.local\\bin;C:\\Users\\karim\\AppData\\Local\\Programs\\Lens\\resources\\cli\\bin;C:\\Users\\karim\\.bun\\bin;C:\\Users\\karim\\AppData\\Roaming\\npm;C:\\Users\\karim\\AppData\\Local\\OpenAI\\Codex\\bin\\77fbd4d52e601e0a;C:\\Users\\karim\\AppData\\Local\\OpenAI\\Codex\\bin\\9614f1d9b40d9c4f\",\n          \"PATHEXT\": \".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;.PY;.PYW;.CPL\",\n          \"PROCESSOR_ARCHITECTURE\": \"AMD64\",\n          \"PROCESSOR_IDENTIFIER\": \"AMD64 Family 25 Model 97 Stepping 2, AuthenticAMD\",\n          \"PROCESSOR_LEVEL\": \"25\",\n          \"PROCESSOR_REVISION\": \"6102\",\n          \"PROD\": \"\",\n          \"PROGRAMDATA\": \"C:\\ProgramData\",\n          \"PROGRAMFILES\": \"C:\\Program Files\",\n          \"PROGRAMFILES(X86)\": \"C:\\Program Files (x86)\",\n          \"PROGRAMW6432\": \"C:\\Program Files\",\n          \"PSMODULEPATH\": \"C:\\Users\\karim\\Documents\\WindowsPowerShell\\Modules;C:\\Program Files\\WindowsPowerShell\\Modules;C:\\WINDOWS\\system32\\WindowsPowerShell\\v1.0\\Modules\",\n          \"PUBLIC\": \"C:\\Users\\Public\",\n          \"RLSSVCPORT\": \"22112\",\n          \"RUST_LOG\": \"warn\",\n          \"SHELL\": \"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\",\n          \"SSR\": \"1\",\n          \"SYSTEMDRIVE\": \"C:\",\n          \"SYSTEMROOT\": \"C:\\WINDOWS\",\n          \"TEMP\": \"C:\\Users\\karim\\AppData\\Local\\Temp\",\n          \"TERM\": \"dumb\",\n          \"TEST\": \"true\",\n          \"TINYPOOL_WORKER_ID\": \"1\",\n          \"TMP\": \"C:\\Users\\karim\\AppData\\Local\\Temp\",\n          \"USERDOMAIN\": \"ALIENARES\",\n          \"USERDOMAIN_ROAMINGPROFILE\": \"ALIENARES\",\n          \"USERNAME\": \"karim\",\n          \"USERPROFILE\": \"C:\\Users\\karim\",\n          \"VBOX_HWVIRTEX_IGNORE_SVM_IN_USE\": \"1\",\n          \"VITEST\": \"true\",\n          \"VITEST_MODE\": \"RUN\",\n          \"VITEST_POOL_ID\": \"1\",\n          \"VITEST_WORKER_ID\": \"1\",\n          \"WINDIR\": \"C:\\WINDOWS\",\n          \"YOUTUBE-DL.EXE\": \"H:\\My Drive\\Resolute Words Channel\",\n          \"ZSH_TMUX_AUTOSTART\": \"false\",\n          \"ZSH_TMUX_AUTOSTARTED\": \"true\",\n        },\n        \"log\": [Function log],\n      },\n    ]\n\n\nNumber of calls: 1\n\n ❯ test/browser-profile-child.spec.ts:40:175\n\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\n\n"
+      },
+      "green": {
+        "exitCode": 0,
+        "assertionFailed": false,
+        "output": "\n RUN  v2.1.9 E:/bgos-worktrees/browser-profile-sync-codex\n\n ✓ test/browser-profile-child.spec.ts (11 tests | 10 skipped) 4ms\n\n Test Files  1 passed (1)\n      Tests  1 passed | 10 skipped (11)\n   Start at  10:53:40\n   Duration  1.54s (transform 231ms, setup 0ms, collect 701ms, tests 4ms, environment 0ms, prepare 169ms)\n\n"
+      }
+    },
+    {
+      "name": "retained-legacy-stop",
+      "file": "runtime/browser-profile-host.mjs",
+      "line": 38,
+      "changedLine": "if(slot.starting||slot.stopping)pendingWork++",
+      "before": "slot.starting||slot.stopping||slot.stopError",
+      "after": "slot.starting||slot.stopping",
+      "sourceSha256": "3fe5082dcfe64e0b3b6763809c78c82aad5c2948b54f2eff47f4eba415e690c9",
+      "restoredSha256": "3fe5082dcfe64e0b3b6763809c78c82aad5c2948b54f2eff47f4eba415e690c9",
+      "red": {
+        "exitCode": 1,
+        "assertionFailed": true,
+        "output": "\n RUN  v2.1.9 E:/bgos-worktrees/browser-profile-sync-codex\n\n ❯ test/browser-profile-child.spec.ts (11 tests | 1 failed | 10 skipped) 11ms\n   × the actual common host child lifecycle > counts real legacy starts, held stops and failed cleanup after slot.engine clears 11ms\n     → expected { activeProfiles: +0, pendingWork: +0 } to deeply equal { activeProfiles: +0, pendingWork: 1 }\n\n Test Files  1 failed (1)\n      Tests  1 failed | 10 skipped (11)\n   Start at  10:53:42\n   Duration  1.56s (transform 247ms, setup 0ms, collect 765ms, tests 11ms, environment 0ms, prepare 153ms)\n\n⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯\n\n FAIL  test/browser-profile-child.spec.ts > the actual common host child lifecycle > counts real legacy starts, held stops and failed cleanup after slot.engine clears\nAssertionError: expected { activeProfiles: +0, pendingWork: +0 } to deeply equal { activeProfiles: +0, pendingWork: 1 }\n\n- Expected\n+ Received\n\n  Object {\n    \"activeProfiles\": 0,\n-   \"pendingWork\": 1,\n+   \"pendingWork\": 0,\n  }\n\n ❯ test/browser-profile-child.spec.ts:48:172\n\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\n\n"
+      },
+      "green": {
+        "exitCode": 0,
+        "assertionFailed": false,
+        "output": "\n RUN  v2.1.9 E:/bgos-worktrees/browser-profile-sync-codex\n\n ✓ test/browser-profile-child.spec.ts (11 tests | 10 skipped) 6ms\n\n Test Files  1 passed (1)\n      Tests  1 passed | 10 skipped (11)\n   Start at  10:53:44\n   Duration  1.52s (transform 235ms, setup 0ms, collect 693ms, tests 6ms, environment 0ms, prepare 149ms)\n\n"
+      }
+    },
+    {
+      "name": "configuration-data-properties",
+      "file": "runtime/browser-profile-configuration.mjs",
+      "line": 7,
+      "changedLine": "if(false)throw fail()",
+      "before": "if(fields.some(key=>!data[key]?.enumerable||!Object.hasOwn(data[key],'value')))throw fail()",
+      "after": "if(false)throw fail()",
+      "sourceSha256": "e1cf06285c4295bad1af9229211595f38ae35122ec2b6d1f78856e4d3aeb69f2",
+      "restoredSha256": "e1cf06285c4295bad1af9229211595f38ae35122ec2b6d1f78856e4d3aeb69f2",
+      "red": {
+        "exitCode": 1,
+        "assertionFailed": true,
+        "output": "\n RUN  v2.1.9 E:/bgos-worktrees/browser-profile-sync-codex\n\n ❯ test/browser-profile-host.spec.ts (13 tests | 1 failed | 12 skipped) 8ms\n   × Codex managed browser process ownership > does not forward arbitrary settings or invoke configuration accessors 7ms\n     → expected 2 to be +0 // Object.is equality\n\n Test Files  1 failed (1)\n      Tests  1 failed | 12 skipped (13)\n   Start at  10:53:47\n   Duration  907ms (transform 86ms, setup 0ms, collect 108ms, tests 8ms, environment 0ms, prepare 155ms)\n\n⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯\n\n FAIL  test/browser-profile-host.spec.ts > Codex managed browser process ownership > does not forward arbitrary settings or invoke configuration accessors\nAssertionError: expected 2 to be +0 // Object.is equality\n\n- Expected\n+ Received\n\n- 0\n+ 2\n\n ❯ test/browser-profile-host.spec.ts:76:229\n\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\n\n"
+      },
+      "green": {
+        "exitCode": 0,
+        "assertionFailed": false,
+        "output": "\n RUN  v2.1.9 E:/bgos-worktrees/browser-profile-sync-codex\n\n ✓ test/browser-profile-host.spec.ts (13 tests | 12 skipped) 3ms\n\n Test Files  1 passed (1)\n      Tests  1 passed | 12 skipped (13)\n   Start at  10:53:48\n   Duration  976ms (transform 96ms, setup 0ms, collect 116ms, tests 3ms, environment 0ms, prepare 144ms)\n\n"
+      }
+    },
+    {
+      "name": "real-adapter-configure",
+      "file": "src/adapter.ts",
+      "line": 3276,
+      "changedLine": "await Promise.resolve();",
+      "before": "await this.synchronizeBrowserProfiles();",
+      "after": "await Promise.resolve();",
+      "sourceSha256": "a947e3208ba269a0e7c0552b3e0b8fb7d7c0ff8b3e171890bf6be185b09daed5",
+      "restoredSha256": "a947e3208ba269a0e7c0552b3e0b8fb7d7c0ff8b3e171890bf6be185b09daed5",
+      "red": {
+        "exitCode": 1,
+        "assertionFailed": true,
+        "output": "\n RUN  v2.1.9 E:/bgos-worktrees/browser-profile-sync-codex\n\n ❯ test/browser-profile-adapter.spec.ts (5 tests | 1 failed | 4 skipped) 18ms\n   × managed browser authorization in the real Codex adapter > starts the common child only after exact identity and keeps browser work busy in the real heartbeat 17ms\n     → expected [] to have a length of 1 but got +0\n\n Test Files  1 failed (1)\n      Tests  1 failed | 4 skipped (5)\n   Start at  10:53:50\n   Duration  2.30s (transform 636ms, setup 0ms, collect 1.51s, tests 18ms, environment 0ms, prepare 156ms)\n\n⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯\n\n FAIL  test/browser-profile-adapter.spec.ts > managed browser authorization in the real Codex adapter > starts the common child only after exact identity and keeps browser work busy in the real heartbeat\nAssertionError: expected [] to have a length of 1 but got +0\n\n- Expected\n+ Received\n\n- 1\n+ 0\n\n ❯ test/browser-profile-adapter.spec.ts:27:134\n\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\n\n"
+      },
+      "green": {
+        "exitCode": 0,
+        "assertionFailed": false,
+        "output": "\n RUN  v2.1.9 E:/bgos-worktrees/browser-profile-sync-codex\n\n ✓ test/browser-profile-adapter.spec.ts (5 tests | 4 skipped) 36ms\n\n Test Files  1 passed (1)\n      Tests  1 passed | 4 skipped (5)\n   Start at  10:53:53\n   Duration  2.16s (transform 570ms, setup 0ms, collect 1.39s, tests 36ms, environment 0ms, prepare 127ms)\n\n"
+      }
+    },
+    {
+      "name": "late-identity-response",
+      "file": "src/adapter.ts",
+      "line": 3262,
+      "changedLine": "if (false) return false;",
+      "before": "if (this.fatalLatched || generation !== this.browserScopeGeneration || token !== this.currentToken) return false;",
+      "after": "if (false) return false;",
+      "sourceSha256": "a947e3208ba269a0e7c0552b3e0b8fb7d7c0ff8b3e171890bf6be185b09daed5",
+      "restoredSha256": "a947e3208ba269a0e7c0552b3e0b8fb7d7c0ff8b3e171890bf6be185b09daed5",
+      "red": {
+        "exitCode": 1,
+        "assertionFailed": true,
+        "output": "\n RUN  v2.1.9 E:/bgos-worktrees/browser-profile-sync-codex\n\n ❯ test/browser-profile-adapter.spec.ts (5 tests | 1 failed | 4 skipped) 21ms\n   × managed browser authorization in the real Codex adapter > revokes before a stale whoami response can configure the old pairing 20ms\n     → expected true to be false // Object.is equality\n\n Test Files  1 failed (1)\n      Tests  1 failed | 4 skipped (5)\n   Start at  10:53:56\n   Duration  2.32s (transform 642ms, setup 0ms, collect 1.51s, tests 21ms, environment 0ms, prepare 147ms)\n\n⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯\n\n FAIL  test/browser-profile-adapter.spec.ts > managed browser authorization in the real Codex adapter > revokes before a stale whoami response can configure the old pairing\nAssertionError: expected true to be false // Object.is equality\n\n- Expected\n+ Received\n\n- false\n+ true\n\n ❯ test/browser-profile-adapter.spec.ts:39:27\n     37|     const {a,children}=fixture();let release!:(value:any)=>void;a.api.…\n     38|     const reading=a.refreshIdentity();a.enterFatalLatch(\"revoked\",\"syn…\n     39|     expect(await reading).toBe(false);expect(children).toHaveLength(0)…\n       |                           ^\n     40|   });\n     41|   it(\"re-pairs only after positive old cleanup and uses the new origin…\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\n\n"
+      },
+      "green": {
+        "exitCode": 0,
+        "assertionFailed": false,
+        "output": "\n RUN  v2.1.9 E:/bgos-worktrees/browser-profile-sync-codex\n\n ✓ test/browser-profile-adapter.spec.ts (5 tests | 4 skipped) 16ms\n\n Test Files  1 passed (1)\n      Tests  1 passed | 4 skipped (5)\n   Start at  10:53:59\n   Duration  2.41s (transform 670ms, setup 0ms, collect 1.58s, tests 16ms, environment 0ms, prepare 175ms)\n\n"
+      }
+    },
+    {
+      "name": "unsuccessful-daemon-shutdown",
+      "file": "src/daemon-shutdown.ts",
+      "line": 3,
+      "changedLine": "try{await stop();return 0}catch{report(\"daemon_cleanup_unconfirmed\");return 0}",
+      "before": "report(\"daemon_cleanup_unconfirmed\");return 1",
+      "after": "report(\"daemon_cleanup_unconfirmed\");return 0",
+      "sourceSha256": "839e6fa5f7bfcc22672b54593e18a6f3332ef8bcf0832afe95e3a1103f1ac1fa",
+      "restoredSha256": "839e6fa5f7bfcc22672b54593e18a6f3332ef8bcf0832afe95e3a1103f1ac1fa",
+      "red": {
+        "exitCode": 1,
+        "assertionFailed": true,
+        "output": "\n RUN  v2.1.9 E:/bgos-worktrees/browser-profile-sync-codex\n\n ❯ test/browser-profile-child.spec.ts (11 tests | 1 failed | 10 skipped) 9ms\n   × the actual common host child lifecycle > does not report exit zero when daemon cleanup is unconfirmed 8ms\n     → expected +0 to be 1 // Object.is equality\n\n Test Files  1 failed (1)\n      Tests  1 failed | 10 skipped (11)\n   Start at  10:54:02\n   Duration  1.56s (transform 244ms, setup 0ms, collect 713ms, tests 9ms, environment 0ms, prepare 165ms)\n\n⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯\n\n FAIL  test/browser-profile-child.spec.ts > the actual common host child lifecycle > does not report exit zero when daemon cleanup is unconfirmed\nAssertionError: expected +0 to be 1 // Object.is equality\n\n- Expected\n+ Received\n\n- 1\n+ 0\n\n ❯ test/browser-profile-child.spec.ts:58:94\n     56|   it(\"does not report exit zero when daemon cleanup is unconfirmed\",as…\n     57|     const report=vi.fn();expect(await shutdownDaemon(async()=>{},repor…\n     58|     expect(await shutdownDaemon(async()=>{throw Error(\"synthetic priva…\n       |                                                                                              ^\n     59|   });\n     60| });\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\n\n"
+      },
+      "green": {
+        "exitCode": 0,
+        "assertionFailed": false,
+        "output": "\n RUN  v2.1.9 E:/bgos-worktrees/browser-profile-sync-codex\n\n ✓ test/browser-profile-child.spec.ts (11 tests | 10 skipped) 3ms\n\n Test Files  1 passed (1)\n      Tests  1 passed | 10 skipped (11)\n   Start at  10:54:04\n   Duration  1.57s (transform 261ms, setup 0ms, collect 735ms, tests 3ms, environment 0ms, prepare 159ms)\n\n"
+      }
+    },
+    {
+      "name": "bounded-public-pin-document",
+      "file": "src/browser-profile-setup.ts",
+      "line": 14,
+      "changedLine": "const info=fstatSync(fd);if(!info.isFile()||info.dev!==before.dev||info.ino!==before.ino||info.size<1||info.size>1048576)throw refused();",
+      "before": "info.size>8192",
+      "after": "info.size>1048576",
+      "sourceSha256": "9625bf03e1c721ec74ed1408915174f6d899b45ef3a5c05db8054024cb74fa97",
+      "restoredSha256": "9625bf03e1c721ec74ed1408915174f6d899b45ef3a5c05db8054024cb74fa97",
+      "red": {
+        "exitCode": 1,
+        "assertionFailed": true,
+        "output": "\n RUN  v2.1.9 E:/bgos-worktrees/browser-profile-sync-codex\n\n ❯ test/browser-profile-setup.spec.ts (2 tests | 1 failed | 1 skipped) 15ms\n   × Codex browser setup surfaces > reads only a bounded absolute public peer document and rejects malformed bytes 15ms\n     → expected [Function] to throw an error\n\n Test Files  1 failed (1)\n      Tests  1 failed | 1 skipped (2)\n   Start at  10:54:07\n   Duration  1.23s (transform 135ms, setup 0ms, collect 407ms, tests 15ms, environment 0ms, prepare 141ms)\n\n⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯\n\n FAIL  test/browser-profile-setup.spec.ts > Codex browser setup surfaces > reads only a bounded absolute public peer document and rejects malformed bytes\nAssertionError: expected [Function] to throw an error\n ❯ test/browser-profile-setup.spec.ts:12:97\n     10|       writeFileSync(file,JSON.stringify({public:\"synthetic public fing…\n     11|       expect(()=>readPublicPeerReview(\"relative.json\")).toThrow();expe…\n     12|       writeFileSync(file,'{\"value\":1}'+\" \".repeat(8193));expect(()=>re…\n       |                                                                                                 ^\n     13|       writeFileSync(file,Buffer.from([0x7b,0x22,0x61,0x22,0x3a,0x22,0x…\n     14|     }finally{rmSync(directory,{recursive:true,force:true})}\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\n\n"
+      },
+      "green": {
+        "exitCode": 0,
+        "assertionFailed": false,
+        "output": "\n RUN  v2.1.9 E:/bgos-worktrees/browser-profile-sync-codex\n\n ✓ test/browser-profile-setup.spec.ts (2 tests | 1 skipped) 10ms\n\n Test Files  1 passed (1)\n      Tests  1 passed | 1 skipped (2)\n   Start at  10:54:09\n   Duration  1.25s (transform 150ms, setup 0ms, collect 409ms, tests 10ms, environment 0ms, prepare 142ms)\n\n"
+      }
+    },
+    {
+      "name": "committed-runtime-byte-pin",
+      "file": "vendor/browser-profile/lib/browser-bootstrap.mjs",
+      "line": 13,
+      "changedLine": "export function bundledChromium_BROKEN() {",
+      "before": "export function bundledChromium()",
+      "after": "export function bundledChromium_BROKEN()",
+      "sourceSha256": "afd690386d5edaa82fdfbc1b35203e50a74abd038249405452c706b885515f92",
+      "restoredSha256": "afd690386d5edaa82fdfbc1b35203e50a74abd038249405452c706b885515f92",
+      "red": {
+        "exitCode": 1,
+        "assertionFailed": true,
+        "output": "\n RUN  v2.1.9 E:/bgos-worktrees/browser-profile-sync-codex\n\n ❯ test/browser-profile-vendor.spec.ts (3 tests | 1 failed | 2 skipped) 9ms\n   × the shared managed browser runtime shipped to Codex > pins the exact complete source closure and both module boundaries 9ms\n     → lib/browser-bootstrap.mjs: expected 'd2a15918f0f495d7d0a834b7afa8eaa3f9de3…' to be 'afd690386d5edaa82fdfbc1b35203e50a74ab…' // Object.is equality\n\n Test Files  1 failed (1)\n      Tests  1 failed | 2 skipped (3)\n   Start at  10:54:10\n   Duration  861ms (transform 64ms, setup 0ms, collect 72ms, tests 9ms, environment 0ms, prepare 143ms)\n\n⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯\n\n FAIL  test/browser-profile-vendor.spec.ts > the shared managed browser runtime shipped to Codex > pins the exact complete source closure and both module boundaries\nAssertionError: lib/browser-bootstrap.mjs: expected 'd2a15918f0f495d7d0a834b7afa8eaa3f9de3…' to be 'afd690386d5edaa82fdfbc1b35203e50a74ab…' // Object.is equality\n\nExpected: \"afd690386d5edaa82fdfbc1b35203e50a74abd038249405452c706b885515f92\"\nReceived: \"d2a15918f0f495d7d0a834b7afa8eaa3f9de363f591c662e70f5597ff42dbc9f\"\n\n ❯ test/browser-profile-vendor.spec.ts:16:356\n\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\n\n"
+      },
+      "green": {
+        "exitCode": 0,
+        "assertionFailed": false,
+        "output": "\n RUN  v2.1.9 E:/bgos-worktrees/browser-profile-sync-codex\n\n ✓ test/browser-profile-vendor.spec.ts (3 tests | 2 skipped) 16ms\n\n Test Files  1 passed (1)\n      Tests  1 passed | 2 skipped (3)\n   Start at  10:54:12\n   Duration  910ms (transform 60ms, setup 0ms, collect 68ms, tests 16ms, environment 0ms, prepare 146ms)\n\n"
+      }
+    },
+    {
+      "name": "registered-catalog-unbind",
+      "file": "src/adapter.ts",
+      "line": 925,
+      "changedLine": "void Promise.resolve();",
+      "before": "this.assistantToRoute.delete(p.assistantId);\n      void this.synchronizeBrowserProfiles();",
+      "after": "this.assistantToRoute.delete(p.assistantId);\n      void Promise.resolve();",
+      "sourceSha256": "a947e3208ba269a0e7c0552b3e0b8fb7d7c0ff8b3e171890bf6be185b09daed5",
+      "restoredSha256": "a947e3208ba269a0e7c0552b3e0b8fb7d7c0ff8b3e171890bf6be185b09daed5",
+      "red": {
+        "exitCode": 1,
+        "assertionFailed": true,
+        "output": "\n RUN  v2.1.9 E:/bgos-worktrees/browser-profile-sync-codex\n\n ❯ test/browser-profile-adapter.spec.ts (6 tests | 1 failed | 5 skipped) 32ms\n   × managed browser authorization in the real Codex adapter > the real registered bind and unbind handlers replace only after the prior child physically stops 31ms\n     → expected { …(2) } to deeply equal { type: 'browser-profile-stop' }\n\n Test Files  1 failed (1)\n      Tests  1 failed | 5 skipped (6)\n   Start at  11:01:51\n   Duration  2.13s (transform 580ms, setup 0ms, collect 1.41s, tests 32ms, environment 0ms, prepare 133ms)\n\n⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯\n\n FAIL  test/browser-profile-adapter.spec.ts > managed browser authorization in the real Codex adapter > the real registered bind and unbind handlers replace only after the prior child physically stops\nAssertionError: expected { …(2) } to deeply equal { type: 'browser-profile-stop' }\n\n- Expected\n+ Received\n\n  Object {\n-   \"type\": \"browser-profile-stop\",\n+   \"configuration\": Object {\n+     \"assistantIds\": Array [\n+       42,\n+       43,\n+     ],\n+     \"backendUrl\": \"http://127.0.0.1:12345\",\n+     \"directory\": \"C:\\\\Users\\\\karim\\\\AppData\\\\Local\\\\Temp\\\\hoai-codex-profile-adapter-antUkD\\\\browser\",\n+     \"ownerUserId\": \"user_recipient\",\n+     \"pairingId\": 8,\n+     \"pairingToken\": \"SYNTHETIC_PAIRING_TOKEN_0123456789\",\n+     \"parentPid\": 44864,\n+   },\n+   \"type\": \"browser-profile-configure\",\n  }\n\n ❯ test/browser-profile-adapter.spec.ts:62:138\n\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\n\n"
+      },
+      "green": {
+        "exitCode": 0,
+        "assertionFailed": false,
+        "output": "\n RUN  v2.1.9 E:/bgos-worktrees/browser-profile-sync-codex\n\n ✓ test/browser-profile-adapter.spec.ts (6 tests | 5 skipped) 33ms\n\n Test Files  1 passed (1)\n      Tests  1 passed | 5 skipped (6)\n   Start at  11:01:54\n   Duration  2.16s (transform 593ms, setup 0ms, collect 1.40s, tests 33ms, environment 0ms, prepare 143ms)\n\n"
+      }
+    }
+  ]
+}

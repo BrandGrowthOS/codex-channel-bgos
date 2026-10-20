@@ -14,7 +14,7 @@ Use the agent's **Settings → Connection** to reconnect or repair it. Keep the 
 
 ## Remote/manual setup
 
-The desktop wizard is the recommended dependency-installing path. On another computer with Node 20+ and Codex sign-in already available, use the exact command shown by HOAI. It is one plain invocation, usable in PowerShell and POSIX shells:
+The desktop wizard is the recommended dependency-installing path. On another computer with a current patched Node 22 or 24 LTS runtime (minimum 22.12) and Codex sign-in already available, use the exact command shown by HOAI. It is one plain invocation, usable in PowerShell and POSIX shells:
 
 ```text
 npx --yes codex-channel-bgos@0.3.0 connect BGOS-XXXX-XX --assistant-id 123

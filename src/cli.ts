@@ -52,6 +52,8 @@ import {
 } from "./keep-alive.js";
 import { nodeExec } from "./setup/self-update.js";
 import { parseCli } from "./cli-args.js";
+import { shutdownDaemon } from "./daemon-shutdown.js";
+import { checkBrowserPrerequisites, reviewBrowserPeer } from "./browser-profile-setup.js";
 
 const DEFAULT_BASE_URL = "https://api.brandgrowthos.ai";
 const LOG = "[codex-channel-bgos]";
@@ -107,6 +109,8 @@ function usage(): void {
       `      --assistant-id <id> --keep-alive  ...and run it as a background service (recommended)\n` +
       `  codex-channel-bgos start            Start from the stored pairing token\n` +
       `  codex-channel-bgos install-service  Install launchd/systemd persistence\n` +
+      `  codex-channel-bgos browser-check    Check bundled browser prerequisites without installing\n` +
+      `  codex-channel-bgos browser-review-peer <public.json> --confirm-fingerprint <full hash>\n` +
       `  codex-channel-bgos --version\n` +
       `  codex-channel-bgos --help\n\n` +
       `Auth (D7): prefers an existing 'codex login', else OPENAI_API_KEY.\n` +
@@ -158,7 +162,7 @@ async function runStart(): Promise<void> {
     if (stopping) return;
     stopping = true;
     process.stdout.write(`\n${LOG} shutting down...\n`);
-    void adapter.stop().finally(() => process.exit(0));
+    void shutdownDaemon(() => adapter.stop(), (code) => process.stderr.write(`${LOG} ${code}\n`)).then((code) => process.exit(code));
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
@@ -315,6 +319,18 @@ async function main(): Promise<void> {
     return;
   }
   const { verb, argv, assistantId, keepAlive } = invocation;
+
+  if (verb === "browser-check") {
+    if (argv.length !== 1) throw new Error("browser-check takes no arguments");
+    process.stdout.write(`${JSON.stringify(await checkBrowserPrerequisites())}\n`);
+    return;
+  }
+  if (verb === "browser-review-peer") {
+    if (argv.length !== 4 || argv[2] !== "--confirm-fingerprint") throw new Error("browser-review-peer requires an absolute public JSON path and --confirm-fingerprint <full hash>");
+    try {await reviewBrowserPeer(argv[1], argv[3]);} catch {throw new Error("Browser peer review refused. Verify the full fingerprint, live enrollment, recipient grant and unlocked OS key service.");}
+    process.stdout.write("Exact public browser peer fingerprint saved. Background and site permissions remain separate.\n");
+    return;
+  }
 
   if (verb === "setup") {
     try {

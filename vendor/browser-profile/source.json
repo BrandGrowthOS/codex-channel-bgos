@@ -1,0 +1,261 @@
+{
+  "version": 1,
+  "repository": "BrandGrowthOS/bgos-claude-plugin",
+  "sourceCommit": "41332b9a6a8f77b01f73a9b4bc29dd90f0912403",
+  "entry": "bin/hoai-browser-host.mjs",
+  "why": "The same reviewed browser host, profile runtime, encryption and authorization execute for Claude and Codex. Only the Codex daemon launcher is different.",
+  "files": {
+    "bin/hoai-browser-host.mjs": {
+      "sha256": "c94670669ccf8931bd04f153f025565643f8755a5175df96bf7ee4cf721047da"
+    },
+    "lib/agent-browser-vault.mjs": {
+      "sha256": "4ad24ff8e6864be9397cd236664feb1f4830ba48efb90ab2b8e389a1043ab858"
+    },
+    "lib/agent-inventory.mjs": {
+      "sha256": "8ade5cd8d3b6876828ceb29cebe72e892731aa9e39fae7b4df4ac67d5dfc4e11"
+    },
+    "lib/browser-bootstrap.mjs": {
+      "sha256": "be61f2294ef35b6da72dc1c6eb10133321be56cb4ed54af7366be07edeccf3c0"
+    },
+    "lib/browser-bootstrap.pin.json": {
+      "sha256": "21057fbfe0993ccace1bc9f5ff977039af41cd9b790c6eed473dd58a73cb13ae"
+    },
+    "lib/browser-downloads.mjs": {
+      "sha256": "b5d282decd75dbed2b057cdb624c36e73ff72268298e6ee8bc73e26b2cbdc605"
+    },
+    "lib/browser-env.mjs": {
+      "sha256": "dcfc2fe6f54a085f561827a251903c67b2861bb5b1aad427a361fcdda84f34d6"
+    },
+    "lib/browser-gate.mjs": {
+      "sha256": "8247d3f665fc5248eb073d725a0fba6300d2073532ed30c78f7c0eef85f1e60b"
+    },
+    "lib/browser-host-core/package.json": {
+      "sha256": "76b7518a4261ff7e6d5fc4497657db59f408ecde46d265bcd4a6eeb187d6dfa6"
+    },
+    "lib/browser-host-core/policy.js": {
+      "sha256": "8219e9b39276b9ef90fb6288c80872b1b8c4f968fd21bde6fa79a0fe4cbc0048"
+    },
+    "lib/browser-host-core/profiles.js": {
+      "sha256": "336225827578f3f66849d5d946aebacd6cea877c20cd793fd6c7080d8cd3119a"
+    },
+    "lib/browser-host-core/settings.js": {
+      "sha256": "49317db663958dd3441b7bbfc85d3e4961a9d097799b3d0703df0cf7bad5dd72"
+    },
+    "lib/browser-host-core/vendor.json": {
+      "sha256": "7e7a08e973fdbc0946b775b6d1617e6fe5f15f133dd9a71be7dc40d779224ce6"
+    },
+    "lib/browser-install-lifetime.mjs": {
+      "sha256": "5bc9de8690f7c3c0a066adebceb063eac93910ede9814f5e58b1870782a03219"
+    },
+    "lib/browser-profile-active-backup.mjs": {
+      "sha256": "078e03cfbc3377c91dd7952f6961331eb14f06f58bc60ef276380b008a1ed0f8"
+    },
+    "lib/browser-profile-artifact-inventory.mjs": {
+      "sha256": "f4f69558b194ed12c1fd5a8056f4cdf9fae6a86de2943cea2969029c6722c0e9"
+    },
+    "lib/browser-profile-artifacts.mjs": {
+      "sha256": "11192d407a0a18a4a7bea1884a211ea1d45b750fd75975ef87e0c1f6669b30e9"
+    },
+    "lib/browser-profile-cdp-targets.mjs": {
+      "sha256": "b882fe1be85894aef1a2ab171350c39eba9811cb98e88b8d20cd0636b81a9e0b"
+    },
+    "lib/browser-profile-companion-client.mjs": {
+      "sha256": "1044a71f78bd1b509863d9be0fab3bd7491ae04139cbf7235d16c2c714894559"
+    },
+    "lib/browser-profile-companion-state.mjs": {
+      "sha256": "6a1f21a07b9a5153a13fd1f581de643eb9aa4f5da9f854819f1a36e13d0fcd11"
+    },
+    "lib/browser-profile-companion.mjs": {
+      "sha256": "01aa9d1fb5ff68b2241c5b362791938824d928efd7bfa9ed6b5087f4b1122c29"
+    },
+    "lib/browser-profile-core/active-backup-client.js": {
+      "sha256": "f6ef0a300dd39ccb929621150c8411381c2fe2ce2d3ed38c036f37e0aaa97f61"
+    },
+    "lib/browser-profile-core/active-backup-crypto.js": {
+      "sha256": "f5f1d965d5b18f6ca26304b7aecb236c604a857052f24b835a5d08b158857a45"
+    },
+    "lib/browser-profile-core/active-backup-scheduler.js": {
+      "sha256": "d50d4932e109f4357cdb7bc6048c9006c9b586140d7e3565e7186bb0ffcdddd9"
+    },
+    "lib/browser-profile-core/active-backup-wire.js": {
+      "sha256": "8ddde4d3e4bf58d6a4dbdf25dbfd32f2c4238dfaaf5c958a46d8240a53f42ce0"
+    },
+    "lib/browser-profile-core/backup-journal-worker.js": {
+      "sha256": "a87bd08969dc2f78610937bfb55de70a6c5412f7e2a9747f7886849b87c804a5"
+    },
+    "lib/browser-profile-core/backup-journal.js": {
+      "sha256": "43075421e966b46d443e0294e09d98fe3adab6d5ca9aa24e44932d0ab59fb199"
+    },
+    "lib/browser-profile-core/backup-seal-client.js": {
+      "sha256": "04eb8a2f021c14ed8653be808ad86941b44765a973b9a54a75b65a13d736360e"
+    },
+    "lib/browser-profile-core/backup-seal-worker.js": {
+      "sha256": "d3d4365353d2ab39ef715e0dc2281c1e2b0e0aac052a41b5d14de3c9cf09ecc4"
+    },
+    "lib/browser-profile-core/checkpoint-store.js": {
+      "sha256": "a0ca3ffb3bd8d030bdd1225882a96d1d6801da84534d5190928cf5f71f91a1ac"
+    },
+    "lib/browser-profile-core/coordinator-client.js": {
+      "sha256": "b0ea86161533843dd1e5fa9e4fe4ec06d21de1bd6300e4c8c416dad64a1fd911"
+    },
+    "lib/browser-profile-core/crypto.js": {
+      "sha256": "5c11e3361bbb62be9a8aca69f92e88d38b343a1e642ea604b46fa6f2a6d5945e"
+    },
+    "lib/browser-profile-core/live-backup-capture.js": {
+      "sha256": "99ff4c438672946f6718e56624377767d89a89a4a59dd6cee7515f4bd4a25ff5"
+    },
+    "lib/browser-profile-core/live-backup-input.js": {
+      "sha256": "aa3c3459293cc866066e1938c6f0b101e507ab822266905fb45d448b69e02284"
+    },
+    "lib/browser-profile-core/live-storage-reader.js": {
+      "sha256": "f441681fc068ea567669f92ab1fcdd2821cb96e0c1685ef9811664db6266e0f2"
+    },
+    "lib/browser-profile-core/native-runtime.js": {
+      "sha256": "97bfe89abb752aec51b4f083851140da4eaf7de6c0786398a0dc4e0241864d8f"
+    },
+    "lib/browser-profile-core/package.json": {
+      "sha256": "7d38de102f9d211b8a221ab5943610473c4b23aeee36e9a9cf0e22848e04b9d4"
+    },
+    "lib/browser-profile-core/portable-state.js": {
+      "sha256": "b0fc9a2bf163fd0e556d174ae09f23a63ed30870015c72903a645c32d60fe5e0"
+    },
+    "lib/browser-profile-core/profile-file-client.js": {
+      "sha256": "2e9627acfb1622cf1df6d3c730ea7fa61801c8e2bf874f28fe38926374391d24"
+    },
+    "lib/browser-profile-core/profile-file-crypto.js": {
+      "sha256": "7e9203c4b9c10a2266fc5a1b554df6eb27d9d224e98b7db494be4cd503ce4139"
+    },
+    "lib/browser-profile-core/profile-file-staging.js": {
+      "sha256": "63e7a86d9d1cc5e34a857ad217edbc80f20c9ff3c04ecc1cec4a9edce0cbd22a"
+    },
+    "lib/browser-profile-core/profile-file-wire.js": {
+      "sha256": "0640ea0c35f5e26329b542274a93f11f186a8d016a93302e95d00a97b81add69"
+    },
+    "lib/browser-profile-core/resume-tabs.js": {
+      "sha256": "c4a8320e36fad69a6874a69b37c5571c637df1c41cfd30259f66eb49e3436778"
+    },
+    "lib/browser-profile-core/return-intent.js": {
+      "sha256": "3d27a0f8037dc236433cf1d22bd6d61edcc7f8a46e4ef1842ab0737535a33bd1"
+    },
+    "lib/browser-profile-core/runtime-endpoint.js": {
+      "sha256": "93d570e06f85274a88fcd8206faa718b5ad5132b471944abc08cb74ca9b6372d"
+    },
+    "lib/browser-profile-core/runtime-readiness.js": {
+      "sha256": "357f440d7735791d850dfbf6b2199c13ebaa5a7ba7d698a67d213f242565e99c"
+    },
+    "lib/browser-profile-core/runtime-status-client.js": {
+      "sha256": "11bb72e458054809956bf2e256efb9358bcaf1ad29dd9c1492861dd918f00128"
+    },
+    "lib/browser-profile-core/stopped-head-stage.js": {
+      "sha256": "4b350549a4e99d4ef5d8d939ab43e4e9d712c294d9b43329a5364fbf32751eac"
+    },
+    "lib/browser-profile-core/storage.js": {
+      "sha256": "a78d8e9daf05e3cff71f3aa100e8a32656a63bca7508529a06923097885bbfd3"
+    },
+    "lib/browser-profile-core/vendor.json": {
+      "sha256": "c8a5aae36e1c41524fdc17ea1f8de91630eed5e696c29d88f5211502e0498382"
+    },
+    "lib/browser-profile-daemon-stop.mjs": {
+      "sha256": "a3698e356b6bb96752f0c38ba4a6b1c5646f6a08ea1655ece62857c99d9bee05"
+    },
+    "lib/browser-profile-document-safety.mjs": {
+      "sha256": "ffcf87ac0626603163a4e563463b3c61e1bf04a4b7f532c30cea18bb9e6091da"
+    },
+    "lib/browser-profile-downloads-runtime.mjs": {
+      "sha256": "28fa481916e904370b106c05f91dfadf189b845e17161ec1f41f6581016b6716"
+    },
+    "lib/browser-profile-downloads.mjs": {
+      "sha256": "81f3835fed626a550fe163ffadf2d8c56005a24e2756bdb7278366dfa84de928"
+    },
+    "lib/browser-profile-field-input.mjs": {
+      "sha256": "9fd789c3760117f1cfebbef6a54cef2e2f7f803113072f5944afd9ebcd6531a7"
+    },
+    "lib/browser-profile-file-area.mjs": {
+      "sha256": "0d717305eedc6f6d8dca575e920603c28eb728a119e1fed015cdf7a7c3cacdf6"
+    },
+    "lib/browser-profile-files.mjs": {
+      "sha256": "165145084ced68d7f3347aad9adb15be962aa3bf25649724d0b5e5912b8b7a3d"
+    },
+    "lib/browser-profile-launch.mjs": {
+      "sha256": "e92407f609f276b538f73048a23ffcfffc32941cc9424c28c69c90afb70c242c"
+    },
+    "lib/browser-profile-launch.pin.json": {
+      "sha256": "d492ff52dfc4abc5be0c1a16f1d368f604788a58e7369dd0640c265b1e498094"
+    },
+    "lib/browser-profile-live-capture.mjs": {
+      "sha256": "bc42aa8ea849c0fc09d570ea77591671bec4f854bd49655d106db6ae018303d6"
+    },
+    "lib/browser-profile-live-read.mjs": {
+      "sha256": "cd58ddbf110a495a503934d2062dbbaee1586f79190c7edc81fb7ec3cef1bc09"
+    },
+    "lib/browser-profile-node-runtime.mjs": {
+      "sha256": "f89764f2bdbb91cff10785f5fed43811583575fbcd16874045f08047c482a71d"
+    },
+    "lib/browser-profile-pairing-client.mjs": {
+      "sha256": "0b9d8d8a42a4099172aa2cae29db3527c117cb4c1f722ebee06f5b96ee7f4ab8"
+    },
+    "lib/browser-profile-peer-pins.mjs": {
+      "sha256": "834b482cb3809714994721e96bc3e32620ee092a16ac925363cbf1363f1754cd"
+    },
+    "lib/browser-profile-peer-review.mjs": {
+      "sha256": "b9e4322ef1cbbc7c289cba1b7889d20417f5ad24ca6d8501de478f67804acb79"
+    },
+    "lib/browser-profile-permission-client.mjs": {
+      "sha256": "2f1b2d1dcbdfd0f432a2f2a0cc482d662cd94d698f40ffda14f65be22d8f0c5e"
+    },
+    "lib/browser-profile-permission-runner.mjs": {
+      "sha256": "3a9ecfbd7586a211394914f8b10939eb85abd2bebbfd88c1aa66eb6858e86d65"
+    },
+    "lib/browser-profile-portable-extras.mjs": {
+      "sha256": "1a34c8413ff8f3e85fcb51e235ff19aef515921057a902669851ba0873de5786"
+    },
+    "lib/browser-profile-return-client.mjs": {
+      "sha256": "b0486bc9562eef5263026d4a1fbff775e49189640fd1f3e069db0923ce426c0e"
+    },
+    "lib/browser-profile-return-handover.mjs": {
+      "sha256": "4cbec4732ff052e306a6ba449c0d01e89d24f8ecb5d26600d916a579a2df3da4"
+    },
+    "lib/browser-profile-rtc-activity.mjs": {
+      "sha256": "bee380d0cd806277fd6f0d5a9278329d542797d8229529aabc07048f848cdfd8"
+    },
+    "lib/browser-profile-runtime.mjs": {
+      "sha256": "bc296e8ab6d24f30204738dfb9935fc3452fdec14cb0217e85eaac4e351d3df4"
+    },
+    "lib/browser-profile-sync-key-store.mjs": {
+      "sha256": "dab468db70440a7b2fd2a5b919f96f26be7d16bf10b6a5676f840f0ef860ab62"
+    },
+    "lib/browser-saved-sites.mjs": {
+      "sha256": "0c9e9fba3d2ef1bcf93fcfca4cb86f2121ad0dcfaa52c7f2e107cdf297be33e6"
+    },
+    "lib/browser-secret-redactor.mjs": {
+      "sha256": "d19227c106183c6ccf9408db1ec8e832a0805d38d79ae338ecfdd97262f6a8a4"
+    },
+    "lib/keepalive-plan.mjs": {
+      "sha256": "9135b6be923526d7e979e0bc1c188552b09e6bea1fe6d65f5ab15a1477437efb"
+    },
+    "lib/remote-credentials-crypto.cjs": {
+      "sha256": "f4e2bdec3c3981b8119d831aab2474943ce3867818a661effef2209181a8a22f"
+    },
+    "lib/remote-credentials.mjs": {
+      "sha256": "fba5c50e254658ce81d12f929df7aaed555eb4cc4f0478ef6ac949d771f6c032"
+    },
+    "lib/remote-input.mjs": {
+      "sha256": "d930bb382ae37fb3c9514b977f189c6684fb0e951e7bd4f0f90dba8552130e48"
+    },
+    "lib/remote-view.mjs": {
+      "sha256": "fde7a7eb7b966d0858428fb05b50a06ba6018ad8aa8f3cedb29849d28a8528dd"
+    },
+    "lib/service-supervision.mjs": {
+      "sha256": "af7e3a4335b95f787dada60e1766358814680b26982ce41e560b4e3be3b520c0"
+    },
+    "lib/watcher-bundle.mjs": {
+      "sha256": "d3e9acc2d2b616a1a0469608f7c4e921db6561ea186b032bd6521a960f3520f4"
+    },
+    "lib/watcher-service.mjs": {
+      "sha256": "ddab6c8115a243cb7bb8019a0589a9188116c5d2a27d4240c54e1745dd8fae3a"
+    },
+    "lib/win32-script-text.mjs": {
+      "sha256": "7f5422196e950839dcf6dd586b745a66b9215744850b02ecdea6fbfdea105cb5"
+    }
+  }
+}

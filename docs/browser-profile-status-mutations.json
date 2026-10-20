@@ -1,0 +1,49 @@
+{
+  "scope": "Terminal Codex activity counters only; authority and lifecycle transitions unchanged",
+  "execution": "Executable source copied into isolated package; normal Vitest transform imports it and MUTATION_LOADED proves load; shared product unchanged",
+  "focusedHostTests": 13,
+  "skipped": 0,
+  "tscExit": 0,
+  "results": [
+    {
+      "name": "positive-stop-only",
+      "file": "src/browser-profile-host.ts",
+      "line": 33,
+      "changedLine": "status(){const row=this.record,stopped=false;return Object.freeze({state:row?.state??\"idle\",busy:this.busy,activeProfiles:stopped?0:row?.activeProfiles??null,pendingWork:stopped?0:row?.pendingWork??null})}",
+      "sourceSha256": "8abac29a6d58276aca6059bf7bc73349feba2c31d91d7592a7d46b65e1d6914f",
+      "redExit": 1,
+      "restoredExit": 0,
+      "workingProductUnchanged": true
+    },
+    {
+      "name": "no-early-stopping-zero",
+      "file": "src/browser-profile-host.ts",
+      "line": 33,
+      "changedLine": "status(){const row=this.record,stopped=[\"stopping\",\"stopped\"].includes(row?.state??\"\");return Object.freeze({state:row?.state??\"idle\",busy:this.busy,activeProfiles:stopped?0:row?.activeProfiles??null,pendingWork:stopped?0:row?.pendingWork??null})}",
+      "sourceSha256": "8abac29a6d58276aca6059bf7bc73349feba2c31d91d7592a7d46b65e1d6914f",
+      "redExit": 1,
+      "restoredExit": 0,
+      "workingProductUnchanged": true
+    },
+    {
+      "name": "no-unknown-zero",
+      "file": "src/browser-profile-host.ts",
+      "line": 33,
+      "changedLine": "status(){const row=this.record,stopped=[\"recovery-required\",\"stopped\"].includes(row?.state??\"\");return Object.freeze({state:row?.state??\"idle\",busy:this.busy,activeProfiles:stopped?0:row?.activeProfiles??null,pendingWork:stopped?0:row?.pendingWork??null})}",
+      "sourceSha256": "8abac29a6d58276aca6059bf7bc73349feba2c31d91d7592a7d46b65e1d6914f",
+      "redExit": 1,
+      "restoredExit": 0,
+      "workingProductUnchanged": true
+    },
+    {
+      "name": "idle-stays-unknown",
+      "file": "src/browser-profile-host.ts",
+      "line": 33,
+      "changedLine": "status(){const row=this.record,stopped=!row||row.state===\"stopped\";return Object.freeze({state:row?.state??\"idle\",busy:this.busy,activeProfiles:stopped?0:row?.activeProfiles??null,pendingWork:stopped?0:row?.pendingWork??null})}",
+      "sourceSha256": "8abac29a6d58276aca6059bf7bc73349feba2c31d91d7592a7d46b65e1d6914f",
+      "redExit": 1,
+      "restoredExit": 0,
+      "workingProductUnchanged": true
+    }
+  ]
+}

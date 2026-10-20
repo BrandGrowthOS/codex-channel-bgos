@@ -1,0 +1,5 @@
+{
+  "name": "browser-host-core",
+  "private": true,
+  "type": "commonjs"
+}

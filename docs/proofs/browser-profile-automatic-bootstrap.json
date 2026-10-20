@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "scope": "Actual cache-cold automatic default resolver only",
+  "packageCommit": "6a6b7cc13f4a9137792d480a6444384f0dc9ae4b",
+  "commonCommit": "7106437b6ed128a2fd2f9f5fd7339cd756588e1a",
+  "packageSha256": "52358f1ff879af0216ddfc66e76e47ce56375feb5b386aae8862f5c6b6ffc42a",
+  "image": "hoai-profile-codex:6a6b7cc13f4a",
+  "imageId": "sha256:b46c9c238e92563d78220b5aedb30090ba8665303f8301c64af45738bbcaae0d",
+  "bootstrapGitPath": "lib/browser-bootstrap.mjs",
+  "bootstrapSha256": "afd690386d5edaa82fdfbc1b35203e50a74abd038249405452c706b885515f92",
+  "qualification": {
+    "kind": "actual-cache-cold-default-resolver",
+    "commonCommit": "7106437b6ed128a2fd2f9f5fd7339cd756588e1a",
+    "bootstrapSha256": "afd690386d5edaa82fdfbc1b35203e50a74abd038249405452c706b885515f92",
+    "uid": 1000,
+    "gid": 1000,
+    "node": "v22.23.3",
+    "initialDefaultBinaryAbsent": true,
+    "defaultCache": "/proof/cold-default-bootstrap.QOlAG2/home/.cache/ms-playwright",
+    "automaticDefaultEnsureBrowser": true,
+    "noBundleOrSpawnOverride": true,
+    "noExecutableOrCacheOverride": true,
+    "shippedSanitizedHostEnv": true,
+    "privateTmpfsBytes": 2147483648,
+    "elapsedMs": 9154.584364,
+    "actualInstallerChildren": 3,
+    "ownedInstallerPidsGone": true,
+    "secondCallCacheReuse": true,
+    "noSecondInstallLog": true,
+    "ownedLockAbsent": true,
+    "browserVersion": "Google Chrome for Testing 156.0.8078.4",
+    "browserSha256": "377a9fc07b495c3b8d0ab8ec1fdfd153641759f9756fea34d8dfce4de82f5025",
+    "noBrowserLaunch": true,
+    "manualCliPrewarm": false,
+    "privateHomeRemoved": true,
+    "containerAbsent": true,
+    "forcedStop": false,
+    "name": "hoai-codex-cold-bootstrap-1bacebfccf",
+    "image": "hoai-profile-codex:6a6b7cc13f4a",
+    "imageId": "sha256:b46c9c238e92563d78220b5aedb30090ba8665303f8301c64af45738bbcaae0d",
+    "packageCommit": "6a6b7cc13f4a9137792d480a6444384f0dc9ae4b",
+    "packageSha256": "52358f1ff879af0216ddfc66e76e47ce56375feb5b386aae8862f5c6b6ffc42a",
+    "sourceScriptSha256": "a116c0b64a4c13867cc1d761992d8a29be454cb64f8f51df9974e6e36157f2cd",
+    "scope": "Actual default resolver bootstrap only; no full cold host, native session or fresh OS claim."
+  },
+  "noBrowserSessionOrContextLaunched": true,
+  "chromeVersionCommandExecuted": true,
+  "rawEvidence": [
+    {
+      "path": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\codex-package-final-guidance-7106437b-dce3d0cd\\probe-cold-bootstrap.mjs",
+      "sha256": "a116c0b64a4c13867cc1d761992d8a29be454cb64f8f51df9974e6e36157f2cd"
+    },
+    {
+      "path": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\codex-package-final-guidance-7106437b-dce3d0cd\\run-cold-bootstrap.py",
+      "sha256": "370ca3fdffd1f28a7087217044756f18f810813e011fad73c55bcb2f52267060"
+    },
+    {
+      "path": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\codex-package-final-guidance-7106437b-dce3d0cd\\cold-bootstrap.json",
+      "sha256": "7b968497e0bf58228760d3d39013bac11afce6f281335740f80cd7d765247de6"
+    },
+    {
+      "path": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\codex-package-final-guidance-7106437b-dce3d0cd\\cold-bootstrap.txt",
+      "sha256": "0c55e7e8fb36106ea3d4bc8f10052498fc766479eeb9b7e34f8d75688b5530e1"
+    }
+  ],
+  "boundaries": [
+    "Preinstalled patched Node 22.23.3, compatible OS dependencies and user 1000 exist in the disposable Linux image. No fresh OS installation or OS dependency automation is qualified.",
+    "The fixture supplies a new private HOME and TMPDIR on an explicitly provisioned 2 GiB tmpfs. The normal Playwright user cache initially lacks the binary.",
+    "Only the actual installed ensureBrowser default resolver runs, using shipped sanitized hostEnv and its real bundled installer. No custom bundle, spawn implementation, executable path or cache variable is supplied.",
+    "The 3 observed installer child PID/start identities are positively gone. The separate synchronous Chromium --version child exited zero.",
+    "Raw noBrowserLaunch means no browser session or context was launched; the browser executable was invoked for --version.",
+    "The second default resolver call reuses the cache and produces no second install log.",
+    "This does not qualify the full cold host/session readiness latency, enrollment, unlocked Secret Service provisioning, native UI or final HOAI profile composition.",
+    "Later automatic backup timer fixes may supersede the common implementation; this exact historical bootstrap source and package/image receipt remain independently pinned."
+  ]
+}

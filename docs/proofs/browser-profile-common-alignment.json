@@ -1,0 +1,140 @@
+{
+  "commonCommit": "418aa6dcdec5003d8e94c6a43d6388cc2308ee0c",
+  "closureFiles": 75,
+  "mutations": [
+    {
+      "mutation": "declared-runtime-version",
+      "path": "package.json",
+      "changedExecutableLines": [
+        {
+          "line": 35,
+          "text": "    \"playwright-core\": \"1.63.0\","
+        }
+      ],
+      "redExit": 1,
+      "redSha256": "b9f195852d6715b0aaceb9cfe019edac8486f8fa361e1c46ab57efe5ef17843e",
+      "restoredExit": 0,
+      "restoredSha256": "c28b5c3689e90134cda3c2a502f4c6d7b87ba5fcaf683f325e2296a129cb5d72",
+      "exactCopyRestored": true
+    },
+    {
+      "mutation": "actual-native-admission",
+      "path": "vendor/browser-profile/lib/browser-profile-launch.mjs",
+      "changedExecutableLines": [
+        {
+          "line": 11,
+          "text": "  if (createHash('sha256').update(bundle).digest('hex') !== pin.bundleSha256) throw fail()"
+        }
+      ],
+      "redExit": 1,
+      "redSha256": "e2c17985ef89d62a326cc9e40bb02fb84f25f2f54e53ec9e7439a531960a766d",
+      "restoredExit": 0,
+      "restoredSha256": "92d68d3a091f0c3350712f0d66f02d378ca47543ca44114eb5a82d59e9c14ef5",
+      "exactCopyRestored": true
+    }
+  ],
+  "baselineWholeVendor": {
+    "passed": 4,
+    "exitCode": 0,
+    "sha256": "c440968ff5b7fa3c6ce2ce607c289bf7c02a7ab73e2f780c3485ece79311005a"
+  },
+  "restoredWholeVendor": {
+    "passed": 4,
+    "exitCode": 0,
+    "sha256": "9ac0321fb20a56f35b9908600faf22e11a1c31f62542316e6274ef8a285bb64d"
+  },
+  "realWorkspaceUnchanged": true,
+  "scope": "Disposable source copy and read-only junction to private actual npm-installed1.64.1 graph; no native browser launched by these tests",
+  "excludedPreparation": "First copy omitted .gitattributes; baseline failed before mutation and is preserved in excluded-copy-missing-attributes.txt",
+  "date": "2026-10-15",
+  "sourceHashes": {
+    "package.json": "f8c17597f60c5d70812d5d2dc31c5d1b258e28a308871fccb227827a1987ac0a",
+    "package-lock.json": "e48862e53dbb71308ea99ec7549084f1b46ae32c19786d0523452bec64c9491e",
+    "test/browser-profile-vendor.spec.ts": "f1bc1876ff5011c165cea17d587787b9bb2dfa76941d8bbb7be9d7ef1cdbc5b1",
+    "test/browser-profile-selection.spec.ts": "437008155756629ca0b6bfe2bddcc29d6d7759ae3cdbc97b37351354e9c516f4",
+    "vendor/browser-profile/source.json": "ff96cd4fae9ee85f283ff019873d9b2ce03f1b47d0ef6929a6d0a592f91fdb5c"
+  },
+  "qualification": {
+    "files": 15,
+    "passed": 171,
+    "skipped": 0,
+    "tscNoEmitExit": 0,
+    "actualNode": "24.16.0",
+    "actualPlaywright": "1.64.1",
+    "privateNodeModulesIsReparsePoint": false,
+    "freshNpmCiIgnoreScriptsExit": 0
+  },
+  "audit": {
+    "baselineAndCurrentFullGraphAdvisories": 9,
+    "baselineAndCurrentFullGraphRawIdentical": true,
+    "productionAdvisories": 0,
+    "productionExit": 0,
+    "scope": "Existing development-tool findings are unchanged; package audit does not certify Chromium or feature security."
+  },
+  "rawEvidence": [
+    {
+      "path": ".tmp/coherent-runtime-1792068944/actual-native-admission-red.txt",
+      "sha256": "e2c17985ef89d62a326cc9e40bb02fb84f25f2f54e53ec9e7439a531960a766d"
+    },
+    {
+      "path": ".tmp/coherent-runtime-1792068944/actual-native-admission-restored.txt",
+      "sha256": "92d68d3a091f0c3350712f0d66f02d378ca47543ca44114eb5a82d59e9c14ef5"
+    },
+    {
+      "path": ".tmp/coherent-runtime-1792068944/declared-runtime-version-red.txt",
+      "sha256": "b9f195852d6715b0aaceb9cfe019edac8486f8fa361e1c46ab57efe5ef17843e"
+    },
+    {
+      "path": ".tmp/coherent-runtime-1792068944/declared-runtime-version-restored.txt",
+      "sha256": "c28b5c3689e90134cda3c2a502f4c6d7b87ba5fcaf683f325e2296a129cb5d72"
+    },
+    {
+      "path": ".tmp/coherent-runtime-1792068944/excluded-copy-missing-attributes.txt",
+      "sha256": "757417b0cef9472c2eb6f2220c42e8b79414d441e513ebdad0934a78eebf5373"
+    },
+    {
+      "path": ".tmp/coherent-runtime-1792068944/mutation-baseline.txt",
+      "sha256": "c440968ff5b7fa3c6ce2ce607c289bf7c02a7ab73e2f780c3485ece79311005a"
+    },
+    {
+      "path": ".tmp/coherent-runtime-1792068944/mutation-final-whole-vendor.txt",
+      "sha256": "9ac0321fb20a56f35b9908600faf22e11a1c31f62542316e6274ef8a285bb64d"
+    },
+    {
+      "path": ".tmp/coherent-runtime-1792068944/restored-tests.txt",
+      "sha256": "1a01e6a5b7fd624cf2b0455d5d5eec8bed9c9922e3ae836517baf5b00bea218f"
+    },
+    {
+      "path": ".tmp/coherent-runtime-1792068944/tests.txt",
+      "sha256": "9abacbf3ca774b1810ac75463496fbc18b2977b17a390ede001f03b95f6d4d24"
+    },
+    {
+      "path": ".tmp/coherent-runtime-1792068944/tsc.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": ".tmp/coherent-runtime-1792068944/mutation-receipt.json",
+      "sha256": "005d21b8074882af91a90ec4ce4fd4736cf0d61ebd000d117b03f2922ef2222a"
+    },
+    {
+      "path": ".tmp/runtime-pin-audit-1792068573/baseline.json",
+      "sha256": "9c91e3a135747e640253a8958efba03b1cc69e5d24b738bd43fa1da5bdec1339"
+    },
+    {
+      "path": ".tmp/runtime-pin-audit-1792068573/current.json",
+      "sha256": "9c91e3a135747e640253a8958efba03b1cc69e5d24b738bd43fa1da5bdec1339"
+    },
+    {
+      "path": ".tmp/runtime-pin-audit-1792068573/current-production.json",
+      "sha256": "d6f9837cd7d830e6fe9702ea7c297d864433304451f841d65adba8ca734f6ea3"
+    }
+  ],
+  "boundaries": [
+    "No actual Codex package, native browser, HOAI relay or profile transfer acceptance is claimed by these unit checks.",
+    "Exact committed common closure includes all27 profile core inventory files and all dynamic worker entries.",
+    "Only the private nonjunction Codex worktree dependency graph was installed; main checkout and installed agents remain unchanged.",
+    "The initial15file invocation had168pass/3fixturefailures: the tab fixture constructed an empty backend config, enabling new upstream WebMCP discovery. The fixture now uses the actual shipped resolveConfig with WebMCP disabled; all assertions are retained.",
+    "Two mutation runs select the new installed-bundle case; three other vendor cases are intentionally unselected. Both full vendor baseline/restoration execute4cases with no skips.",
+    "A missing .gitattributes in the first private copy failed baseline before any mutation; its log is excluded and retained."
+  ]
+}

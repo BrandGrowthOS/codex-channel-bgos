@@ -1,0 +1,8 @@
+{
+  "playwrightVersion": "1.64.1",
+  "bundleExport": "playwright-core/lib/coreBundle",
+  "bundleSha256": "829521b67ed7be90c7d6d6098ff39f2241562d47e4ad7ccab13710924a56001d",
+  "upstreamSource": "https://github.com/microsoft/playwright/blob/v1.64.1/packages/playwright-core/src/server/chromium/chromiumSwitches.ts",
+  "uiFeatureSource": "https://chromium.googlesource.com/chromium/src/+/bf3cc6d2d1098c5addd00a916373e6fa62d3dc6b",
+  "uiFeaturesDisabled": ["WebUIOmniboxPopup", "WebUIOmniboxAimPopup"]
+}

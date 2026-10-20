@@ -95,7 +95,17 @@ export function browserMcpConfigOverrides(
   managedEnv?: Record<string, string>,
 ): Record<string, unknown> {
   if (!shimPath) return {};
-  const env = { ...browserRelayEnv(relay), ...managedEnv };
+  const relayEnv = browserRelayEnv(relay);
+  const env = { ...relayEnv, ...managedEnv };
+  // The app-server drops inherited HOAI_* variables. Select managed discovery
+  // explicitly for this paired, signed context, never from inherited flags.
+  delete env.HOAI_RELAY_PROFILE_SYNC;
+  if (relayEnv.HOAI_RELAY_PAIRING_TOKEN && managedEnv?.HOAI_RELAY_CONTEXT_FILE &&
+      /^user_[A-Za-z0-9_-]+$/.test(managedEnv.HOAI_RELAY_OWNER_USER_ID ?? "") &&
+      managedEnv.HOAI_RELAY_OWNER_USER_ID === relay?.ownerUserId &&
+      /^[1-9][0-9]*$/.test(managedEnv.HOAI_RELAY_CLIENT_PID ?? "")) {
+    env.HOAI_RELAY_PROFILE_SYNC = "1";
+  }
   return {
     [`mcp_servers.${HOAI_BROWSER_SERVER}.command`]: nodeBinary,
     [`mcp_servers.${HOAI_BROWSER_SERVER}.args`]: [shimPath],

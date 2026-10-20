@@ -7,3 +7,9 @@ Changes include typed transport integration, Codex-specific tool naming,
 and free-text-only native form fields in ask_user_input.
 The upstream Apache-2.0 license is included in LICENSES/Apache-2.0.txt.
 Other original codex-channel-bgos code is covered by the root MIT LICENSE.
+
+The browser runtime under vendor/browser-profile/ is copied from
+BrandGrowthOS/bgos-claude-plugin under Apache-2.0. Its exact upstream commit
+and every source file SHA256 are recorded in vendor/browser-profile/source.json.
+The runtime is unchanged; Codex-specific process ownership and configuration
+live outside that vendored directory. The same Apache-2.0 license above applies.

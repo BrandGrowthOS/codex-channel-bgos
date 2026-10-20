@@ -1,0 +1,146 @@
+{
+  "version": 1,
+  "scope": "Codex managed MCP guidance and tool metadata; no native or installed package acceptance",
+  "baseCommit": "aab384f4900d98247c6d1d44a59e1141dbc23443",
+  "commonSourceCommit": "7106437b6ed128a2fd2f9f5fd7339cd756588e1a",
+  "sourceFiles": {
+    "runtime/browser-profile-host.mjs": "b939ff1a4523c22bf239886450853a3260f205f8d7a7b1f549621c7cfb2e8d39",
+    "test/browser-profile-managed-relay.spec.ts": "d852deb239b67dbecb8ceb143eceeb3bebc228191dc71b0b821033b6330dc61b",
+    "vendor/browser-profile/bin/hoai-browser-host.mjs": "a40e218f31e18f6d559fcafd4cf3d853a64ef7bc396984a2811cdad3f0d788d4",
+    "vendor/browser-profile/lib/browser-profile-companion.mjs": "01aa9d1fb5ff68b2241c5b362791938824d928efd7bfa9ed6b5087f4b1122c29",
+    "vendor/browser-profile/source.json": "df00196aea496761c60cdfab31c2254ce164d9ca68645c0240674845fbee1a7f"
+  },
+  "vendorFiles": 75,
+  "selectedTests": [
+    "test/adapter-stop-control.spec.ts",
+    "test/browser-context.spec.ts",
+    "test/browser-managed-context.spec.ts",
+    "test/browser-mcp.spec.ts",
+    "test/browser-profile-adapter.spec.ts",
+    "test/browser-profile-child.spec.ts",
+    "test/browser-profile-host.spec.ts",
+    "test/browser-profile-managed-relay.spec.ts",
+    "test/browser-profile-selection.spec.ts",
+    "test/browser-profile-setup.spec.ts",
+    "test/browser-profile-vendor-workers.spec.ts",
+    "test/browser-profile-vendor.spec.ts",
+    "test/browser-relay-cold-start.spec.ts",
+    "test/browser-relay-identity.spec.ts",
+    "test/browser-relay-meeting-wiring.spec.ts",
+    "test/browser-shim-vendor.spec.ts",
+    "test/cli-args.spec.ts",
+    "test/publish-workflow.spec.ts",
+    "test/setup.spec.ts"
+  ],
+  "qualification": {
+    "testFiles": 19,
+    "passed": 194,
+    "failed": 0,
+    "skipped": 0,
+    "cancelled": 0,
+    "tscExit": 0,
+    "buildExit": 0,
+    "command": "node node_modules/vitest/vitest.mjs run --config .tmp/managed-profile-instructions/union.config.mjs",
+    "sourceOptIns": {
+      "HOAI_BROWSER_PROFILE_PLUGIN_SOURCE": "E:/bgos-worktrees/browser-profile-sync-plugin",
+      "HOAI_BROWSER_SHIM_SOURCE": "C:/Users/karim/.codex/worktrees/browser-profile-integration/0000 BGOS Final V2/frontend/electron-app/agent-browser/shim/hoai-browser-mcp.mjs"
+    }
+  },
+  "mutation": {
+    "sourceSha256": "b939ff1a4523c22bf239886450853a3260f205f8d7a7b1f549621c7cfb2e8d39",
+    "testSha256": "d852deb239b67dbecb8ceb143eceeb3bebc228191dc71b0b821033b6330dc61b",
+    "baseline": {
+      "exit": 0,
+      "signal": null,
+      "error": null,
+      "sha256": "a8d7218c258202b9af30db0d8caa224bcd39237e6361bbd1f453c8fffec5ea7e",
+      "assertionRed": false,
+      "passed": true,
+      "cancelled": false
+    },
+    "mutantSha256": "8c724ac7dd3600213e877b78801d7ffc74336a3cc2ce3fef0fe009f5dbb747aa",
+    "changedExecutableLines": [
+      {
+        "line": 7,
+        "text": "import { BrowserHost,ChromiumEngine,createManagedProfileEngine,createManagedProfileRelay,RelaySessions,hostInstructions,DEFAULT_CAPS,servedBrowserTools,listTools,loadPlaywright,resolveChromeExecutable,pidAlive } from '../vendor/browser-profile/bin/hoai-browser-host.mjs'"
+      },
+      {
+        "line": 25,
+        "text": "    createRelay:core=>new RelaySessions({core,serverInfo:{name:'hoai-codex-profile',version:'1'},instructions:hostInstructions(deviceLabel),log}),"
+      }
+    ],
+    "mutant": {
+      "exit": 1,
+      "signal": null,
+      "error": null,
+      "sha256": "d4c84431d89f0691e66bb40e782cb684b3ea1939bdf5665f1ea3571ac52ad392",
+      "assertionRed": true,
+      "passed": false,
+      "cancelled": false
+    },
+    "restoredSha256": "b939ff1a4523c22bf239886450853a3260f205f8d7a7b1f549621c7cfb2e8d39",
+    "restored": {
+      "exit": 0,
+      "signal": null,
+      "error": null,
+      "sha256": "9a0b74bb25f49674034fd8fc26f4e29a8cc3674f5aa47ce8ee8e9a8160519e04",
+      "assertionRed": false,
+      "passed": true,
+      "cancelled": false
+    }
+  },
+  "rawEvidence": [
+    {
+      "path": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\managed-profile-instructions\\union-tests.json",
+      "sha256": "e86773fd320d798c706464ff70925796a07a575dd2977e26199c846ff29771db"
+    },
+    {
+      "path": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\managed-profile-instructions\\union.config.mjs",
+      "sha256": "e1d6ec35c28b6327f629592e39a08d50bcedab206d11d15233a9dfb7a40d2f92"
+    },
+    {
+      "path": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\managed-profile-instructions\\union-green.txt",
+      "sha256": "bd3c5a068324602c85fd067e33e47d7148b4fba91425447cde9e94f708bf6505"
+    },
+    {
+      "path": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\managed-profile-instructions\\selection-delta.json",
+      "sha256": "708b1193fa5f41fcd63b4259d3b1e8c6ece754507d51719d103048bfa5181822"
+    },
+    {
+      "path": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\managed-profile-instructions\\tsc.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\managed-profile-instructions\\build.txt",
+      "sha256": "9f5f573fb81bf7e564624cd7d5350187fc646e72abdeefc9cf7b5aa2316c0a2e"
+    },
+    {
+      "path": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\managed-profile-instructions\\caller-drill\\results.json",
+      "sha256": "2642a628ba934d50bea5d29058e1d0140c1d87d362b41b97e1332330944f8a47"
+    },
+    {
+      "path": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\managed-profile-instructions\\caller-drill\\baseline.txt",
+      "sha256": "a8d7218c258202b9af30db0d8caa224bcd39237e6361bbd1f453c8fffec5ea7e"
+    },
+    {
+      "path": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\managed-profile-instructions\\caller-drill\\mutant.txt",
+      "sha256": "d4c84431d89f0691e66bb40e782cb684b3ea1939bdf5665f1ea3571ac52ad392"
+    },
+    {
+      "path": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\managed-profile-instructions\\caller-drill\\restored.txt",
+      "sha256": "9a0b74bb25f49674034fd8fc26f4e29a8cc3674f5aa47ce8ee8e9a8160519e04"
+    },
+    {
+      "path": "E:\\bgos-worktrees\\browser-profile-sync-codex\\.tmp\\managed-profile-instructions\\prove-caller.mjs",
+      "sha256": "3cbdf1467c1e22620cee36326da31fa5d45496934cb2e7f44e8962bd30acbb56"
+    }
+  ],
+  "boundaries": [
+    "Real SDK initialize, awaited initialized notification, tools/list and IDs through the actual production Codex factory and typed Companion receive path.",
+    "Authority, runtime, engine and RPC binding proof are synthetic in this unit. No browser, keyring, network or native human action is exercised.",
+    "Compatibility wait_seconds maximum remains 1800; managed guidance states that the original permission deadline remains at most 60 seconds.",
+    "The copied executable caller mutation changes only its relay selection to legacy instructions. No production worktree mutation.",
+    "Earlier substring-run .tmp discovery, an opt-in source directory passed instead of its shim file, and missing synthetic client activity during extra stop teardown are excluded setup trials.",
+    "The installed package metadata assertions are separately owned integration fixture changes and have not yet run."
+  ]
+}
