@@ -26,8 +26,9 @@
 // their own copy. Source of truth: frontend/electron-app/agent-browser/shim/.
 // The plugin's 0.72.0 copy leads it (BGOS mission 173: every browser_profile_*
 // refusal in one plain sentence, a 409 is host_offline only when the relay says
-// so, no profile question): BGOS takes this copy back byte for byte
-// (docs/vendoring-the-hoai-browser-shim.md in the plugin).
+// so, a desktop app the owner quit reads as not running, no profile question):
+// BGOS takes this copy back byte for byte (docs/vendoring-the-hoai-browser-shim.md
+// in the plugin).
 
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -44,6 +45,9 @@ const RELAY_WAIT_MS = 45_000;
 // Longer than any engine timeout (navigation 30 s, browser_wait_for 30 s).
 const RELAY_TOTAL_MS = Number(process.env.HOAI_RELAY_TOTAL_MS) || 180_000;
 const RELAY_PROBE_MS = Number(process.env.HOAI_RELAY_PROBE_MS) || 20_000;
+// One status probe may hold back a refusal the agent is waiting for (a profile that is not active, the backend's
+// browser_profile_writer_offline), so it is bounded; a probe that times out is a failed probe, never "offline".
+const RELAY_PROBE_TIMEOUT_MS = Number(process.env.HOAI_RELAY_PROBE_TIMEOUT_MS) || 10_000;
 const CANCEL_DELIVERY_MS = 5_000;
 const RELAY_MCP_PATH = "/api/v1/integrations/browser/mcp";
 const RELAY_HOST_PATH = "/api/v1/integrations/browser/host";
@@ -124,6 +128,10 @@ const PROFILE_REFUSAL_TEXT = {
   browser_profile_storage_full: "Your browser's storage in HOAI is full, so nothing new was saved or opened; ask your owner to free space for it in HOAI.",
   browser_profile_close_blocked: "Your browser could not close cleanly yet, so it is still open; try closing it again in a moment.",
   browser_profile_transition_absent: "HOAI could not find your browser's move between computers, so your owner needs to open your browser in HOAI to finish it.",
+  // The backend's pre-dispatch browser_profile_writer_offline while the probe says a desktop app IS online (a relaunch
+  // after a crash cannot take an earlier launch's browser; another computer may hold it). With no desktop online the
+  // agent hears the offline words instead (profileSend).
+  browser_profile_writer_offline: "Your browser's HOAI session is not connected right now (the app may be closed, or your browser is held by an earlier launch of the app or by another computer), so nothing ran; ask your owner to open your browser in HOAI on the computer they use, then try again.",
 };
 // A browser_profile_* code this copy does not know yet (a newer backend or desktop) still keeps its code. Its words
 // cannot know whether the call ran, so they say to look first.
@@ -136,6 +144,15 @@ const PROFILE_STATE_CODE = {
   quiescing: "browser_profile_closing",
   fenced: "browser_profile_recovery_required",
 };
+// The backend refuses a managed profile call BEFORE dispatch with a 409 carrying this code when the authority is
+// current, its writer is the owner's desktop app and no desktop socket is bound for it. Usually the owner quit the app
+// (the profile row stays active by design), but a desktop relaunched after a crash cannot bind an earlier launch's
+// writer either, and that app is open. So the shim asks the host probe: no desktop online is the fact host_offline
+// says, and gets offline mode and its words, exactly as before the app ever ran; an online or failed probe gets the
+// code's own sentence (nothing ran), which never says the app is not running (RC4).
+const WRITER_OFFLINE_CODE = "browser_profile_writer_offline";
+/** An answer that means the browser's host is not running (`offline` is set by the managed route only): offline mode. */
+const hostAbsent = answer => answer.code === "host_offline" || answer.offline === true;
 
 /** The browser_profile_* code a relay or profile answer carries, in its code or as the "<code>: " a host's refusal leads with, else null. */
 function profileCodeOf(payload) {
@@ -425,7 +442,7 @@ async function discoverProfile(context) {
         Object.keys(value).length !== (value.state === "active" ? 6 : 5)) throw Error("profile_namespace_refused");
     if (!managedNamespaces.has(namespace) && managedNamespaces.size >= 128) throw Error("profile_namespace_limit");
     managedNamespaces.add(namespace);
-    if (value.state !== "active") return { failed: profileRefusal(PROFILE_STATE_CODE[value.state], context) };
+    if (value.state !== "active") return { failed: profileRefusal(PROFILE_STATE_CODE[value.state], context), state: value.state };
     const authority = profileAuthority(value.authority, actor, assistantId, value.profileId);
     profileScopes.set(clientId, authority); while (profileScopes.size > 32) profileScopes.delete(profileScopes.keys().next().value);
     return { authority };
@@ -433,7 +450,7 @@ async function discoverProfile(context) {
 }
 async function profileSend(message, signal, context, authority, pending) {
   const clientId = relayClientId(context), scope = { assistantId: authority.assistantId, clientId, authority, waitMs: 0 };
-  let sent = false;
+  let sent = false, dispatched = false;
   try {
     signal?.throwIfAborted();
     const started = Date.now(); sent = true;
@@ -441,14 +458,23 @@ async function profileSend(message, signal, context, authority, pending) {
     for (;;) {
       if (response.status >= 200 && response.status < 300 && response.payload.status === "done") return { ok: true, message: response.payload.message || {} };
       if (response.status >= 200 && response.status < 300 && response.payload.status === "pending" && PROFILE_UUID.test(response.payload.rpcId)) {
-        const rpcId = response.payload.rpcId; pending?.(rpcId);
+        const rpcId = response.payload.rpcId; pending?.(rpcId); dispatched = true;
         if (Date.now() - started > RELAY_TOTAL_MS) throw Error("profile_result_timeout");
         await sleep(Math.max(25, Math.min(2000, Number(response.payload.pollAfterMs) || 250)), signal);
         response = await profileFetch(`/${rpcId}/poll`, scope, signal, context, 8 * 1024 * 1024 + 64 * 1024); continue;
       }
       // A refusal that names its browser_profile_* code says so; anything else was not confirmed, and may have run.
       const refused = profileCodeOf(response.payload);
-      if (refused) return { ok: false, code: refused, profile: true, sent, text: profileLine(refused, context) };
+      // Refused before dispatch (the backend's 409): nothing ran. With no desktop app online the agent hears it is not
+      // running; otherwise the code's sentence. A call that already went pending was sent, so the same code on its poll
+      // (or on any other status) is a call that was not confirmed and may have run.
+      if (refused === WRITER_OFFLINE_CODE) {
+        if (!dispatched && response.status === 409) {
+          const host = await relayHostOnline(context);
+          if (!host || (!host.failed && !host.online)) return { ok: false, code: WRITER_OFFLINE_CODE, offline: true, sent: false, text: offlineText(null, context) };
+          return { ok: false, code: WRITER_OFFLINE_CODE, profile: true, sent: false, text: profileLine(WRITER_OFFLINE_CODE, context) };
+        }
+      } else if (refused) return { ok: false, code: refused, profile: true, sent, text: profileLine(refused, context) };
       return { ok: false, code: "browser_profile_unconfirmed", sent, text: profileLine("browser_profile_unconfirmed", context) };
     }
   } catch {
@@ -607,7 +633,7 @@ async function relayHostOnline(context) {
     // The plain probe answers for the desktop alone, so an agent on its own machine read as offline whenever the
     // owner's app was closed, which is the one time that placement exists for (Mission 25 goal 6, 2026-09-25).
     const probePath = RELAY.assistantId ? `${RELAY_HOST_PATH}?assistantId=${encodeURIComponent(RELAY.assistantId)}` : RELAY_HOST_PATH;
-    const r = await relayFetch("GET", probePath, undefined, undefined, context);
+    const r = await relayFetch("GET", probePath, undefined, AbortSignal.timeout(RELAY_PROBE_TIMEOUT_MS), context);
     // A refused probe (a 429 from the global request throttler, a 5xx, a 401) says NOTHING about the desktop app:
     // it used to read as "no host", and the agent was told the app "is not running or not signed in".
     if (r.status !== 200) return { failed: probeFailure(r.status, r.retryAfter) };
@@ -642,15 +668,26 @@ function probeFailure(status, retryAfter) {
 async function ensureRelay(context) {
   const clientId = relayClientId(context);
   const profile = await discoverProfile(context);
-  if (profile?.failed) { relayConnections.delete(clientId); return { relay: null, refusal: profile.failed }; }
+  if (profile?.failed) {
+    relayConnections.delete(clientId);
+    // A managed profile that is not active says nothing about whether the desktop app runs, so the probe is asked
+    // once: with the app closed (online false, or no payload) the agent hears it is not running, as before the app
+    // ever ran. An online answer, or a probe that failed, keeps the state's own sentence.
+    if (profile.state) {
+      const host = await relayHostOnline(context);
+      if (!host || (!host.failed && !host.online)) return { relay: null, refusal: null };
+    }
+    return { relay: null, refusal: profile.failed };
+  }
   const existing = relayConnections.get(clientId);
   if (existing?.initialized && JSON.stringify(existing.profileAuthority || null) === JSON.stringify(profile?.authority || null)) return { relay: existing };
   const host = profile?.authority ? { online: true, hostLabel: "Managed browser through HOAI" } : await relayHostOnline(context);
   if (host && host.failed) return { relay: null, refusal: host.failed };
   if (!host || !host.online) return { relay: null, refusal: null };
   const init = await relaySend({ jsonrpc: "2.0", id: `shim-init-${++initSeq}`, method: "initialize", params: initializeParams() }, undefined, context);
-  // A profile refusal is said as itself (its code and sentence), never as a connection that could not be set up.
-  if (!init.ok) return { relay: null, refusal: init.code === "host_offline" ? null : init.profile ? { code: init.code, profile: true, text: init.text } : connectRefusal(init) };
+  // A profile refusal is said as itself (its code and sentence), never as a connection that could not be set up; a
+  // host that is not running (the relay's host_offline, the backend's browser_profile_writer_offline) is offline mode.
+  if (!init.ok) return { relay: null, refusal: hostAbsent(init) ? null : init.profile ? { code: init.code, profile: true, text: init.text } : connectRefusal(init) };
   if (init.message && init.message.error) return { relay: null, refusal: connectRefusal({ code: "host_init_error", hostError: init.message.error.message || JSON.stringify(init.message.error) }) };
   if (!init.message) return { relay: null, refusal: null };
   await relaySend({ jsonrpc: "2.0", method: "notifications/initialized" }, undefined, context).catch(() => {});
@@ -670,8 +707,9 @@ function dropRelay(code, context) {
   // reloaded, so the desktop's session died with its socket) or a dead relay
   // means the session on the desktop is gone; the next call re-elects through
   // a fresh initialize.
-  // A browser_profile_* refusal too: the next call discovers the profile afresh.
-  if (code === "host_offline" || code === "host_disconnected" || code === "relay_unreachable" || code === "relay_unsupported" || code === "call_lost" || PROFILE_CODE.test(code)) relayConnections.delete(relayClientId(context));
+  // A browser_profile_* refusal too: the next call discovers the profile afresh. The backend's
+  // browser_profile_writer_offline means the session holding the browser is gone, forgotten as host_offline is.
+  if (code === "host_offline" || code === WRITER_OFFLINE_CODE || code === "host_disconnected" || code === "relay_unreachable" || code === "relay_unsupported" || code === "call_lost" || PROFILE_CODE.test(code)) relayConnections.delete(relayClientId(context));
 }
 
 // ─── One browser per agent: no profile question (BGOS mission 173) ───────────
@@ -920,7 +958,7 @@ async function handle(msg, entry) {
       dropRelay(res.code, context);
       if (!relayConnections.has(relayClientId(context))) setMode("offline");
       const text = context?.recipient && Object.hasOwn(RECIPIENT_RELAY_ERROR_TEXT, res.code) ? RECIPIENT_RELAY_ERROR_TEXT[res.code] : res.text;
-      return reply({ content: [{ type: "text", text }], isError: params?.name !== "hoai_browser_status" || res.code !== "host_offline" });
+      return reply({ content: [{ type: "text", text }], isError: params?.name !== "hoai_browser_status" || !hostAbsent(res) });
     }
     if (params?.name === "hoai_browser_status" && res.message?.result && !res.message.result.isError && r.relay.hostLabel) {
       // Say WHERE the browser is. This used to read "Reached through your

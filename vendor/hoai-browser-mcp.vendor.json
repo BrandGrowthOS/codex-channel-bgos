@@ -1,11 +1,11 @@
 {
   "file": "vendor/hoai-browser-mcp.mjs",
   "source": "BGOS: frontend/electron-app/agent-browser/shim/hoai-browser-mcp.mjs",
-  "sha256": "c8d9b7a938c09fffb56fa6cb303a71bdfb932976da5d354bf17d0de19c5e2b83",
-  "vendoredAt": "2026-10-20",
-  "why": "Byte-identical copy of the shim in bgos-claude-plugin PR #262 (0.72.0, commit 41332b9) and BGOS PR #2827 (commit 1d9701feb). Managed profile routing stays opt-in through the paired launcher. The profile runtime and launcher integration remain in Codex PR #32.",
+  "sha256": "2fd50404ff330d65f5f38017ffb7dd0a5df2f1c560b694c1f329b1bbe88f71ef",
+  "vendoredAt": "2026-10-21",
+  "why": "Byte-identical copy of the shim released in bgos-claude-plugin 0.72.0 (tag v0.72.0, c141e120a) and BGOS PR #2827 (commit e72e86d8d). Replaces c8d9b7a9, which predated the plugin's last shim fix (a43172d: a desktop app the owner quit reads as not running). Managed profile routing stays opt-in through the paired launcher. The profile runtime and launcher integration remain in Codex PR #32.",
   "howToUpdate": "docs/vendoring-the-hoai-browser-shim.md",
   "crossTreeCheck": "HOAI_BROWSER_SHIM_SOURCE=<path to the BGOS shim> npx vitest run test/browser-shim-vendor.spec.ts",
   "alsoVendoredBy": "bgos-claude-plugin: bin/hoai-browser-mcp.mjs (same bytes, same pin)",
-  "sourceCommit": "1d9701feb638a0bc15b0532dea03b48a0b3bfb7f"
+  "sourceCommit": "e72e86d8d680fafd73ad69c6cc55ba5a030d6a21"
 }
