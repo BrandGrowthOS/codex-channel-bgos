@@ -1084,6 +1084,10 @@ export class CodexHost {
   pickerSessionId(chatId: number): string {
     return this.map[String(chatId)] ?? `new:${chatId}`;
   }
+  pickerCurrentReport(chatId: number): SessionReport | null {
+    // A concurrent catalog read cannot publish settings awaiting native acceptance.
+    return this.runtimeMovedDuringChange.has(chatId) ? null : this.currentSessionReport(chatId);
+  }
   async listModels(refresh = false): Promise<CodexModel[]> {
     if (
       !refresh &&

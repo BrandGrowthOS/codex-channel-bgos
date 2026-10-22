@@ -124,6 +124,21 @@ describe("durable native settings", () => {
         .model,
     ).toBe("one");
   });
+  it("withholds a picker snapshot until a native settings change is acknowledged", async () => {
+    writeFileSync(join(home, "threads.json"), JSON.stringify({ 10: "persisted" }));
+    host.close();
+    host = new CodexHost({ auth: { ok: true, mode: "chatgpt", label: "test" }, workdir: home, server: server as any });
+    await host.updateSettings(10, { model: "one", effort: "medium" });
+    let resolve!: (value: unknown) => void;
+    const original = server.request.getMockImplementation()!;
+    server.request.mockImplementation(async (method, params) => method === "thread/settings/update" ? new Promise(r => { resolve = r; }) : original(method, params));
+    const pending = host.updateSettings(10, { model: "two", effort: "high" }, "persisted");
+    await vi.waitFor(() => expect(resolve).toBeTypeOf("function"));
+    expect(host.pickerCurrentReport(10)).toBeNull();
+    resolve({});
+    await pending;
+    expect(host.pickerCurrentReport(10)).toMatchObject({ model: "two", effort: "high" });
+  });
   it("rejects invalid model capabilities before changing anything", () => {
     expect(() => validateSettings({ model: "absent" }, models)).toThrow(
       "not available",

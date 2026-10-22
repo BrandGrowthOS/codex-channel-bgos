@@ -2899,7 +2899,7 @@ export class CodexAdapter {
         sessionChatOf(chatId);
         if (frame.op === "list_model_effort") {
           const models = await this.host.listModels(true);
-          const current = this.host.currentSessionReport(chatId);
+          const current = this.host.pickerCurrentReport(chatId);
           await this.api.postVoiceRpcResult(frame.rpcId, { ok: true, payload: buildPickerCatalog(models, current, this.host.pickerSessionId(chatId)) });
         } else {
           const current = await applyPickerSelection(this.host, chatId, frame.payload);

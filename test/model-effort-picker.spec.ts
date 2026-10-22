@@ -28,7 +28,7 @@ describe("model effort picker", () => {
     Object.assign(adapter, {
       host: {
         listModels: async () => [model()],
-        currentSessionReport: () => null,
+        pickerCurrentReport: () => null,
         sessionSettings: async () => ({
           model: model().model,
           effort: "medium",
