@@ -20,6 +20,7 @@ import {
   RESUME_SESSION,
   type SessionOp,
 } from "./session-controls-contract.js";
+import { PICKER_OPS, type PickerOp } from "./model-effort-picker.js";
 
 export type VoiceRpcOp =
   | "mint"
@@ -27,7 +28,8 @@ export type VoiceRpcOp =
   | "dispatch"
   | "stop_turn"
   | "cancel"
-  | SessionOp;
+  | SessionOp
+  | PickerOp;
 
 export interface VoiceRpcFrame {
   rpcId: string;
@@ -61,8 +63,9 @@ export function normalizeVoiceRpc(raw: unknown): VoiceRpcFrame | null {
     r.op === "cancel" ||
     r.op === LIST_SESSIONS ||
     r.op === RESUME_SESSION ||
-    r.op === RENAME_SESSION
-      ? r.op
+    r.op === RENAME_SESSION ||
+    PICKER_OPS.includes(r.op as PickerOp)
+      ? r.op as VoiceRpcOp
       : null;
   if (!rpcId || !op) return null;
   return {

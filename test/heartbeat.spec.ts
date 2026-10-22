@@ -157,6 +157,7 @@ describe("HeartbeatController", () => {
           "sessions_library",
           "changes_rpc",
           "session_model_control",
+          "model_effort_picker",
         ]);
       } finally {
         hb.stop();
@@ -212,6 +213,7 @@ describe("HeartbeatController", () => {
             "sessions_library",
             "changes_rpc",
             "session_model_control",
+            "model_effort_picker",
           ]);
       } finally {
         hb.stop();
