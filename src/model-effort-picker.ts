@@ -26,6 +26,7 @@ const LABELS: Record<string, string> = {
   max: "Max",
   ultra: "Ultra",
 };
+export const pickerEffortLabel = (effort: string | null) => effort ? LABELS[effort] ?? effort : "Unknown";
 
 export function modelFamily(name: string): string {
   return (
@@ -34,7 +35,7 @@ export function modelFamily(name: string): string {
       .replace(/\b\d+(?:[.-]\d+)*\b/g, "")
       .replace(/[-_]+/g, " ")
       .replace(/\s+/g, " ")
-      .trim() || "Codex"
+      .trim().replace(/\b[a-z]/g, letter => letter.toUpperCase()) || "Codex"
   );
 }
 

@@ -100,6 +100,7 @@ describe("model effort picker", () => {
       },
     });
     expect(adapter.outbound.sendText).toHaveBeenCalledTimes(1);
+    expect(adapter.outbound.sendText).toHaveBeenCalledWith({ assistantId: 5, chatId: 10, text: "Switched to GPT Sol, effort Ultra." });
     host.updateSettings.mockRejectedValueOnce(Error("runtime rejected"));
     await adapter.handleControl({ ...frame, rpcId: "pick-2" });
     expect(adapter.api.postVoiceRpcResult).toHaveBeenLastCalledWith(

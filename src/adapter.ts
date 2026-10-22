@@ -109,7 +109,7 @@ import {
 import { ChatAssistantStore } from "./chat-assistants.js";
 import { retireOrphanedApprovals, unescapeButton } from "./interactions.js";
 import type { VoiceRpcFrame, VoiceRpcResultBody } from "./voice-rpc.js";
-import { applyPickerSelection, buildPickerCatalog, modelFamily, PickerRefusal } from "./model-effort-picker.js";
+import { applyPickerSelection, buildPickerCatalog, modelFamily, pickerEffortLabel, PickerRefusal } from "./model-effort-picker.js";
 import { VoiceRpcHandler } from "./hoai-shared/voice-rpc.js";
 import { buildCodexInput, type InboundFileForCodex } from "./inbound-input.js";
 import { characterCount } from "./clip-text.js";
@@ -2904,7 +2904,7 @@ export class CodexAdapter {
         } else {
           const current = await applyPickerSelection(this.host, chatId, frame.payload);
           // A failed chat notice cannot undo a confirmed native switch.
-          await this.outbound.sendText({ assistantId, chatId, text: `Switched to ${modelFamily(current.model)}, effort ${current.effort}.` }).catch(() => {});
+          await this.outbound.sendText({ assistantId, chatId, text: `Switched to ${modelFamily(current.model)}, effort ${pickerEffortLabel(current.effort)}.` }).catch(() => {});
           await this.api.postVoiceRpcResult(frame.rpcId, { ok: true, payload: { current, sessionId: this.host.pickerSessionId(chatId) } });
         }
         return;
