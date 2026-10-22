@@ -1081,6 +1081,9 @@ export class CodexHost {
   hasThread(chatId: number): boolean {
     return Boolean(this.map[String(chatId)]);
   }
+  pickerSessionId(chatId: number): string {
+    return this.map[String(chatId)] ?? `new:${chatId}`;
+  }
   async listModels(refresh = false): Promise<CodexModel[]> {
     if (
       !refresh &&
@@ -1236,8 +1239,11 @@ export class CodexHost {
   async updateSettings(
     chatId: number,
     patch: SessionSettings,
+    expectedSessionId?: string,
   ): Promise<SessionSettings> {
     return this.withIdleControl(chatId, async () => {
+      if (expectedSessionId !== undefined && expectedSessionId !== this.pickerSessionId(chatId))
+        throw new Error("The session changed. Open the picker again.");
       const current = await this.sessionSettings(chatId);
       const next = validateSettings(
         { ...current, ...patch },

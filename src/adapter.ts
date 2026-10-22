@@ -109,6 +109,7 @@ import {
 import { ChatAssistantStore } from "./chat-assistants.js";
 import { retireOrphanedApprovals, unescapeButton } from "./interactions.js";
 import type { VoiceRpcFrame, VoiceRpcResultBody } from "./voice-rpc.js";
+import { applyPickerSelection, buildPickerCatalog, modelFamily, PickerRefusal } from "./model-effort-picker.js";
 import { VoiceRpcHandler } from "./hoai-shared/voice-rpc.js";
 import { buildCodexInput, type InboundFileForCodex } from "./inbound-input.js";
 import { characterCount } from "./clip-text.js";
@@ -2894,6 +2895,20 @@ export class CodexAdapter {
       this.rpcSeen.delete(this.rpcSeen.values().next().value!);
     try {
       await this.api.postVoiceRpcAck(frame.rpcId).catch(() => {});
+      if (frame.op === "list_model_effort" || frame.op === "apply_model_effort") {
+        sessionChatOf(chatId);
+        if (frame.op === "list_model_effort") {
+          const models = await this.host.listModels(true);
+          const current = this.host.currentSessionReport(chatId);
+          await this.api.postVoiceRpcResult(frame.rpcId, { ok: true, payload: buildPickerCatalog(models, current, this.host.pickerSessionId(chatId)) });
+        } else {
+          const current = await applyPickerSelection(this.host, chatId, frame.payload);
+          // A failed chat notice cannot undo a confirmed native switch.
+          await this.outbound.sendText({ assistantId, chatId, text: `Switched to ${modelFamily(current.model)}, effort ${current.effort}.` }).catch(() => {});
+          await this.api.postVoiceRpcResult(frame.rpcId, { ok: true, payload: { current, sessionId: this.host.pickerSessionId(chatId) } });
+        }
+        return;
+      }
       if (frame.op === "mint") {
         let handler = this.mintHandlers.get(assistantId);
         if (!handler) {
@@ -3141,7 +3156,7 @@ export class CodexAdapter {
         .postVoiceRpcResult(frame.rpcId, {
           ok: false,
           error: {
-            code: "CODEX_CONTROL_FAILED",
+            code: error instanceof PickerRefusal || error instanceof ControlRefusal ? error.code : "CODEX_CONTROL_FAILED",
             message:
               error instanceof Error
                 ? error.message
