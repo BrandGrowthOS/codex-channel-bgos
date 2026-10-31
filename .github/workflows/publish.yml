@@ -152,6 +152,11 @@ jobs:
         if: steps.ver.outputs.publish == 'true'
         run: npm run build
 
+      - name: Fetch the plugin shim for the cross-tree check
+        if: steps.ver.outputs.publish == 'true'
+        # Same step as test.yml: the shim spec fails under CI=true without it.
+        run: node scripts/fetch-plugin-shim.mjs
+
       - name: Test
         if: steps.ver.outputs.publish == 'true'
         run: npm test

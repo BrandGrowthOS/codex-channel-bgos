@@ -25,9 +25,14 @@
  *    `core.autocrlf` hands a Windows checkout a different byte sequence and the
  *    hash is unverifiable on disk for exactly the people most likely to check.
  *  - the cross-tree case: BGOS is a separate private repo and is NOT on this
- *    repo's CI runner, so this suite cannot compare the two on its own. It is
- *    opt-in through `HOAI_BROWSER_SHIM_SOURCE`, which is what the re-vendor
- *    checklist tells you to set on a machine that has both trees.
+ *    repo's CI runner, but bgos-claude-plugin is public and ships the same
+ *    bytes as `bin/hoai-browser-mcp.mjs`. CI fetches that file at the commit
+ *    pinned in `vendor/hoai-browser-mcp.vendor.json` (`pluginRef`, see
+ *    scripts/fetch-plugin-shim.mjs) and sets `HOAI_BROWSER_SHIM_SOURCE` to it.
+ *    In CI (`CI=true`) the source is REQUIRED: if it is missing the suite
+ *    FAILS, so a broken fetch step cannot turn the comparison back into a
+ *    silent pass. On a developer machine the case still skips without the
+ *    variable, with a loud warning.
  *
  * What this still does NOT buy: nothing here fires when the BGOS shim changes
  * and this copy does not move. That check can only live on the BGOS side. The
@@ -39,7 +44,7 @@
  */
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { bundledShimPath } from "../src/browser-mcp.js";
@@ -61,6 +66,9 @@ interface Pin {
   howToUpdate: string;
   crossTreeCheck: string;
   alsoVendoredBy: string;
+  pluginRepository: string;
+  pluginRef: string;
+  pluginPath: string;
 }
 
 function pin(): Pin {
@@ -104,6 +112,11 @@ describe("the vendored HOAI browser shim", () => {
     expect(p.howToUpdate).toBe("docs/vendoring-the-hoai-browser-shim.md");
     // The pin itself says how to check the other tree.
     expect(p.crossTreeCheck).toMatch(/HOAI_BROWSER_SHIM_SOURCE/);
+    // Where CI gets the plugin's copy to compare against. The ref is a full
+    // commit sha, not a tag or a branch, so what CI compares to cannot move.
+    expect(p.pluginRepository).toBe("BrandGrowthOS/bgos-claude-plugin");
+    expect(p.pluginRef).toMatch(/^[0-9a-f]{40}$/);
+    expect(p.pluginPath).toBe("bin/hoai-browser-mcp.mjs");
   });
 
   it("is LF, and .gitattributes is what keeps it that way", () => {
@@ -128,21 +141,41 @@ describe("the vendored HOAI browser shim", () => {
   });
 });
 
-// The cross-tree comparison. BGOS is a separate private repo and is not on this
-// repo's CI runner, so this is opt-in rather than a check this suite can make on
-// its own: point HOAI_BROWSER_SHIM_SOURCE at the BGOS shim on a machine that has
-// both trees (the re-vendor checklist tells you to) and it runs. Skipped
-// otherwise, rather than pretending to check something it cannot reach.
+// The cross-tree comparison. CI fetches the plugin's copy at the pinned ref and
+// sets HOAI_BROWSER_SHIM_SOURCE (scripts/fetch-plugin-shim.mjs), and in CI this
+// case must not be skippable: with CI=true a missing or unreadable source is a
+// FAILURE, because a skip here is exactly how drift used to pass unseen. On a
+// developer machine without the variable it skips, and says so out loud.
 const source = (process.env.HOAI_BROWSER_SHIM_SOURCE ?? "").trim();
 const sourceReadable = source !== "" && existsSync(source);
+const inCi = ["true", "1"].includes((process.env.CI ?? "").trim().toLowerCase());
+if (!sourceReadable && !inCi)
+  console.warn(
+    "\n*** SKIPPED: the cross-tree shim comparison did NOT run. Set HOAI_BROWSER_SHIM_SOURCE to the plugin's bin/hoai-browser-mcp.mjs " +
+      "(node scripts/fetch-plugin-shim.mjs downloads it at the pinned ref). Currently " +
+      (source === "" ? "unset" : `${source} is not a readable file`) +
+      ". CI=true makes this a failure. ***\n",
+  );
 describe("the BGOS source of truth", () => {
-  it.skipIf(!sourceReadable)(
-    "hashes to the same pin (opt-in: needs both trees, set HOAI_BROWSER_SHIM_SOURCE)",
+  it.skipIf(!sourceReadable && !inCi)(
+    "hashes to the same pin as the plugin's copy (CI fetches it and requires it; locally set HOAI_BROWSER_SHIM_SOURCE)",
     () => {
+      expect(
+        sourceReadable,
+        "CI=true but HOAI_BROWSER_SHIM_SOURCE is unset or does not point at a readable file, so the shim was NOT compared " +
+          "with the plugin's copy. Run `node scripts/fetch-plugin-shim.mjs` before the tests (test.yml and publish.yml do) " +
+          "and check that step; this case never skips in CI.",
+      ).toBe(true);
+      // A file compared with itself proves nothing, so refuse that source.
+      expect(
+        resolve(source),
+        "HOAI_BROWSER_SHIM_SOURCE points at this repo's own vendored shim, so the comparison would check the file against itself. " +
+          "It must be the plugin's copy (node scripts/fetch-plugin-shim.mjs).",
+      ).not.toBe(resolve(SHIM));
       const expected = pin().sha256;
       expect(
         sha256(source),
-        `the BGOS shim at ${source} is not the file this repo vendors; re-vendor it deliberately per ` +
+        `the shim source at ${source} is not the file this repo vendors; re-vendor it deliberately per ` +
           "docs/vendoring-the-hoai-browser-shim.md and bump vendor/hoai-browser-mcp.vendor.json.",
       ).toBe(expected);
       // And the copy still matches, so the two trees agree.

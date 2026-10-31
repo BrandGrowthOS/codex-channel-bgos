@@ -21,4 +21,10 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run build
+      # Download the plugin's copy of the browser shim at the commit pinned in
+      # vendor/hoai-browser-mcp.vendor.json (pluginRef) and export
+      # HOAI_BROWSER_SHIM_SOURCE. The shim spec compares this repo's copy
+      # against it and FAILS when CI=true and the source is missing. The plugin
+      # repo is public: no token, no secret, no repo variable.
+      - run: node scripts/fetch-plugin-shim.mjs
       - run: npm test
