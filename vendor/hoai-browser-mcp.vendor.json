@@ -5,6 +5,9 @@
   "vendoredAt": "2026-10-21",
   "why": "Byte-identical copy of the shim released in bgos-claude-plugin 0.72.0 (tag v0.72.0, c141e120a) and BGOS PR #2827 (commit e72e86d8d). Replaces c8d9b7a9, which predated the plugin's last shim fix (a43172d: a desktop app the owner quit reads as not running). Managed profile routing stays opt-in through the paired launcher. The profile runtime and launcher integration remain in Codex PR #32.",
   "howToUpdate": "docs/vendoring-the-hoai-browser-shim.md",
+  "pluginRepository": "BrandGrowthOS/bgos-claude-plugin",
+  "pluginRef": "c141e120a1fd19a9fd0f82df3066886426c1ff79",
+  "pluginPath": "bin/hoai-browser-mcp.mjs",
   "crossTreeCheck": "HOAI_BROWSER_SHIM_SOURCE=<path to the BGOS shim> npx vitest run test/browser-shim-vendor.spec.ts",
   "alsoVendoredBy": "bgos-claude-plugin: bin/hoai-browser-mcp.mjs (same bytes, same pin)",
   "sourceCommit": "e72e86d8d680fafd73ad69c6cc55ba5a030d6a21"

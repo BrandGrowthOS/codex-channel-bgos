@@ -32,7 +32,13 @@ then bring the copy across with this list.
 3. **Bump the pin.** Put the new hash and today's date in
    `vendor/hoai-browser-mcp.vendor.json`. This is the step that makes drift
    loud: the guard fails until the pin and the file agree, so a re-vendor cannot
-   land without someone stating the new hash in the tree.
+   land without someone stating the new hash in the tree. Also set
+   `pluginRef` there to the full commit sha of a `bgos-claude-plugin` commit
+   whose `bin/hoai-browser-mcp.mjs` has these same bytes (CI downloads that file
+   and compares it; it is the one line that moves the comparison). Order
+   matters: land (or push) that plugin commit first and pin a sha reachable
+   from the plugin's `main`, because CI goes red until the commit exists and
+   can be fetched.
 
 4. **Run the guard with the cross-tree check armed**, on the machine that has
    both trees:
@@ -42,9 +48,14 @@ then bring the copy across with this list.
      npx vitest run test/browser-shim-vendor.spec.ts
    ```
 
-   Without that variable the cross-tree case is skipped: BGOS is a separate
-   private repo and is not on this repo's CI runner, so CI can only check the
-   copy against the pin, never against BGOS.
+   No second tree on your machine? `node scripts/fetch-plugin-shim.mjs`
+   downloads the plugin's copy at the pinned `pluginRef` and prints the path to
+   use as `HOAI_BROWSER_SHIM_SOURCE`. Without that variable the case skips on a
+   developer machine, with a loud warning. In CI (`CI=true`) it never skips:
+   `test.yml` and `publish.yml` run the same fetch script before `npm test`
+   (BGOS is private, but `bgos-claude-plugin` is public and ships the same
+   bytes, so no token or secret is needed), and a missing source fails the
+   suite.
 
 5. **Run the behavioural cover**, which catches a shim that no longer *works*
    rather than one that merely changed:
@@ -59,8 +70,9 @@ then bring the copy across with this list.
    reaches nobody.
 
 7. **The other plugin ships the same bytes.** Re-vendor
-   `bgos-claude-plugin`'s `bin/hoai-browser-mcp.mjs` in the same round, or say
-   plainly that it is behind.
+   `bgos-claude-plugin`'s `bin/hoai-browser-mcp.mjs` first (step 3 needs its
+   commit), since this repo's CI compares against that copy and stays red while
+   the plugin is behind.
 
 ## What none of this catches
 
