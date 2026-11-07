@@ -1,14 +1,14 @@
 {
   "file": "vendor/hoai-browser-mcp.mjs",
   "source": "BGOS: frontend/electron-app/agent-browser/shim/hoai-browser-mcp.mjs",
-  "sha256": "2fd50404ff330d65f5f38017ffb7dd0a5df2f1c560b694c1f329b1bbe88f71ef",
-  "vendoredAt": "2026-10-21",
-  "why": "Byte-identical copy of the shim released in bgos-claude-plugin 0.72.0 (tag v0.72.0, c141e120a) and BGOS PR #2827 (commit e72e86d8d). Replaces c8d9b7a9, which predated the plugin's last shim fix (a43172d: a desktop app the owner quit reads as not running). Managed profile routing stays opt-in through the paired launcher. The profile runtime and launcher integration remain in Codex PR #32.",
+  "sha256": "28b9fc680ddef334ff49958d605b27658e1ceb57a6f83d3bd20ffd7a2a4f02d6",
+  "vendoredAt": "2026-11-07",
+  "why": "Byte-identical copy of the shim in bgos-claude-plugin 0.86.12 (PR #320, commit 7a77e1f07ead70ab58e2c1a85865994af916f4f4) and BGOS PR feat/browser-shim-fill-only: the previous shim (2fd50404) plus the plugin's fill-only patch. browser_fill_form takes textbox fields only, browser_type loses submit and slowly, browser_press_key refuses Enter, Return and Space in any chord position, browser_press_sequentially is not listed, a composite submission or activation key is refused before it is forwarded, and the served instructions require a separate approved browser_click to submit. Managed profile routing stays opt-in through the paired launcher.",
   "howToUpdate": "docs/vendoring-the-hoai-browser-shim.md",
   "pluginRepository": "BrandGrowthOS/bgos-claude-plugin",
-  "pluginRef": "c141e120a1fd19a9fd0f82df3066886426c1ff79",
+  "pluginRef": "7a77e1f07ead70ab58e2c1a85865994af916f4f4",
   "pluginPath": "bin/hoai-browser-mcp.mjs",
   "crossTreeCheck": "HOAI_BROWSER_SHIM_SOURCE=<path to the BGOS shim> npx vitest run test/browser-shim-vendor.spec.ts",
   "alsoVendoredBy": "bgos-claude-plugin: bin/hoai-browser-mcp.mjs (same bytes, same pin)",
-  "sourceCommit": "e72e86d8d680fafd73ad69c6cc55ba5a030d6a21"
+  "sourceCommit": "d6b67ce9e105335859ee12281e5fb18ecad349a3"
 }
