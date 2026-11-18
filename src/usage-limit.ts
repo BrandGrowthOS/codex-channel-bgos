@@ -15,7 +15,7 @@
  *  1. The raw words never leave this daemon. A refused turn is recognised by
  *     the runtime's own `codexErrorInfo: "usageLimitExceeded"`, or by its
  *     words when an older runtime gives no code (`isUsageLimitError`), and
- *     its error becomes `usageLimitLine()`, one plain sentence with no link,
+ *     its error becomes `usageLimitLine(cause)`, one plain sentence with no link,
  *     plan or model name, on every path that shows an error.
  *  2. In a chat, the agent RESTS instead: the reset instant is read from the
  *     account (`account/rateLimits/read`, `usageLimitReset`) and reported on
@@ -35,10 +35,13 @@
  *     The planned resume is kept on disk, because an idle daemon may update
  *     and restart inside the window.
  *
- * One notice per window: a second refusal inside the same window (the same
- * reset instant) reports nothing new. A restart inside the window reports the
- * same rest again, which HOAI keys on the reset instant, so the owner sees
- * no second line.
+ * Every refusal reports the rest again (review F1): the backend keeps it in
+ * memory only, so a deploy or a new turn can end it inside the window. HOAI
+ * keys its one line on the reset instant, so the same window, from this
+ * process or after a restart, shows the owner nothing new. A refusal that
+ * never resets by itself (an account out of quota or credits, a spend cap)
+ * says so in its own line and rests nothing (review F2). A chat line is said
+ * once per chat and again after three hours (review F7).
  */
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
@@ -49,13 +52,38 @@ import { resetsIn } from "./generated-images.js";
 const LOG = "[codex-channel-bgos]";
 
 /**
- * THE WORDING, in one place so KC can change it. `when` is a relative phrase
- * from `resetsIn` ("in about 2 hours") or null when nobody knows.
+ * Why the runtime refused (review F2). Codex sends the one code,
+ * `usageLimitExceeded`, for five different things, and only the first of
+ * them ends by itself:
+ *  - `window`: a usage window is spent ("You've hit your usage limit ...").
+ *    It resets at a known time.
+ *  - `account`: an API key out of quota, a plan with no Codex in it, a
+ *    workspace out of credits, a spend cap its owner set. Nothing starts
+ *    again until somebody adds usage, so the owner is told so.
+ *  - `unclear`: the code with words this daemon has not met. Neither promise
+ *    is made.
+ */
+export type UsageLimitCause = "window" | "account" | "unclear";
+
+const WINDOW_TEXT = /\bhit your usage limit\b/i;
+const ACCOUNT_TEXT =
+  /\bquota exceeded\b|\bout of credits\b|\badd credits\b|\bspend cap\b|\bto use codex with your\b|\bnot included in your plan\b/i;
+const UNCLEAR_TEXT = /\busage limit (?:reached|exceeded)\b/i;
+
+/**
+ * THE WORDING, in one place so KC can change it. `resetsAt` (epoch seconds
+ * or milliseconds) adds a relative phrase from `resetsIn` ("in about 2
+ * hours") to the window line, never a clock time.
  */
 export function usageLimitLine(
+  cause: UsageLimitCause = "window",
   resetsAt?: number | null,
   now: number = Date.now(),
 ): string {
+  if (cause === "account")
+    return "Codex has no usage left on its account and will not start again by itself. Add usage or raise the limit in the Codex account, then send your message again.";
+  if (cause === "unclear")
+    return "Codex has no usage left right now. It may start again by itself when the limit resets, or its account may need more usage.";
   const when = resetsIn(resetsAt ?? null, now);
   return when
     ? `Codex has used up its usage for now and starts again by itself ${when}. You do not need to do anything.`
@@ -63,23 +91,32 @@ export function usageLimitLine(
 }
 
 /**
- * The runtime's refusal for a spent account. The code first; the words only
- * for a runtime that sent no code (or an error that arrived as plain text,
- * from a JSON-RPC failure or a thrown Error). A rate limit (too many requests
- * at once) is a different thing and is not this.
+ * The runtime's refusal for spent usage, and which kind, or null when the
+ * error is something else. The words first, because they say which kind;
+ * the code alone is `unclear`. A rate limit (too many requests at once) is
+ * a different thing and is not this.
  */
-export function isUsageLimitError(error: unknown): boolean {
+export function usageLimitCause(error: unknown): UsageLimitCause | null {
+  let text: unknown = error;
+  let coded = false;
   if (error && typeof error === "object" && !(error instanceof Error)) {
     const info = (error as RpcObject).codexErrorInfo;
-    if (info === "usageLimitExceeded") return true;
-    if (info && typeof info === "object" && "usageLimitExceeded" in info) return true;
-    return isUsageLimitText((error as RpcObject).message);
+    coded =
+      info === "usageLimitExceeded" ||
+      (!!info && typeof info === "object" && "usageLimitExceeded" in info);
+    text = (error as RpcObject).message;
+  } else if (error instanceof Error) {
+    text = error.message;
   }
-  return isUsageLimitText(error instanceof Error ? error.message : error);
+  const words = typeof text === "string" ? text : "";
+  if (WINDOW_TEXT.test(words)) return "window";
+  if (ACCOUNT_TEXT.test(words)) return "account";
+  if (coded || UNCLEAR_TEXT.test(words)) return "unclear";
+  return null;
 }
 
-function isUsageLimitText(text: unknown): boolean {
-  return typeof text === "string" && /\bhit your usage limit\b|\busage limit (?:reached|exceeded)\b/i.test(text);
+export function isUsageLimitError(error: unknown): boolean {
+  return usageLimitCause(error) !== null;
 }
 
 export type UsageLimitKind = "session" | "weekly" | "unknown";
@@ -92,12 +129,38 @@ export interface UsageReset {
   limitKind: UsageLimitKind;
 }
 
+/**
+ * The bucket a turn runs on (review F4): the read's default `rateLimits`,
+ * which is the Codex bucket, or `rateLimitsByLimitId.codex` when only the
+ * multi bucket view came. Another model's bucket says nothing about this
+ * turn, and its later reset would hold the agent days too long.
+ */
+function turnBucket(read: RpcObject | null | undefined): RpcObject | null {
+  if (!read || typeof read !== "object") return null;
+  if (read.rateLimits && typeof read.rateLimits === "object") return read.rateLimits as RpcObject;
+  const codex = read.rateLimitsByLimitId?.codex;
+  return codex && typeof codex === "object" ? (codex as RpcObject) : null;
+}
+
+/**
+ * Whether the account says the refusal is its own and not a window's: a
+ * workspace out of credits or at its owner's cap (review F2). A window with
+ * a reset may still be spent beside it, and it is not what holds the agent.
+ */
+export function accountHoldsIt(read: RpcObject | null | undefined): boolean {
+  const type = turnBucket(read)?.rateLimitReachedType;
+  return typeof type === "string" && type !== "rate_limit_reached";
+}
+
+/** A window the account reports at 99.5 percent or more is spent (F8). */
+const SPENT_PERCENT = 99.5;
+
 /** Up to a day reads as the session window; longer, the weekly one. */
 const SESSION_WINDOW_MAX_MINS = 24 * 60;
 
 /**
  * When the account can work again, from one `account/rateLimits/read`
- * answer. The windows that are spent (100 percent used) are the ones holding
+ * answer, read on the turn's own bucket. The windows that are spent are the ones holding
  * the agent back, and it can work again only once ALL of them have reset, so
  * the LATEST of their resets is the answer. Null when no spent window names a
  * reset still ahead: the account read failed, a window carries no time, or a
@@ -108,18 +171,14 @@ export function usageLimitReset(
   read: RpcObject | null | undefined,
   now: number,
 ): UsageReset | null {
-  if (!read || typeof read !== "object") return null;
-  const byId =
-    read.rateLimitsByLimitId && typeof read.rateLimitsByLimitId === "object"
-      ? (Object.values(read.rateLimitsByLimitId) as RpcObject[])
-      : [];
-  const buckets = byId.length ? byId : read.rateLimits ? [read.rateLimits as RpcObject] : [];
+  const bucket = turnBucket(read);
+  const buckets = bucket ? [bucket] : [];
   let latest: { ms: number; mins: number | null } | null = null;
   let unknownSpent = false;
   for (const bucket of buckets) {
     for (const key of ["primary", "secondary"]) {
       const window = bucket?.[key] as RpcObject | null | undefined;
-      if (!window || typeof window.usedPercent !== "number" || window.usedPercent < 100)
+      if (!window || typeof window.usedPercent !== "number" || window.usedPercent < SPENT_PERCENT)
         continue;
       const at = window.resetsAt;
       if (typeof at !== "number" || !Number.isFinite(at) || at <= 0) {
@@ -146,6 +205,16 @@ export function usageLimitReset(
  * at once, so it waits a minute past it.
  */
 export const USAGE_RESUME_MARGIN_MS = 60_000;
+
+/**
+ * The longest one timer waits (review F5). Node cannot hold a timeout past
+ * 2^31 ms (24.8 days) and fires it at once, so a monthly window spun; a timer
+ * that wakes early waits again, so a day at a time reaches any reset.
+ */
+const TIMER_MAX_MS = 24 * 60 * 60 * 1000;
+
+/** How long before the same chat is told a line again (review F7). */
+export const USAGE_TELL_AGAIN_MS = 3 * 60 * 60 * 1000;
 
 /** What a goal resume needs after a restart, when the goal lane holds nothing. */
 export interface UsageResumeContext {
@@ -249,10 +318,8 @@ export interface UsageLimitLaneDeps {
 export class UsageLimitLane {
   private readonly store: UsageResumeStore;
   private readonly now: () => number;
-  /** `<assistant>:<reset>` already reported, so a window rests once. */
-  private readonly rested = new Set<string>();
-  /** Assistants already told an unknown reset, until a turn works again. */
-  private readonly toldUnknown = new Set<number>();
+  /** `<assistant>:<chat>` and when its chat was last told a line (F7). */
+  private readonly told = new Map<string, number>();
   private readonly timers = new Map<number, ReturnType<typeof setTimeout>>();
 
   constructor(private readonly deps: UsageLimitLaneDeps) {
@@ -263,11 +330,18 @@ export class UsageLimitLane {
   /**
    * A turn in this chat was refused for usage. `say` posts one line in the
    * chat; it is used only when there is no rest to report.
+   *
+   * The rest is reported on EVERY refusal (review F1): it lives in the
+   * backend's memory, and a deploy or any new turn ends it while the window
+   * is still spent. HOAI keys its one line on the reset instant, so a repeat
+   * of the same window shows the owner nothing new, and a lost rest comes
+   * back with the next refusal instead of leaving it unanswered.
    */
   async noteLimited(
     assistantId: number,
     chatId: number,
     say: (text: string) => Promise<unknown>,
+    cause: UsageLimitCause = "window",
   ): Promise<void> {
     let read: RpcObject | null = null;
     try {
@@ -276,32 +350,46 @@ export class UsageLimitLane {
       this.log(`usage limit read failed chat=${chatId} err=${errorText(err)}`);
     }
     const now = this.now();
-    const reset = usageLimitReset(read, now);
-    if (!reset) {
-      if (this.toldUnknown.has(assistantId)) return;
-      this.toldUnknown.add(assistantId);
-      await say(usageLimitLine(null, now)).catch(() => {});
+    // Nothing resets by itself: say so, rest nothing, resume nothing.
+    if (cause === "account" || accountHoldsIt(read)) {
+      await this.tell(assistantId, chatId, say, usageLimitLine("account", null, now));
       return;
     }
-    this.toldUnknown.delete(assistantId);
+    const reset = usageLimitReset(read, now);
+    if (!reset) {
+      await this.tell(assistantId, chatId, say, usageLimitLine(cause, null, now));
+      return;
+    }
     this.planResume(chatId, reset.resetsAtMs);
-    const key = `${assistantId}:${reset.resetAt}`;
-    if (this.rested.has(key)) return;
     try {
       await this.deps.rest(assistantId, reset);
-      this.rested.add(key);
     } catch (err) {
       // No rest landed, so nothing in the app says it: the chat gets the
-      // line instead, once for this window.
+      // line instead.
       this.log(`usage rest failed assistant=${assistantId} err=${errorText(err)}`);
-      this.rested.add(key);
-      await say(usageLimitLine(reset.resetsAtMs, now)).catch(() => {});
+      await this.tell(assistantId, chatId, say, usageLimitLine("window", reset.resetsAtMs, now));
     }
   }
 
-  /** A turn of this assistant worked: an unknown reset may be told again. */
+  /** A turn of this assistant worked: its chats may be told again. */
   noteWorked(assistantId: number): void {
-    this.toldUnknown.delete(assistantId);
+    for (const key of this.told.keys())
+      if (key.startsWith(`${assistantId}:`)) this.told.delete(key);
+  }
+
+  /** One line per chat, and again after USAGE_TELL_AGAIN_MS (review F7). */
+  private async tell(
+    assistantId: number,
+    chatId: number,
+    say: (text: string) => Promise<unknown>,
+    text: string,
+  ): Promise<void> {
+    const key = `${assistantId}:${chatId}`;
+    const last = this.told.get(key);
+    const now = this.now();
+    if (last !== undefined && now - last < USAGE_TELL_AGAIN_MS) return;
+    this.told.set(key, now);
+    await say(text).catch(() => {});
   }
 
   /** Arm the resumes a restart left on disk. */
@@ -325,7 +413,10 @@ export class UsageLimitLane {
   private arm(record: UsageResumeRecord): void {
     const prior = this.timers.get(record.chatId);
     if (prior) clearTimeout(prior);
-    const wait = Math.max(0, record.resetsAtMs + USAGE_RESUME_MARGIN_MS - this.now());
+    const wait = Math.min(
+      TIMER_MAX_MS,
+      Math.max(0, record.resetsAtMs + USAGE_RESUME_MARGIN_MS - this.now()),
+    );
     const timer = setTimeout(() => void this.fire(record), wait);
     timer.unref?.();
     this.timers.set(record.chatId, timer);

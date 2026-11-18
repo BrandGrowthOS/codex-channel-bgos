@@ -55,7 +55,11 @@ import {
   planWaitEnforced,
 } from "./plan-mode.js";
 import { collectGeneratedImage } from "./generated-images.js";
-import { isUsageLimitError, usageLimitLine } from "./usage-limit.js";
+import {
+  usageLimitCause,
+  usageLimitLine,
+  type UsageLimitCause,
+} from "./usage-limit.js";
 import {
   SESSION_BRANCH_MAX,
   SESSION_PREVIEW_MAX,
@@ -310,7 +314,7 @@ export interface RunTurnResult {
    * runtime's own words, and the adapter rests the agent instead of posting
    * it. Absent means any other outcome.
    */
-  usageLimited?: true;
+  usageLimited?: UsageLimitCause;
   /**
    * The pictures this turn made, in the order their items completed, one per
    * item id. Filled by `result()`, the one constructor every outcome goes
@@ -657,7 +661,8 @@ export function friendlyCodexError(error: unknown): string {
   // Every other path that shows an error (a voice task, an agent to agent
   // answer, a refused turn/start) gets the plain line too, never the raw
   // words with their purchase links.
-  if (isUsageLimitError(raw)) return usageLimitLine();
+  const cause = usageLimitCause(raw);
+  if (cause) return usageLimitLine(cause);
   if (/requires a newer version|unsupported.*model/i.test(raw))
     return "The Codex runtime needs an update for your selected model. Repair this agent in HOAI, then retry your message.";
   if (/unauthori[sz]ed|authentication|401|sign.?in|refresh token/i.test(raw))
@@ -948,7 +953,7 @@ export class CodexHost {
       this.loaded.clear();
       for (const [threadId, turn] of this.active)
         turn.finish(
-          this.result(threadId, turn, false, friendlyCodexError(error)),
+          this.failedStart(threadId, turn, error),
         );
     });
     this.server.onRequest = async (method, params) => {
@@ -2233,9 +2238,20 @@ export class CodexHost {
           }
         })
         .catch((error) =>
-          turn.finish(this.result(id, turn, false, friendlyCodexError(error))),
+          turn.finish(this.failedStart(id, turn, error)),
         );
     });
+  }
+  /**
+   * A turn the runtime refused before it ran (`turn/start` threw). A usage
+   * refusal is marked here too, so the agent rests instead of showing a red
+   * card (review F8).
+   */
+  private failedStart(threadId: string, turn: ActiveTurn, error: unknown): RunTurnResult {
+    const outcome = this.result(threadId, turn, false, friendlyCodexError(error));
+    const cause = usageLimitCause(error);
+    if (cause) outcome.usageLimited = cause;
+    return outcome;
   }
   private result(
     threadId: string,
@@ -2297,14 +2313,14 @@ export class CodexHost {
       // shown as it came (links to buy something, a plan name, a clock time
       // in this machine's zone).
       const usageLimited =
-        status !== "completed" &&
-        status !== "interrupted" &&
-        isUsageLimitError(params.turn.error);
+        status !== "completed" && status !== "interrupted"
+          ? usageLimitCause(params.turn.error)
+          : null;
       const error =
         status === "completed"
           ? null
           : usageLimited
-            ? usageLimitLine()
+            ? usageLimitLine(usageLimited)
             : friendlyCodexError(
               params.turn.error?.message ??
                 (status === "interrupted"
@@ -2329,7 +2345,7 @@ export class CodexHost {
         // 401 turn carried all three fields.
         params.turn,
       );
-      if (usageLimited) outcome.usageLimited = true;
+      if (usageLimited) outcome.usageLimited = usageLimited;
       this.releaseThread(String(params.threadId ?? ""), turn);
       // One last look at every helper the collab items left running, and the
       // answer to whether any of them is still working. Only on a NORMAL

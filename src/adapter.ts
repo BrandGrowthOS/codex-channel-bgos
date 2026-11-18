@@ -1976,7 +1976,12 @@ export class CodexAdapter {
   ): Promise<void> {
     if (result.usageLimited) {
       await this.usageLimit
-        .noteLimited(assistantId, chatId, (text) => replyHandle.sendText(text))
+        .noteLimited(
+          assistantId,
+          chatId,
+          (text) => replyHandle.sendText(text),
+          result.usageLimited,
+        )
         .catch(() => {});
       return;
     }

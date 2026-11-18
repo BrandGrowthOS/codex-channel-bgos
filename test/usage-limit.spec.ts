@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CodexAdapter } from "../src/adapter.js";
+import { childRowsFromCollabItem } from "../src/activity-markers.js";
+import { BgosApi } from "../src/bgos-api.js";
 import { CodexHost, friendlyCodexError } from "../src/codex-host.js";
 import { GoalLane } from "../src/goal-lane.js";
 import {
@@ -131,7 +133,7 @@ function fixture(opts: { read?: () => Promise<unknown>; storePath?: string } = {
 function refusedResult() {
   return {
     error: usageLimitLine(),
-    usageLimited: true as const,
+    usageLimited: "window" as const,
     replyText: "",
     finalAgentMessageText: "",
     turnCompleted: false,
@@ -140,12 +142,15 @@ function refusedResult() {
 }
 
 
-async function publish(f: ReturnType<typeof fixture>) {
+async function publish(
+  f: ReturnType<typeof fixture>,
+  opts: { chatId?: number; result?: Record<string, unknown> } = {},
+) {
   await f.adapter.publishTurnResult({
     assistantId: ASSISTANT,
-    chatId: CHAT,
+    chatId: opts.chatId ?? CHAT,
     replyHandle: f.reply,
-    result: refusedResult(),
+    result: { ...refusedResult(), ...opts.result },
     sentViaTool: false,
   });
 }
@@ -191,13 +196,13 @@ describe("the host: a turn the usage limit refused", () => {
     const result = await refused();
     expect(result.error).toBe(PLAIN_NO_TIME);
     expectNoRawWords(result.error!);
-    expect(result.usageLimited).toBe(true);
+    expect(result.usageLimited).toBe("window");
   });
 
   it("knows the refusal by its words when an older runtime sends no code", async () => {
     const result = await refused({ codexErrorInfo: null });
     expect(result.error).toBe(PLAIN_NO_TIME);
-    expect(result.usageLimited).toBe(true);
+    expect(result.usageLimited).toBe("window");
   });
 
   it("end to end: the owner never sees the runtime's words in an error card", async () => {
@@ -269,13 +274,13 @@ describe("the rules", () => {
   });
 
   it("says the time relative to now, never a clock, a link or a plan", () => {
-    const line = usageLimitLine(NOW_S + 2 * HOUR + 60, NOW_MS);
+    const line = usageLimitLine("window", NOW_S + 2 * HOUR + 60, NOW_MS);
     expect(line).toBe(
       "Codex has used up its usage for now and starts again by itself in about 2 hours. You do not need to do anything.",
     );
     expectNoRawWords(line);
-    expect(usageLimitLine(null, NOW_MS)).toBe(PLAIN_NO_TIME);
-    expect(usageLimitLine(NOW_S - 10, NOW_MS)).toBe(PLAIN_NO_TIME);
+    expect(usageLimitLine("window", null, NOW_MS)).toBe(PLAIN_NO_TIME);
+    expect(usageLimitLine("window", NOW_S - 10, NOW_MS)).toBe(PLAIN_NO_TIME);
   });
 });
 
@@ -308,11 +313,17 @@ describe("the adapter: the agent rests, and its goal starts again after the rese
     );
   });
 
-  it("reports one rest for two refusals in one window", async () => {
+  it("reports the rest again on every refusal, the same window each time (review F1)", async () => {
+    // The rest lives in the backend's memory: a deploy, or any new turn,
+    // ends it while the window is still spent. A refusal answered with
+    // silence then left the owner's message with no word at all.
     const f = fixture();
     await publish(f);
     await publish(f);
-    expect(f.api.setResting).toHaveBeenCalledTimes(1);
+    await publish(f, { chatId: CHAT + 1 });
+    expect(f.api.setResting).toHaveBeenCalledTimes(3);
+    const bodies = f.api.setResting.mock.calls.map((c: unknown[]) => JSON.stringify(c));
+    expect(new Set(bodies).size).toBe(1);
     expect(f.reply.sendText).not.toHaveBeenCalled();
   });
 
@@ -354,7 +365,8 @@ describe("the adapter: the agent rests, and its goal starts again after the rese
     await publish(f);
     f.host.setGoal.mockClear();
     // Up to a second before the reset plus its margin: nothing.
-    await vi.advanceTimersByTimeAsync(2 * HOUR * 1000 + USAGE_RESUME_MARGIN_MS - 1000);
+    expect(USAGE_RESUME_MARGIN_MS).toBe(60_000);
+    await vi.advanceTimersByTimeAsync(2 * HOUR * 1000 + 59_000);
     expect(f.host.setGoal).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1000);
     expect(f.host.setGoal).toHaveBeenCalledTimes(1);
@@ -407,5 +419,192 @@ describe("the adapter: the agent rests, and its goal starts again after the rese
     expect(after.host.setGoal).toHaveBeenCalledWith(CHAT, null, { status: "active" });
     // Taken back into the lane before it started, so its turns are adopted.
     expect(after.adapter.goalLane.owns(CHAT)).toBe(true);
+  });
+});
+
+/**
+ * Review round (REVIEW-codexlimitline.md, F1 to F8). Each case below was red
+ * on 5557ced before its fix.
+ */
+const NEEDS_OWNER =
+  "Codex has no usage left on its account and will not start again by itself. Add usage or raise the limit in the Codex account, then send your message again.";
+const QUOTA_RAW = "Quota exceeded. Check your plan and billing details.";
+const NOT_INCLUDED_RAW =
+  "To use Codex with your ChatGPT plan, upgrade to Plus: https://chatgpt.com/explore/plus.";
+const CREDITS_RAW = "Your workspace is out of credits. Add credits to continue.";
+const SPEND_CAP_RAW = "You hit your spend cap set by the owner of your workspace.";
+
+describe("review F2: a refusal that never resets by itself", () => {
+  let home: string, server: Server, host: CodexHost;
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "hoai-usage-f2-"));
+    vi.stubEnv("CODEX_BGOS_HOME", home);
+    server = new Server();
+    host = new CodexHost({
+      auth: { ok: true, mode: "apikey", label: "test" } as any,
+      workdir: home,
+      server: server as any,
+    });
+  });
+  afterEach(() => {
+    host.close();
+    vi.unstubAllEnvs();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it.each([QUOTA_RAW, NOT_INCLUDED_RAW, CREDITS_RAW, SPEND_CAP_RAW])(
+    "says it needs the owner, never that it starts again by itself: %s",
+    async (message) => {
+      const task = host.runTurn(1, "go");
+      await vi.waitFor(() => expect(server.next).toBe(1));
+      server.emit("notification", "turn/completed", usageLimitTurn("thread-1", { message }));
+      const result = await task;
+      expect(result.error).toBe(NEEDS_OWNER);
+      expect(result.usageLimited).toBe("account");
+      expectNoRawWords(result.error!);
+      expect(friendlyCodexError(message)).toBe(NEEDS_OWNER);
+    },
+  );
+
+  it("marks a turn/start the runtime refused for usage, so the agent rests (F8)", async () => {
+    server.request.mockImplementation(async (method: string, p: any) => {
+      if (method === "thread/start") return { thread: { id: `thread-${++server.next}` } };
+      if (method === "turn/start") throw new Error(USAGE_LIMIT_RAW);
+      return {};
+    });
+    const result = await host.runTurn(1, "go");
+    expect(result.error).toBe(PLAIN_NO_TIME);
+    expect(result.usageLimited).toBe("window");
+  });
+});
+
+describe("review F3: a helper that hits the limit", () => {
+  it("shows the plain line on the helper's row, never the raw words", () => {
+    const rows = childRowsFromCollabItem(
+      {
+        id: "col1",
+        type: "collabAgentToolCall",
+        tool: "wait",
+        status: "completed",
+        senderThreadId: "parent",
+        receiverThreadIds: ["t9"],
+        agentsStates: { t9: { status: "errored", message: USAGE_LIMIT_RAW } },
+      },
+      "completed",
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.card.result).toBe(PLAIN_NO_TIME);
+    expectNoRawWords(JSON.stringify(rows));
+  });
+});
+
+describe("review F4 and F8: which window holds the agent back", () => {
+  it("reads the bucket the turn ran on, not another model's", () => {
+    const main = rateLimitsRead({ session: sessionWindow(100, NOW_S + 2 * HOUR) });
+    const other = rateLimitsRead({ weekly: weeklyWindow(100, NOW_S + 150 * HOUR) });
+    const read = {
+      ...main,
+      rateLimitsByLimitId: {
+        codex: (main as any).rateLimits,
+        codex_other: { ...(other as any).rateLimits, limitId: "codex_other" },
+      },
+    };
+    expect(usageLimitReset(read, NOW_MS)).toMatchObject({
+      resetsAtMs: (NOW_S + 2 * HOUR) * 1000,
+      limitKind: "session",
+    });
+  });
+
+  it("counts a window the account rounds to 99.6 percent as spent", () => {
+    expect(
+      usageLimitReset(rateLimitsRead({ session: sessionWindow(99.6, NOW_S + HOUR) }), NOW_MS),
+    ).toMatchObject({ limitKind: "session" });
+  });
+});
+
+describe("review: the adapter, round two", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ now: NOW_MS });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+  const MISSION = 77;
+  const OBJECTIVE = "All tests pass";
+
+  it("F2: an account refusal says the owner line, rests nothing and plans no resume", async () => {
+    const f = fixture();
+    await f.adapter.goalLane.armFromMission({ assistantId: ASSISTANT, chatId: CHAT, missionId: MISSION, objective: OBJECTIVE, turnCap: 20 });
+    f.runtime.goal.status = "usageLimited";
+    await publish(f, { result: { usageLimited: "account", error: NEEDS_OWNER } });
+    expect(f.reply.sendText).toHaveBeenCalledWith(NEEDS_OWNER);
+    expect(f.api.setResting).not.toHaveBeenCalled();
+    f.host.setGoal.mockClear();
+    await vi.advanceTimersByTimeAsync(48 * HOUR * 1000);
+    expect(f.host.setGoal).not.toHaveBeenCalled();
+  });
+
+  it("F2: a workspace with no credits left is the owner line, even with a spent window", async () => {
+    const read = rateLimitsRead({ session: sessionWindow(100, NOW_S + 2 * HOUR) }) as any;
+    read.rateLimits.rateLimitReachedType = "workspace_owner_credits_depleted";
+    const f = fixture({ read: async () => read });
+    await publish(f);
+    expect(f.reply.sendText).toHaveBeenCalledWith(NEEDS_OWNER);
+    expect(f.api.setResting).not.toHaveBeenCalled();
+  });
+
+  it("F5: a reset weeks away arms one timer, not a spin, and still resumes after it", async () => {
+    const at = NOW_S + 27 * 24 * HOUR;
+    const f = fixture({ read: async () => rateLimitsRead({ session: null, weekly: { usedPercent: 100, windowDurationMins: 43200, resetsAt: at } }) });
+    const warn = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
+    await f.adapter.goalLane.armFromMission({ assistantId: ASSISTANT, chatId: CHAT, missionId: MISSION, objective: OBJECTIVE, turnCap: 20 });
+    f.runtime.goal.status = "usageLimited";
+    await publish(f);
+    f.host.setGoal.mockClear();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(vi.getTimerCount()).toBeLessThanOrEqual(1);
+    expect(warn).not.toHaveBeenCalled();
+    // Not before the reset and its minute, however many day long waits it took.
+    await vi.advanceTimersByTimeAsync(27 * 24 * HOUR * 1000 + 58_000);
+    expect(f.host.setGoal).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(f.host.setGoal).toHaveBeenCalledTimes(1);
+    expect(f.host.setGoal).toHaveBeenCalledWith(CHAT, null, { status: "active" });
+    warn.mockRestore();
+  });
+
+  it("F7: an unknown reset is told in each chat, and again some hours later", async () => {
+    const f = fixture({ read: async () => { throw new Error("account read failed"); } });
+    await publish(f);
+    await publish(f, { chatId: CHAT + 1 });
+    await publish(f);
+    expect(f.reply.sendText).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(3 * HOUR * 1000);
+    await publish(f);
+    expect(f.reply.sendText).toHaveBeenCalledTimes(3);
+    expect(f.reply.sendText.mock.calls.every((c: unknown[]) => c[0] === PLAIN_NO_TIME)).toBe(true);
+  });
+
+  it("M20: a turn that said something and was then refused posts its words and rests, no error card", async () => {
+    const f = fixture();
+    await publish(f, { result: { replyText: "Half done.", finalAgentMessageText: "Half done." } });
+    expect(f.reply.sendText).toHaveBeenCalledWith("Half done.");
+    expect(f.adapter.outbound.sendAgentError).not.toHaveBeenCalled();
+    expect(f.api.setResting).toHaveBeenCalledTimes(1);
+    expectNoRawWords(everythingSaid(f));
+  });
+});
+
+describe("review M24 and M25: the rest on the wire", () => {
+  it("PATCHes the status path with resting, the reset and the kind, and leaves the status line alone", async () => {
+    const api = new BgosApi({ baseUrl: "https://example.test", pairingToken: "pair_" + "x".repeat(30) } as never);
+    const patch = vi.fn(async () => ({ data: {} }));
+    (api as any).http.patch = patch;
+    await api.setResting(10, { resetAt: "2026-11-18T15:00:00.000Z", limitKind: "weekly" });
+    expect(patch).toHaveBeenCalledWith("integrations/assistants/10/status", {
+      status: "resting",
+      resetAt: "2026-11-18T15:00:00.000Z",
+      limitKind: "weekly",
+    });
   });
 });
