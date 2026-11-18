@@ -835,6 +835,24 @@ export class BgosApi {
   }
 
   /**
+   * Rest this assistant on a spent usage window (served canon, Honest
+   * limits), on the same status path as `setStatus`. The app then says so in
+   * the owner's own language and local time, holds what they send, and ends
+   * the rest by itself at `resetAt` (src/usage-limit.ts). The status line is
+   * left as it is. Throws when it did not land.
+   */
+  async setResting(
+    assistantId: number,
+    body: { resetAt: string; limitKind: "session" | "weekly" | "unknown" },
+  ): Promise<void> {
+    await this.http.patch(`integrations/assistants/${assistantId}/status`, {
+      status: "resting",
+      resetAt: body.resetAt,
+      limitKind: body.limitKind,
+    });
+  }
+
+  /**
    * Swap the pairing token (and optionally base URL) in place after a token
    * rotation, so existing references (outbound, tool-progress) keep working
    * without a rebuild. Used by the adapter's re-pair recovery path.

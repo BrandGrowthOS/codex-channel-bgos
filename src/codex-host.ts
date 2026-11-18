@@ -55,6 +55,7 @@ import {
   planWaitEnforced,
 } from "./plan-mode.js";
 import { collectGeneratedImage } from "./generated-images.js";
+import { isUsageLimitError, usageLimitLine } from "./usage-limit.js";
 import {
   SESSION_BRANCH_MAX,
   SESSION_PREVIEW_MAX,
@@ -303,6 +304,13 @@ export interface RunTurnResult {
    * out of the way. Absent and false both mean no plan item was seen.
    */
   sawPlanProposal?: boolean;
+  /**
+   * The runtime refused the turn because the account's usage is spent
+   * (src/usage-limit.ts). `error` is then the plain line, never the
+   * runtime's own words, and the adapter rests the agent instead of posting
+   * it. Absent means any other outcome.
+   */
+  usageLimited?: true;
   /**
    * The pictures this turn made, in the order their items completed, one per
    * item id. Filled by `result()`, the one constructor every outcome goes
@@ -646,6 +654,10 @@ export function friendlyCodexError(error: unknown): string {
     error instanceof Error
       ? error.message
       : String(error ?? "Codex could not complete the request.");
+  // Every other path that shows an error (a voice task, an agent to agent
+  // answer, a refused turn/start) gets the plain line too, never the raw
+  // words with their purchase links.
+  if (isUsageLimitError(raw)) return usageLimitLine();
   if (/requires a newer version|unsupported.*model/i.test(raw))
     return "The Codex runtime needs an update for your selected model. Repair this agent in HOAI, then retry your message.";
   if (/unauthori[sz]ed|authentication|401|sign.?in|refresh token/i.test(raw))
@@ -2281,10 +2293,19 @@ export class CodexHost {
     if (method === "turn/completed") {
       this.browserContexts.get(String(params.threadId ?? ""))?.suspend();
       const status = params.turn.status;
+      // The runtime's own refusal for a spent account, by its code, never
+      // shown as it came (links to buy something, a plan name, a clock time
+      // in this machine's zone).
+      const usageLimited =
+        status !== "completed" &&
+        status !== "interrupted" &&
+        isUsageLimitError(params.turn.error);
       const error =
         status === "completed"
           ? null
-          : friendlyCodexError(
+          : usageLimited
+            ? usageLimitLine()
+            : friendlyCodexError(
               params.turn.error?.message ??
                 (status === "interrupted"
                   ? "Stopped by you."
@@ -2308,6 +2329,7 @@ export class CodexHost {
         // 401 turn carried all three fields.
         params.turn,
       );
+      if (usageLimited) outcome.usageLimited = true;
       this.releaseThread(String(params.threadId ?? ""), turn);
       // One last look at every helper the collab items left running, and the
       // answer to whether any of them is still working. Only on a NORMAL

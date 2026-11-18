@@ -146,6 +146,7 @@ import {
   type PairingRevokedPayload,
   type PluginConfig,
 } from "./types.js";
+import { UsageLimitLane, UsageResumeStore } from "./usage-limit.js";
 
 const LOG = "[codex-channel-bgos]";
 
@@ -284,6 +285,8 @@ export class CodexAdapter {
   readonly missionLane: MissionLane;
   /** The owner's Keep working, carried out as the runtime's own thread goal. */
   readonly goalLane: GoalLane;
+  /** A spent usage window: the rest, and the goal picked back up after it. */
+  usageLimit: UsageLimitLane;
   /** The owner's mission decisions, relayed to the model in band. */
   readonly missionControl: MissionControlLane;
   /** The live Steps list for the reply in flight. Never touches a mission. */
@@ -512,6 +515,7 @@ export class CodexAdapter {
         // before every frame driven control, so a control can never CREATE
         // the thread it was only supposed to act on.
         hasThread: (chatId) => this.host.hasThread(chatId),
+        getGoal: (chatId) => this.host.getGoal(chatId),
       },
       // Same reason the plan lane stamps: this lane completes missions
       // itself, and an unstamped completion comes back from a backend with no
@@ -529,6 +533,16 @@ export class CodexAdapter {
       ),
       log: (message) => console.warn(`${LOG} ${message}`),
     });
+    // The planned resumes on disk: an idle daemon may update and restart
+    // inside a usage window, and the goal must still start again after it.
+    this.usageLimit = this.makeUsageLimitLane(
+      new UsageResumeStore(
+        join(
+          process.env.CODEX_BGOS_HOME ?? join(homedir(), ".codex-bgos"),
+          "usage-resumes.json",
+        ),
+      ),
+    );
     this.missionControl = new MissionControlLane({
       host: { steer: (chatId, text) => this.host.steer(chatId, text) },
       missionLane: this.missionLane,
@@ -954,6 +968,9 @@ export class CodexAdapter {
 
     await this.ws.connect();
     this.heartbeat.start();
+    // A goal a usage limit stopped before the last restart starts again
+    // after its reset, from the resume planned on disk.
+    this.usageLimit?.restore();
 
     // Fetch the served capability canon once at connect and inject it into the
     // agent's AGENTS.md (best-effort; falls back to the bundled copy).
@@ -1063,6 +1080,7 @@ export class CodexAdapter {
     // runtime's own store and keeps going without this daemon, so the mission
     // behind it is still true when the daemon comes back.
     this.goalLane.dispose();
+    this.usageLimit?.dispose();
     await this.missionLane.dispose();
     await this.stepsLane?.dispose();
     try {
@@ -1821,11 +1839,11 @@ export class CodexAdapter {
       await this.postGeneratedImages(replyHandle, result.images, {}, ledger);
       if (!helpersStillRunning)
         await replyHandle.finalizeTurn().catch(() => {});
-      await this.outbound
-        .sendAgentError({ assistantId, chatId, reason: result.error })
-        .catch(() => {});
+      await this.reportTurnError(assistantId, chatId, replyHandle, result);
       return;
     }
+    // A turn that worked: a reset nobody knew may be told again next time.
+    if (!result.error) this.usageLimit?.noteWorked(assistantId);
 
     /**
      * THE FALLBACK, and it is deliberately narrow.
@@ -1939,9 +1957,53 @@ export class CodexAdapter {
 
     if (!helpersStillRunning) await replyHandle.finalizeTurn().catch(() => {});
     if (result.error)
-      await this.outbound
-        .sendAgentError({ assistantId, chatId, reason: result.error })
+      await this.reportTurnError(assistantId, chatId, replyHandle, result);
+  }
+
+  /**
+   * A failed turn's last word. A spent usage window is not an error to show:
+   * the agent rests on HOAI's own status path, which tells the owner in one
+   * plain line when it starts again, and a goal it stopped is picked back up
+   * after the reset (src/usage-limit.ts). AFTER the card closed, because a
+   * rest ends at the agent's next real activity. Anything else is the red
+   * error card, as before.
+   */
+  private async reportTurnError(
+    assistantId: number,
+    chatId: number,
+    replyHandle: { sendText(text: string): Promise<unknown> },
+    result: RunTurnResult,
+  ): Promise<void> {
+    if (result.usageLimited) {
+      await this.usageLimit
+        .noteLimited(assistantId, chatId, (text) => replyHandle.sendText(text))
         .catch(() => {});
+      return;
+    }
+    await this.outbound
+      .sendAgentError({ assistantId, chatId, reason: result.error ?? "" })
+      .catch(() => {});
+  }
+
+  /**
+   * The usage limit lane, wired to this daemon (a method, so a test harness
+   * built without the constructor wires the same lane).
+   */
+  makeUsageLimitLane(store: UsageResumeStore): UsageLimitLane {
+    return new UsageLimitLane({
+      readLimits: () => this.host.rateLimits(),
+      rest: (assistantId, reset) =>
+        this.api.setResting(assistantId, {
+          resetAt: reset.resetAt,
+          limitKind: reset.limitKind,
+        }),
+      goalFor: (chatId) => this.goalLane.usageResumeContext(chatId),
+      resume: async (record) => {
+        await this.goalLane.resumeAfterUsageLimit(record);
+      },
+      store,
+      log: (message) => console.warn(`${LOG} ${message}`),
+    });
   }
 
   /**
