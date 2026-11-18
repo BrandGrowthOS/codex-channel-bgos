@@ -56,6 +56,8 @@ const THREAD_STARTERS: Record<string, string> = {
   "goal-lane.ts#clearForChat": "/goal clear, recorded by codexDispatch first",
   "goal-lane.ts#clearGoal": "the frame door's clear, recorded by armGoal first",
   "goal-lane.ts#noteClosed": "calls the private clearGoal above",
+  "goal-lane.ts#resumeAfterUsageLimit":
+    "asks hasThread first and stops without one, so it is never a chat's first thread",
   "native-commands.ts#runGoal": "bare /goal read, recorded by codexDispatch first",
 };
 

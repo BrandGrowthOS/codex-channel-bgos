@@ -231,7 +231,7 @@ const DAY_MS = 24 * HOUR_MS;
  * minutes" or "about 48 hours". Null when there is no reset still ahead: none
  * given, not a finite positive number, or already past.
  */
-function resetsIn(resetsAt: number | null | undefined, now: number): string | null {
+export function resetsIn(resetsAt: number | null | undefined, now: number): string | null {
   if (typeof resetsAt !== "number" || !Number.isFinite(resetsAt) || resetsAt <= 0)
     return null;
   // Seconds on this protocol (the turn clock and /usage both are); a value

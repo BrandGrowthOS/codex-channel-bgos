@@ -43,6 +43,7 @@ import { buildComponentEventMessage } from "./hoai-shared/renderables.js";
 import { clipText } from "./clip-text.js";
 import { buildOutputTail } from "./output-tail.js";
 import { redactOutput } from "./redact-output.js";
+import { usageLimitCause, usageLimitLine } from "./usage-limit.js";
 import { isoInstant, lineCountForWire } from "./tool-progress.js";
 import type { ToolCard } from "./event-mapper.js";
 import type { OutboundMessagePayload } from "./types.js";
@@ -619,8 +620,13 @@ export function childRowsFromCollabItem(
 
     // ONE mask, over the whole message, before either cut. Both cuts read the
     // same masked string, so there is no second masking path to forget.
-    const masked =
-      typeof value.message === "string" && value.message.length > 0
+    // A helper refused for usage shares the parent's account: its row says
+    // the plain line, never the runtime's words and links (review F3).
+    const usage =
+      typeof value.message === "string" ? usageLimitCause(value.message) : null;
+    const masked = usage
+      ? usageLimitLine(usage)
+      : typeof value.message === "string" && value.message.length > 0
         ? redactOutput(value.message)
         : "";
     if (status === "running") {

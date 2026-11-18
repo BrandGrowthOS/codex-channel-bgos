@@ -41,6 +41,7 @@ import type {
 } from "./bgos-api.js";
 import type { ThreadGoal, ThreadGoalStatus } from "./goal-protocol.js";
 import { StopDiscards } from "./stop-discards.js";
+import type { UsageResumeContext, UsageResumeRecord } from "./usage-limit.js";
 
 const LOG = "[codex-channel-bgos]";
 
@@ -74,6 +75,12 @@ export interface GoalLaneHost {
    * was only meant to act on. Asked before every frame driven fallback.
    */
   hasThread(chatId: number): boolean;
+  /**
+   * The goal the runtime holds for the chat now. Read before the resume
+   * after a usage limit, which acts only on a goal still `usageLimited`.
+   * Absent, that resume never happens.
+   */
+  getGoal?(chatId: number): Promise<ThreadGoal | null>;
 }
 
 /**
@@ -504,6 +511,61 @@ export class GoalLane {
     // `/goal resume` is the one door that knows nothing but the chat.
     this.kept.delete(chatId);
     return this.deps.host.setGoal(chatId, null, { status: "active" });
+  }
+
+  /**
+   * What a resume after a usage limit needs to know of this chat's goal, or
+   * null when this lane runs none there (src/usage-limit.ts). Kept with the
+   * planned resume, so a restart inside the window can take the goal back.
+   */
+  usageResumeContext(chatId: number): UsageResumeContext | null {
+    const state = this.byChat.get(chatId);
+    if (!state) return null;
+    return {
+      assistantId: state.assistantId,
+      missionId: state.missionId,
+      objective: state.objective,
+      turnCap: state.turnCap,
+    };
+  }
+
+  /**
+   * The usage window reset: start the goal again, ONCE, and only when the
+   * runtime still holds it as stopped by the limit. A goal the owner paused,
+   * cleared, Stopped or replaced in the meantime is not this lane's to start,
+   * and neither is a goal on a chat whose mission is now another one. After
+   * a restart the lane holds nothing, so the goal is taken back from the
+   * planned resume, attached before anything starts it, exactly as a frame
+   * driven resume does. True when the runtime took the resume.
+   */
+  async resumeAfterUsageLimit(record: UsageResumeRecord): Promise<boolean> {
+    const { chatId } = record;
+    if (!this.deps.host.getGoal || !this.deps.host.hasThread(chatId)) return false;
+    if (this.kept.has(chatId)) return false;
+    const held = this.byChat.get(chatId);
+    if (held && held.missionId !== record.missionId) return false;
+    let goal: ThreadGoal | null;
+    try {
+      goal = await this.deps.host.getGoal(chatId);
+    } catch (err) {
+      this.log(`goal read failed chat=${chatId} err=${errorText(err)}`);
+      return false;
+    }
+    if (goal?.status !== "usageLimited") return false;
+    if (!held && clip(goal.objective, TEXT_MAX) !== record.objective) return false;
+    const state =
+      held ??
+      this.adoptFromFrame(record.missionId, {
+        assistantId: record.assistantId,
+        chatId,
+        objective: record.objective,
+        turnCap: record.turnCap,
+        keepWorking: true,
+      });
+    if (!state) return false;
+    if (await this.resumeGoal(state)) return true;
+    if (!held) this.detach(state);
+    return false;
   }
 
   /**
