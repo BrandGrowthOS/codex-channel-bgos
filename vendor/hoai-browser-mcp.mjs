@@ -151,6 +151,25 @@ const PROFILE_STATE_CODE = {
 // says, and gets offline mode and its words, exactly as before the app ever ran; an online or failed probe gets the
 // code's own sentence (nothing ran), which never says the app is not running (RC4).
 const WRITER_OFFLINE_CODE = "browser_profile_writer_offline";
+// The backend refuses a managed command BEFORE dispatch with a 409 carrying this code while an earlier command on the
+// same profile is still running (profile-runtime-rpc.service.ts capacity(): "No new command was sent"). Nothing ran, so
+// the shim waits and sends it again under the same JSON-RPC id (the backend's replay key), within a short budget, and
+// then says so in one sentence. It used to read as browser_profile_unconfirmed, "may have run" (Ava, 2026-11-23).
+const RUNTIME_BUSY_CODE = "browser_runtime_busy";
+const RUNTIME_BUSY_TEXT = "Your browser is busy finishing an earlier command, so nothing ran; try again in a moment.";
+// The backend keeps a command that timed out unconfirmed as running until its browser's signed late completion or a
+// confirmed stop, so a browser that died part way through one stays busy. From the second whole budget in a row spent
+// busy on one profile, "in a moment" may be untrue, so the agent hears that its owner may need to open the browser.
+const RUNTIME_BUSY_STILL_TEXT = "Your browser is still busy finishing an earlier command, so nothing ran; it may stay busy until your owner opens your browser in HOAI, so ask them to before you try again.";
+// A whole number of milliseconds; 0 turns the retry off (`Number(x) || default` read a 0 as the default).
+const BUSY_RETRY_MS = /^\d+$/.test(process.env.HOAI_BUSY_RETRY_MS ?? "") ? Number(process.env.HOAI_BUSY_RETRY_MS) : 15_000;
+const BUSY_FIRST_WAIT_MS = 250;
+const BUSY_LONGEST_WAIT_MS = 2_000;
+// The managed route's other codes. Only these two are sent for a command the backend ACCEPTED (it holds an entry for
+// it), so only they may say it may have run; any other code met before the call went pending says it is not known.
+const ACCEPTED_RUNTIME_CODES = new Set(["browser_runtime_command_uncertain", "browser_runtime_result_not_retained"]);
+const RUNTIME_CODE = /^[a-z][a-z0-9_]{0,80}$/;
+const RUNTIME_UNKNOWN_TEXT = "HOAI answered before confirming that your browser took this call, so it is not known whether it ran; check the page with browser_snapshot before you repeat it.";
 /** An answer that means the browser's host is not running (`offline` is set by the managed route only): offline mode. */
 const hostAbsent = answer => answer.code === "host_offline" || answer.offline === true;
 
@@ -448,9 +467,49 @@ async function discoverProfile(context) {
     return { authority };
   } catch (error) { return { failed: profileRefusal(error?.profileCode || "browser_profile_unavailable", context) }; }
 }
+/** The code a managed route answer carries that is not a browser_profile_* one (lowercase words only), else null. */
+function runtimeCodeOf(payload) {
+  const code = payload && (payload.code || payload.error);
+  return typeof code === "string" && RUNTIME_CODE.test(code) ? code : null;
+}
+// One command at a time per managed profile from this shim. The backend holds one running command per profile and
+// refuses a second as browser_runtime_busy, and this shim has senders outside its stdio queue (the background probe
+// connecting another chat, the initialized notification), so every managed send, its polls included, waits its turn.
+// A cancellation is not a send here (its own /cancel route) and never waits behind the call it stops.
+const profileTurns = new Map(); // profileId -> the turn the next sender waits for
+async function inProfileTurn(profileId, signal, work) {
+  const previous = profileTurns.get(profileId) || Promise.resolve();
+  let release;
+  const mine = new Promise(resolve => { release = resolve; });
+  const tail = previous.then(() => mine);
+  profileTurns.set(profileId, tail);
+  try {
+    await new Promise((resolve, reject) => {
+      const abort = () => reject(signal.reason);
+      if (signal?.aborted) return abort();
+      signal?.addEventListener("abort", abort, { once: true });
+      previous.then(() => { signal?.removeEventListener("abort", abort); resolve(); });
+    });
+    return await work();
+  } finally {
+    release();
+    // Forget the turn only once it has really ended: a waiter that gave up early (cancelled) still sits behind
+    // `previous`, and deleting the tail then would let the next sender go beside the command still open.
+    void tail.then(() => { if (profileTurns.get(profileId) === tail) profileTurns.delete(profileId); });
+  }
+}
+const busyStreaks = new Map(); // profileId -> whole busy budgets spent in a row, reset by any other answer
 async function profileSend(message, signal, context, authority, pending) {
+  const profileId = authority.profileId;
+  const result = await inProfileTurn(profileId, signal, () => profileSendInTurn(message, signal, context, authority, pending));
+  if (!result?.busy) { busyStreaks.delete(profileId); return result; }
+  const streak = (busyStreaks.get(profileId) || 0) + 1;
+  busyStreaks.set(profileId, streak);
+  return streak < 2 ? result : { ...result, text: `${RUNTIME_BUSY_CODE}: ${RUNTIME_BUSY_STILL_TEXT}` };
+}
+async function profileSendInTurn(message, signal, context, authority, pending) {
   const clientId = relayClientId(context), scope = { assistantId: authority.assistantId, clientId, authority, waitMs: 0 };
-  let sent = false, dispatched = false;
+  let sent = false, dispatched = false, busySince = null, busyWait = BUSY_FIRST_WAIT_MS;
   try {
     signal?.throwIfAborted();
     const started = Date.now(); sent = true;
@@ -465,6 +524,18 @@ async function profileSend(message, signal, context, authority, pending) {
       }
       // A refusal that names its browser_profile_* code says so; anything else was not confirmed, and may have run.
       const refused = profileCodeOf(response.payload);
+      const runtime = !refused && !dispatched ? runtimeCodeOf(response.payload) : null;
+      // Busy before dispatch: nothing ran, so wait and send the same message again, then say it plainly.
+      if (runtime === RUNTIME_BUSY_CODE && response.status === 409) {
+        busySince ??= Date.now();
+        const left = BUSY_RETRY_MS - (Date.now() - busySince);
+        if (left > 0) {
+          await sleep(Math.max(25, Math.min(busyWait, left)), signal);
+          busyWait = Math.min(BUSY_LONGEST_WAIT_MS, busyWait * 2);
+          response = await profileFetch("/call", { ...scope, message }, signal, context, 8 * 1024 * 1024 + 64 * 1024); continue;
+        }
+        return { ok: false, code: RUNTIME_BUSY_CODE, busy: true, sent: false, text: `${RUNTIME_BUSY_CODE}: ${RUNTIME_BUSY_TEXT}` };
+      }
       // Refused before dispatch (the backend's 409): nothing ran. With no desktop app online the agent hears it is not
       // running; otherwise the code's sentence. A call that already went pending was sent, so the same code on its poll
       // (or on any other status) is a call that was not confirmed and may have run.
@@ -475,6 +546,10 @@ async function profileSend(message, signal, context, authority, pending) {
           return { ok: false, code: WRITER_OFFLINE_CODE, profile: true, sent: false, text: profileLine(WRITER_OFFLINE_CODE, context) };
         }
       } else if (refused) return { ok: false, code: refused, profile: true, sent, text: profileLine(refused, context) };
+      // Any other code before the call went pending: the backend did not say it accepted the command, so it is not
+      // known whether it ran (never "may have run"). Only a code it sends for an accepted command, or a call that
+      // went pending, or an answer with no code at all, keeps the unconfirmed words below.
+      if (runtime && !ACCEPTED_RUNTIME_CODES.has(runtime)) return { ok: false, code: runtime, sent, status: response.status, payload: response.payload, text: `${runtime}: ${RUNTIME_UNKNOWN_TEXT}` };
       return { ok: false, code: "browser_profile_unconfirmed", sent, text: profileLine("browser_profile_unconfirmed", context) };
     }
   } catch {
@@ -687,7 +762,8 @@ async function ensureRelay(context) {
   const init = await relaySend({ jsonrpc: "2.0", id: `shim-init-${++initSeq}`, method: "initialize", params: initializeParams() }, undefined, context);
   // A profile refusal is said as itself (its code and sentence), never as a connection that could not be set up; a
   // host that is not running (the relay's host_offline, the backend's browser_profile_writer_offline) is offline mode.
-  if (!init.ok) return { relay: null, refusal: hostAbsent(init) ? null : init.profile ? { code: init.code, profile: true, text: init.text } : connectRefusal(init) };
+  // A browser still busy after its retries is said as itself too: the connection was fine, the browser was busy.
+  if (!init.ok) return { relay: null, refusal: hostAbsent(init) ? null : init.profile || init.busy ? { code: init.code, profile: true, text: init.text } : connectRefusal(init) };
   if (init.message && init.message.error) return { relay: null, refusal: connectRefusal({ code: "host_init_error", hostError: init.message.error.message || JSON.stringify(init.message.error) }) };
   if (!init.message) return { relay: null, refusal: null };
   await relaySend({ jsonrpc: "2.0", method: "notifications/initialized" }, undefined, context).catch(() => {});
