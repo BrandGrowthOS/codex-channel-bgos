@@ -136,6 +136,8 @@ export const CHANGES_RPC = "changes_rpc";
  * (SESSION_SETTINGS_RAIL_SHA256, test/session-rail-contract.spec.ts).
  */
 export const SESSION_MODEL_CONTROL = "session_model_control";
+import { MODEL_EFFORT_PICKER } from "./model-effort-picker.js";
+export { MODEL_EFFORT_PICKER };
 
 export const DECLARED_CAPABILITIES: readonly string[] = Object.freeze([
   MISSION_EVENTS,
@@ -146,4 +148,5 @@ export const DECLARED_CAPABILITIES: readonly string[] = Object.freeze([
   SESSIONS_LIBRARY,
   CHANGES_RPC,
   SESSION_MODEL_CONTROL,
+  MODEL_EFFORT_PICKER,
 ]);
